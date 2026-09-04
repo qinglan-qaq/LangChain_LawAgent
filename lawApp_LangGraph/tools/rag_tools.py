@@ -4,19 +4,21 @@ RAG Agent 工具集
 
     retrieve_legal_knowledge → evaluate_case_relevance → analyze_legal_issue
                 ↑                        ↑                       ↑
-            混合检索+重排序            三档质量评估           LLM 法律分析生成
+            检索(抽象后端)             三档质量评估           LLM 法律分析生成
 
-Agent 可据此自主决策:检索 → 评估 → (如需)联网搜索 → 生成分析
-
+v2 变更 (upgrade-v1):
+- 检索走 RAG_service.base.get_retriever() 抽象层(pgvector 默认 / Pinecone 可选)
+- 修正拼写: 检索评估字段名统一为 evaluate_retrieved_documents(旧拼写已全仓清除)
+- LLM 懒加载单例,模块导入不再要求 API Key
+- 移除全局 stream_queue;token 流由 graph.astream(stream_mode="messages") 驱动
 """
 
 import os
 import time
 from typing import Any, List, Optional
-from dotenv import load_dotenv
+
 from langchain_core.prompts import PromptTemplate
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 
 from lawApp_LangGraph.FastAPI.logging import (
     tool as tool_log,
@@ -30,73 +32,40 @@ from lawApp_LangGraph.state import (
     EvaluationResult,
     PromptsRecord,
 )
-from lawApp_LangGraph.FastAPI.utils import get_stream_queue
-from langsmith import traceable
 
+#  LLM 懒加载单例 — analyze_legal_issue 用
 
-load_dotenv()
-
-# 懒加载单例 只在 tool 第一次被 invoke 时才初始化
-
-_rag_service = None
 _llm = None
 
 
-# 私有方法新建一个单例 RAG_service 实例,供 retrieve_legal_knowledge 工具调用
-@traceable(run_type="llm", name="RAG_Service初始化")
-def _get_rag_service():
-    global _rag_service
-    if _rag_service is None:
-        from lawApp_LangGraph.RAG_service.RAG_program import RAG_service
-
-        sys_log.info(
-            "初始化 RAG_service (冷启动)",
-            detail="首次加载嵌入模型 + 重排序模型 + BM25 编码器",
-        )
-        _rag_service = RAG_service(
-            # TODO: 生产环境改为从安全配置中心获取,不要直接用环境变量 需要预先配置好
-            index_name=os.getenv("PINECONE_INDEX_NAME", "pinecone-test-lawapp"),
-            api_key=os.getenv("PINECONE_API_KEY"),  # type: ignore
-            cloud=os.getenv("PINECONE_CLOUD", "aws"),
-            region=os.getenv("PINECONE_REGION", "us-east-1"),
-        )
-
-        # RAG_service 初始化时会自动创建索引并加载模型,这里等待索引创建完成并返回状态
-        _rag_service.create_index(wait_for_completion=True)
-        _rag_service.get_index_stats()
-
-        sys_log.info("RAG_service 初始化完成", result="嵌入 + 重排序 + BM25 模型已就绪")
-
-    return _rag_service
-
-
-# 私有方法新建一个单例 LLM 实例,供 analyze_legal_issue 工具调用
-@traceable(run_type="llm", name="LLM_实例获取")
 def _get_llm():
+    """Flash LLM 懒加载（导入期不触碰 API Key）。"""
     global _llm
     if _llm is None:
+        from langchain_openai import ChatOpenAI
+
         _llm = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_FLASH_MODEL"),
+            model=os.getenv("DEEPSEEK_FLASH_MODEL", "deepseek-chat"),
             openai_api_key=os.getenv("DEEPSEEK_API_KEY"),
-            openai_api_base=os.getenv("DEEPSEEK_BASE_URL"),
+            openai_api_base=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
             temperature=0.4,
+            max_tokens=4096,
         )
     return _llm
 
 
-# Tool 1: 法律案例检索
+# Tool 1: 法律案例检索（走抽象检索层）
 
 
 @tool
-@traceable(run_type="tool", name="tool_法律知识检索")
-def retrieve_legal_knowledge(
+async def retrieve_legal_knowledge(
     query: str,
     top_k: int = 20,
     rerank_top_n: int = 5,
     alpha: float = 0.4,
     namespace: str = "law_cases",
 ) -> dict:
-    """从法律案例库中检索相关判例.使用混合检索(语义向量 + BM25 关键词匹配)与
+    """从法律案例库中检索相关判例.支持混合检索(语义向量 + BM25 关键词匹配)与
     CrossEncoder 重排序,返回最相关的案例内容及其相关性评分.
 
     适用场景:
@@ -106,13 +75,13 @@ def retrieve_legal_knowledge(
 
     参数:
     query: 法律问题查询语句,中文
-    top_k: 初始召回数量,最多不超过 20
-    rerank_top_n: 重排序后返回数量,最多不超过 10 (从 top_k 中选出最相关的 10 条)
-    alpha: 混合检索中的权重参数,默认 0.4 (越接近 1 越重视语义匹配,越接近 0 越重视关键词匹配)
+    top_k: 初始召回数量,最多不超过 50
+    rerank_top_n: 重排序后返回数量,最多不超过 10 (从 top_k 中选出最相关的条目)
+    alpha: 混合检索中的权重参数,默认 0.4 (越接近 1 越重视语义匹配;pgvector 后端忽略此项)
     namespace: 检索的命名空间,默认 "law_cases"
     返回:
     结构化 dict,含 status / rag_documents 字段,
-    每个文档为 RetrievedDocument 格式(case_number / case_cause / rerank_score / chunk_text 等)
+    每个文档为 RetrievedDocument 格式(case_number / case_cause / hybrid_score / chunk_text 等)
     """
     t0 = time.time()
     tool_log.info(
@@ -120,16 +89,30 @@ def retrieve_legal_knowledge(
         detail=f"query={query[:60]} | top_k={top_k} | alpha={alpha} | ns={namespace}",
     )
 
-    service = _get_rag_service()
-    matches = service.search_withDenseSparse(
-        query=query,
-        namespace=namespace,
-        top_k=top_k,
-        rerank_top_n=rerank_top_n,
-        alpha=alpha,
-    )
+    try:
+        from lawApp_LangGraph.RAG_service.base import get_retriever
 
-    if not matches:
+        retriever = get_retriever()
+        results = await retriever.search(
+            query=query,
+            top_k=top_k,
+            rerank_top_n=rerank_top_n,
+            alpha=alpha,
+            namespace=namespace,
+        )
+    except Exception as e:
+        # 检索后端不可用时优雅降级,不中断 Agent 流程
+        tool_log.error(
+            "← 工具异常: retrieve_legal_knowledge",
+            detail=f"检索后端不可用: {str(e)[:120]}",
+        )
+        return {
+            "status": "error",
+            "message": f"检索后端不可用: {str(e)[:200]}",
+            "rag_documents": [],
+        }
+
+    if not results:
         tool_log.info(
             "← 工具返回: retrieve_legal_knowledge",
             detail="未检索到相关案例",
@@ -137,30 +120,7 @@ def retrieve_legal_knowledge(
         )
         return {"status": "empty", "message": "未检索到相关案例", "rag_documents": []}
 
-    results = []
-    for match in matches:
-        meta = match.metadata or {}
-        results.append(
-            {
-                "rank": 0,  # 排序后重新分配
-                "id": match.id,
-                "hybrid_score": round(match.score, 4)
-                if hasattr(match, "score")
-                else 0.0,
-                "year": meta.get("year", ""),
-                "case_number": meta.get("case_number", ""),
-                "case_cause": meta.get("case_cause", ""),
-                "chunk_text": meta.get("chunk_text", "")[:500],
-            }
-        )
-
-    # 按 hybrid_score 降序排列,重新分配 rank
-    results.sort(key=lambda r: r["hybrid_score"], reverse=True)
-    for i, r in enumerate(results):
-        r["rank"] = i + 1
-
     top_score = results[0]["hybrid_score"] if results else 0
-
     tool_log.info(
         "← 工具返回: retrieve_legal_knowledge",
         detail=f"返回{len(results)}条案例 | top_score={top_score:.3f}",
@@ -176,7 +136,7 @@ INCORRECT_THRESHOLD = 0.2
 MIN_QUALITY_DOCS = 3
 
 
-def _to_simple_doc(doc) -> simpleRetrievedDocument:
+def _to_simple_doc(doc: Any) -> simpleRetrievedDocument:
     """将 dict 或对象转换为 simpleRetrievedDocument."""
     if isinstance(doc, simpleRetrievedDocument):
         return doc
@@ -198,12 +158,11 @@ def _to_simple_doc(doc) -> simpleRetrievedDocument:
 
 
 @tool
-@traceable(run_type="tool", name="tool_案例相关性评估")
 def evaluate_case_relevance(
     documents: list[dict[str, Any]],
 ) -> dict:
     """评估检索到的案例与用户问题的相关程度,按评分分为三档:
-    - correct (高质量):     rerank_score >= 0.5,可直接用于法律分析
+    - correct (高质量):     hybrid_score >= 0.5,可直接用于法律分析
     - ambiguous (中等质量): 0.2 <= score < 0.5,可参考但需谨慎
     - incorrect (低质量):   score < 0.2,不建议使用
 
@@ -212,7 +171,7 @@ def evaluate_case_relevance(
 
     参数:
     documents: retrieve_legal_knowledge 返回结果中的 rag_documents 列表
-    每项含 rerank_score / chunk_text / case_number 等字段
+    每项含 hybrid_score / chunk_text / case_number 等字段
 
     返回:
     结构化 dict,含 evaluation 键,其值为 correct/ambiguous/incorrect 分类及 quality_verdict
@@ -221,7 +180,7 @@ def evaluate_case_relevance(
     t0 = time.time()
     tool_log.info(
         "→ 调用工具: evaluate_case_relevance",
-        detail=f"input_docs={len(documents)}",
+        detail=f"input_docs={len(documents) if documents else 0}",
     )
 
     if not documents:
@@ -240,7 +199,7 @@ def evaluate_case_relevance(
     correct, ambiguous, incorrect = [], [], []
 
     for doc in documents:
-        score = doc.get("hybrid_score")
+        score = doc.get("hybrid_score", 0) if isinstance(doc, dict) else getattr(doc, "hybrid_score", 0)
         sdoc = _to_simple_doc(doc)
         if score >= CORRECT_THRESHOLD:
             correct.append(sdoc)
@@ -277,8 +236,7 @@ def evaluate_case_relevance(
 
 # Tool 3: 法律分析生成
 
-
-# 风骚律师中小金(KIM)的人设提示词
+# Kim Wexler 的人设提示词（默认角色；Saul Goodman 版本保留备用）
 LEGAL_ANALYSIS_PROMPT_Kim = PromptTemplate.from_template(
     """
     # Role: kim Wexler (《风骚律师》中的冷静理智的资深律师)
@@ -297,12 +255,12 @@ LEGAL_ANALYSIS_PROMPT_Kim = PromptTemplate.from_template(
     1. 明确法律定性:一句话点出用户问题涉及的核心法律关系(如合同纠纷、侵权、婚姻财产分割、劳动争议等).
     2. 引用法条依据:如参考材料中有「相关法条」,优先引用具体法条原文作为法律依据,明确告知出处(法规名称+条款号).
     3. 引用参考案例:从提供的参考资料中提取相关判例,用案例说明法院的裁判思路,不要照搬原文,概括要点,部分引用案例细节(如案情、争议焦点、法院观点)来佐证分析.
-    4. 引用参考案例:从提供的参考资料中提取相关判例,用案例说明法院的裁判思路,不要照搬原文,概括要点.
-    5. 指出关键风险:用户可能没意识到的法律陷阱、证据短板、时效问题.
-    6. 给出可行建议:具体的下一步行动,可以做什么、应该注意什么、可以找谁.
-    7. 区分确定与不确定:明确哪些结论有充分依据,哪些还需进一步核实.
-    8. 使用完整的Markdown格式输出,结构清晰,层次分明.
-    9. 最后给出具体参考了那些资料(如「参考了3条案例和2条法条」),并列出它们的编号或标题.
+    4. 指出关键风险:用户可能没意识到的法律陷阱、证据短板、时效问题.
+    5. 给出可行建议:具体的下一步行动,可以做什么、应该注意什么、可以找谁.
+    6. 区分确定与不确定:明确哪些结论有充分依据,哪些还需进一步核实.
+    7. 使用完整的Markdown格式输出,结构清晰,层次分明.
+    8. 最后给出具体参考了哪些资料(如「参考了3条案例和2条法条」),并列出它们的编号或标题.
+    9. 内容末尾附一行:「以上内容由 AI 生成,仅供参考,不构成正式法律意见。」
 
     ## 参考材料
     {context}
@@ -314,30 +272,29 @@ LEGAL_ANALYSIS_PROMPT_Kim = PromptTemplate.from_template(
     """
 )
 
-
-# Saul Goodman 的人设提示词
+# Saul Goodman 风格提示词（LEGAL_ANALYSIS_ROLE=saul 时启用）
 LEGAL_ANALYSIS_PROMPT_Saul = PromptTemplate.from_template(
     """
     # Role: Saul Goodman (《风骚律师》中的传奇边缘律师)
 
     ## Profile
-    你现在是 Saul Goodman(曾用名 Jimmy McGill).你不是那种坐在高档写字楼里按小时收费的刻板律师,你是专门帮陷入绝境的普通人解决“难言之隐”的街头斗士.你精通人性弱点,深谙法律漏洞.在婚姻家庭纠纷中,你信奉“进攻是最好的防守”,擅长用极其戏剧化、边缘化、甚至不择手段的奇招,在最短时间内逼对方崩溃并割肉和解.
+    你现在是 Saul Goodman(曾用名 Jimmy McGill).你不是那种坐在高档写字楼里按小时收费的刻板律师,你是专门帮陷入绝境的普通人解决"难言之隐"的街头斗士.你精通人性弱点,深谙法律漏洞.在婚姻家庭纠纷中,你信奉"进攻是最好的防守",擅长用极其戏剧化、边缘化、甚至不择手段的奇招,在最短时间内逼对方崩溃并割肉和解.
 
     ## Tone and Style
     1. 市侩、幽默且极具煽动性:说话语速快,充满美式俚语、夸张的比喻和黑色幽默.常挂着自信、甚至带点无赖的微笑.
-    2. 江湖气的安抚:喜欢用“Honey”、“My friend”、“Pal”等亲昵称呼.用一种“天塌下来有哥们替你顶着”的江湖气让当事人放松.
-    3. 金句频出:标志性口号“Better Call Saul!”(这句口号不能翻译成其他语言)挂在嘴边.说话极具感染力,擅长把严肃的法律条文解构成通俗的利益博弈.
+    2. 江湖气的安抚:喜欢用"Honey"、"My friend"、"Pal"等亲昵称呼.用一种"天塌下来有哥们替你顶着"的江湖气让当事人放松.
+    3. 金句频出:标志性口号"Better Call Saul!"(这句口号不能翻译成其他语言)挂在嘴边.说话极具感染力,擅长把严肃的法律条文解构成通俗的利益博弈.
 
     ## Domain Expertise & Logic (Saul的婚姻案件办事逻辑)
     1. 声誉勒索(抓住软肋):对方有钱、有地位、有公司？太好了,这说明他输不起.针对他的软肋(如税务问题、商业机密、个人名誉)做文章,逼他主动求和.
-    2. “演一出好戏”(边缘手段):规规矩矩查财产太慢.指导User如何去“设局”——比如雇人去勾引对方拍下更劲爆的证据,或者利用媒体、大字报、公司闹事等手段,让对方在法庭之外先社会性死亡.
-    3. 灰色信息搜集:暗示或明示User去用一些非常规手段(如翻看垃圾桶、偷偷安装定位、找黑客查云端账号),只要能拿到线索,Saul就有办法把它包装成“合法呈堂证供”.
+    2. "演一出好戏"(边缘手段):规规矩矩查财产太慢.指导User如何去"设局"——比如雇人去勾引对方拍下更劲爆的证据,或者利用媒体、大字报、公司闹事等手段,让对方在法庭之外先社会性死亡.
+    3. 灰色信息搜集:暗示或明示User去用一些非常规手段(如翻看垃圾桶、偷偷安装定位、找黑客查云端账号),只要能拿到线索,Saul就有办法把它包装成"合法呈堂证供".
     4. 实用主义分账:极其看重实际到手的利益.只要能多拿钱,面子不重要,程序正义也不重要.
 
     ## Workflow (咨询与审理分析步骤)
     1. 痛点放大:听完User的哭诉后,先用夸张的语气痛骂对方,瞬间和User结成情感同盟.
-    2. 寻找“阿喀琉斯之踵”:略过死板的法律条文,直接问对方最怕失去什么(钱、公司、名声、还是情妇).
-    3. 抛出“惊天计划”(The Scheme):拿出一个听起来疯狂、游走在法律边缘、但绝对有效的反击方案.
+    2. 寻找"阿喀琉斯之踵":略过死板的法律条文,直接问对方最怕失去什么(钱、公司、名声、还是情妇).
+    3. 抛出"惊天计划"(The Scheme):拿出一个听起来疯狂、游走在法律边缘、但绝对有效的反击方案.
     4. 洗脑式结语:用充满诱惑力和绝对自信的话,让User觉得跟着你就能稳操胜券.
 
     ## 参考材料
@@ -347,18 +304,26 @@ LEGAL_ANALYSIS_PROMPT_Saul = PromptTemplate.from_template(
     {query}
 
     ## 你的回答
-"""
+    """
 )
+
+
+def _get_analysis_prompt() -> PromptTemplate:
+    """根据 LEGAL_ANALYSIS_ROLE 环境变量选择分析角色 (kim 默认 / saul)."""
+    import os as _os
+
+    role = _os.getenv("LEGAL_ANALYSIS_ROLE", "kim").lower().strip()
+    return LEGAL_ANALYSIS_PROMPT_Saul if role == "saul" else LEGAL_ANALYSIS_PROMPT_Kim
 
 
 def _resolve_prompts_record(prompts_record: Any) -> PromptsRecord:
     """将 dict 或 PromptsRecord 统一转为 PromptsRecord,容错空值."""
     if prompts_record is None:
         return PromptsRecord()
-    if isinstance(prompts_record, dict):
-        return PromptsRecord(**prompts_record)
     if isinstance(prompts_record, PromptsRecord):
         return prompts_record
+    if isinstance(prompts_record, dict):
+        return PromptsRecord(**prompts_record)
     return PromptsRecord()
 
 
@@ -371,20 +336,19 @@ def _build_analysis_context(pr: PromptsRecord) -> str:
             f"法条: {law.law_title}章节{law.chapter} 第{law.article_number}条\n{law.content}"
         )
 
-    for doc in pr.evluate_retrieved_documents:
+    for doc in pr.evaluate_retrieved_documents:
         parts.append(
             f"[参考案例 | 案号:{doc.case_number} | {doc.year}年]\n案件内容:{doc.chunk_text}"
         )
 
     for item in pr.web_search_results:
-        snippet = item.snippet or ""
+        snippet = item.snippet if isinstance(item, WebSearchResult) else item.get("snippet", "")
         parts.append(f"[外部网络资料]\n{snippet}")
 
     return "\n\n---\n\n".join(parts) if parts else "暂无相关资料"
 
 
 @tool
-@traceable(run_type="tool", name="tool_法律问题分析")
 async def analyze_legal_issue(
     query: str,
     prompts_record: Any = None,
@@ -393,21 +357,20 @@ async def analyze_legal_issue(
     """基于法律案例、法律条文和网络资料,生成专业的法律分析和建议.
 
     优先从 prompts_record (PromptsRecord) 中提取已累积的 web_search_results /
-    evluate_retrieved_documents / laws_results 来构建分析上下文.
+    evaluate_retrieved_documents / laws_results 来构建分析上下文.
 
     参数:
     query: 用户的法律问题
-    prompts_record: Executor 累积的 PromptsRecord,优先使用
+    prompts_record: Executor 累积的 PromptsRecord,由执行器自动注入,LLM 无需构造
 
     返回:
     结构化 dict,含 final_answer / final_prompt / prompts_record
     """
     t0 = time.time()
 
-    # ── 解析 PromptsRecord ──
     pr = _resolve_prompts_record(prompts_record)
 
-    case_n = len(pr.evluate_retrieved_documents)
+    case_n = len(pr.evaluate_retrieved_documents)
     web_n = len(pr.web_search_results)
     law_n = len(pr.laws_results)
 
@@ -416,48 +379,29 @@ async def analyze_legal_issue(
         detail=f"query={query[:60]} | cases={case_n}条 | web={web_n}条 | law={law_n}条",
     )
 
-    # 获取PromptsRecord中的信息来构建分析上下文
     context = _build_analysis_context(pr)
-
     rag_log.debug("开始 LLM 法律分析生成", detail=f"context_len={len(context)}")
 
     llm = _get_llm()
-    final_prompt = LEGAL_ANALYSIS_PROMPT_Kim.format(context=context, query=query)
+    final_prompt = _get_analysis_prompt().format(context=context, query=query)
 
-    # 流式生成:逐 token 推送到 SSE 队列
-    queue = get_stream_queue()
-    if queue:
-        await queue.put(("status", "正在生成法律分析..."))
-
+    # 流式生成:token 经 langgraph astream(stream_mode="messages") 回调透出
     answer_parts: list[str] = []
-    
-    # 流式调用循环组装答案,并实时推送 token 到前端显示打字机效果
     async for chunk in llm.astream(final_prompt):
-        
-        # 类型判断容错:有些 LLM 实现可能直接返回字符串而不是带 content 属性的对象
         raw = chunk.content if hasattr(chunk, "content") else str(chunk)
-        
         if isinstance(raw, list):
             raw = "".join(
                 item.get("text", "") if isinstance(item, dict) else str(item)
                 for item in raw
             )
-
-        content = str(raw)
-        
-        answer_parts.append(content)
-        
-        if queue and content.strip():
-            await queue.put(("token", content))
+        answer_parts.append(str(raw))
 
     answer = "".join(answer_parts)
-
-    elapsed = time.time() - t0
 
     tool_log.info(
         "← 工具返回: analyze_legal_issue",
         detail=f"laws={law_n} | cases={case_n} | web={web_n}",
-        result=f"answer_len={len(answer)} | elapsed={elapsed:.2f}s",
+        result=f"answer_len={len(answer)} | elapsed={time.time() - t0:.2f}s",
     )
 
     return {

@@ -1,7 +1,7 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "my_agent": "./my_agent.py:graph"
+    "law_agent": "./lawApp_LangGraph/LangGraph_lawApp.py:get_graph"
   },
   "env": ".env"
 }

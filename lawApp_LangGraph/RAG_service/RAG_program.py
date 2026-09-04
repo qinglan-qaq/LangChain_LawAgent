@@ -83,9 +83,11 @@ class RAG_service:
         # 重排序模型
         self.reranker = CrossEncoder("BAAI/bge-reranker-large", max_length=512)
 
-        # 稀疏向量
-        bm25_path = os.getenv("BM25_PATH")
-        
+        # 稀疏向量（BM25 参数默认随仓库分发，可经 BM25_PATH 覆盖）
+        bm25_path = os.getenv("BM25_PATH") or os.path.join(
+            os.path.dirname(__file__), "bm25_law_params.json"
+        )
+
         self.bm25 = BM25Encoder().load(bm25_path)
 
         # 密集向量

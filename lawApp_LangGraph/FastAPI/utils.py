@@ -1,32 +1,13 @@
 from __future__ import annotations
 
-import asyncio
-import contextvars
 import json
 import uuid
-from typing import Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from lawApp_LangGraph.LangGraph_lawApp import graph
+from typing import Optional
 
 from lawApp_LangGraph.FastAPI.model import QueryResponse, SourceInfo
 
-# ── Stream Queue (context var 穿透 LangGraph 节点 & 工具) ──
 
-_stream_queue: contextvars.ContextVar[asyncio.Queue | None] = contextvars.ContextVar(
-    "stream_queue", default=None
-)
-
-
-def set_stream_queue(q: asyncio.Queue | None) -> None:
-    _stream_queue.set(q)
-
-
-def get_stream_queue() -> asyncio.Queue | None:
-    return _stream_queue.get(None)
-
-
-# ── 工具函数 ──
+#  工具函数
 
 
 def ensure_session(session_id: Optional[str]) -> str:
@@ -35,11 +16,28 @@ def ensure_session(session_id: Optional[str]) -> str:
     return session_id
 
 
-async def invoke_graph(query: str, session_id: str) -> dict:
-    from lawApp_LangGraph.LangGraph_lawApp import graph
+def get_graph():
+    """获取装配好的图实例(优先 runtime 注入的持久化版)."""
+    import lawApp_LangGraph.LangGraph_lawApp as app
 
-    config = {"configurable": {"thread_id": session_id}}
-    return await graph.ainvoke({"query": query}, config=config)
+    return app.get_graph()
+
+
+def graph_config(session_id: str) -> dict:
+    return {"configurable": {"thread_id": session_id}}
+
+
+def extract_interrupt(snapshot) -> Optional[dict]:
+    """从图的 interrupt 状态快照中提取 HITL 请求(无则 None)。
+
+    snapshot: graph.aget_state(config) 或 astream 事件里的 state。
+    """
+    interrupts = getattr(snapshot, "interrupts", None) or []
+    for intr in interrupts:
+        value = getattr(intr, "value", None)
+        if isinstance(value, dict) and value.get("type"):
+            return value
+    return None
 
 
 def _field(item, key: str, default: str = ""):
@@ -53,50 +51,40 @@ def build_sources(state: dict) -> list[SourceInfo]:
     seen: set[str] = set()
 
     for doc in state.get("rag_documents", []) or []:
-        if isinstance(doc, dict):
-            cn, yr, txt = (
-                doc.get("case_number", ""),
-                doc.get("year", ""),
-                doc.get("chunk_text", ""),
-            )
-        else:
-            cn, yr, txt = (
-                getattr(doc, "case_number", ""),
-                getattr(doc, "year", ""),
-                getattr(doc, "chunk_text", ""),
-            )
+        cn = _field(doc, "case_number", "")
+        yr = _field(doc, "year", "")
+        txt = _field(doc, "chunk_text", "")
         key = f"{cn}-{yr}"
         if key not in seen and cn:
             seen.add(key)
             sources.append(SourceInfo(case_number=cn, year=yr, snippet=txt[:200]))
 
     for item in state.get("web_search_results", []) or []:
-        if isinstance(item, dict):
-            title, link, snippet = (
-                item.get("title", ""),
-                item.get("link", ""),
-                item.get("snippet", ""),
+        sources.append(
+            SourceInfo(
+                title=_field(item, "title", ""),
+                link=_field(item, "link", ""),
+                snippet=_field(item, "snippet", "")[:200],
             )
-        else:
-            title = getattr(item, "title", "")
-            link = getattr(item, "link", "")
-            snippet = getattr(item, "snippet", "")
-        sources.append(SourceInfo(title=title, link=link, snippet=snippet))
+        )
     return sources
 
 
 def build_tool_calls(state: dict) -> list[str]:
-    calls = state.get("tool_calls", []) or []
-    result: list[str] = []
-    for tc in calls:
-        if isinstance(tc, dict):
-            result.append(tc.get("tool_name", ""))
-        else:
-            result.append(getattr(tc, "tool_name", ""))
-    return [r for r in result if r]
+    return [
+        tc_name
+        for tc in state.get("tool_calls", []) or []
+        if (tc_name := _field(tc, "tool_name", ""))
+    ]
 
 
 def build_response(state: dict, session_id: str) -> QueryResponse:
+    pr = state.get("prompts_record")
+    prompts_record = (
+        pr.model_dump(mode="json")
+        if hasattr(pr, "model_dump")
+        else (pr if isinstance(pr, dict) else {})
+    )
     return QueryResponse(
         query=state.get("query", ""),
         session_id=session_id,
@@ -105,10 +93,11 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
         sources=build_sources(state),
         tool_calls=build_tool_calls(state),
         reasoning=state.get("reasoning", []) or [],
+        prompts_record=prompts_record,
     )
 
 
-def sse_event(event: str, data: str = "") -> str:
-    return (
-        f"data: {json.dumps({'event': event, 'data': data}, ensure_ascii=False)}\n\n"
-    )
+def sse_event(event: str, data) -> str:
+    if not isinstance(data, str):
+        data = json.dumps(data, ensure_ascii=False)
+    return f"data: {json.dumps({'event': event, 'data': data}, ensure_ascii=False)}\n\n"
