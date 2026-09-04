@@ -135,9 +135,10 @@ def test_state_reducers():
 
 
 def test_tools_registry():
-    from lawApp_LangGraph.tools import ALL_TOOLS
+    from lawApp_LangGraph.tools import ALL_TOOLS, MCP_TOOLS
 
-    names = {t.name for t in ALL_TOOLS}
+    MCP_TOOLS.clear()  # MCP 测试可能注册过外部工具,隔离验证本地注册表
+    names = {t.name for t in ALL_TOOLS()}
     assert {
         "search_memory", "save_to_memory", "fetch_laws", "get_google_search",
         "markdown_to_pdf", "retrieve_legal_knowledge",

@@ -34,9 +34,17 @@ async def setup_runtime() -> None:
     global graph, checkpoint_backend
 
     import lawApp_LangGraph.LangGraph_lawApp as app
+    from lawApp_LangGraph.mcp_client import get_mcp_tools
+    from lawApp_LangGraph.tools import register_mcp_tools
 
     if graph is not None:
         return  # 幂等
+
+    # ── MCP 工具挂载(A2): server 不在线时返回空列表, 图照常装配 ──
+    mcp_tools = await get_mcp_tools()
+    added = register_mcp_tools(mcp_tools)
+    if added:
+        logger.info("MCP 工具已注入 ALL_TOOLS | %s", [t.name for t in added])
 
     backend = os.getenv("CHECKPOINT_BACKEND", "auto").lower()
     checkpointer = None
@@ -122,7 +130,7 @@ async def _setup_postgres():
 
 
 async def teardown_runtime() -> None:
-    """关闭 Postgres 连接池(InMemory 后端无需清理)。"""
+    """关闭 Postgres 连接池与 MCP 会话(InMemory 后端无需清理)。"""
     global _pg_resources, graph
     for pool in _pg_resources:
         try:
@@ -130,4 +138,8 @@ async def teardown_runtime() -> None:
         except Exception as e:  # pragma: no cover
             logger.warning("连接池关闭异常: %s", e)
     _pg_resources = []
+
+    from lawApp_LangGraph.mcp_client import close_mcp
+
+    await close_mcp()
     logger.info("运行时已清理 | backend=%s", checkpoint_backend)

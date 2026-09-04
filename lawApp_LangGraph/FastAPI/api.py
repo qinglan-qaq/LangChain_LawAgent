@@ -366,7 +366,7 @@ async def list_tools():
     """返回 Agent 可用的全部工具列表及描述."""
     from lawApp_LangGraph.tools import ALL_TOOLS
 
-    tools = [ToolInfo(name=t.name, description=t.description or "") for t in ALL_TOOLS]
+    tools = [ToolInfo(name=t.name, description=t.description or "") for t in ALL_TOOLS()]
     system.info("工具列表查询", result=f"共 {len(tools)} 个工具可用")
     return tools
 
@@ -377,7 +377,7 @@ async def home():
 
     return {
         "service": "Legal Consultation API",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "checkpoint_backend": runtime.checkpoint_backend,
         "endpoints": {
             "ask": "POST /ask",

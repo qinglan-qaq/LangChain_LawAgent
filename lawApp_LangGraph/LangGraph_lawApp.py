@@ -95,7 +95,7 @@ def get_executor_llm():
     return _llm_executor
 
 
-TOOL_BY_NAME: Dict[str, Any] = {t.name: t for t in ALL_TOOLS}
+TOOL_BY_NAME: Dict[str, Any] = {t.name: t for t in ALL_TOOLS()}
 
 # 工具返回 dict 中与 AgentState 同名的 key 将被 merge 节点合并
 _STATE_KEYS = {
@@ -305,7 +305,7 @@ PLANNER_SYSTEM = """你是法律AI系统的任务规划师.分析用户问题,�
 
 
 def _tools_desc() -> str:
-    return "\n".join(f"- {t.name}: {(t.description or '')[:120]}" for t in ALL_TOOLS)
+    return "\n".join(f"- {t.name}: {(t.description or '')[:120]}" for t in ALL_TOOLS())
 
 
 def _normalize_plan(schema) -> list[PlanStep]:
@@ -540,9 +540,11 @@ async def executor_node(state: AgentState) -> dict:
     return {"plan": doing, "messages": [ai_msg]}
 
 
-# Node 3: Tools — prebuilt ToolNode 执行工具
+# Node 3: Tools — prebuilt ToolNode 执行工具(构建时读取此刻 ALL_TOOLS() 快照,含 MCP 工具)
 
-tools_node = ToolNode(ALL_TOOLS, handle_tool_errors=True)
+
+def _build_tools_node():
+    return ToolNode(ALL_TOOLS(), handle_tool_errors=True)
 
 
 # Node 4: Merge — 合并工具结果到 AgentState,推进步骤索引
@@ -962,7 +964,7 @@ def build_graph(checkpointer=None, store=None):
     builder.add_node("clarify", clarify_node)
     builder.add_node("planner", planner_node)
     builder.add_node("executor", executor_node)
-    builder.add_node("tools", tools_node)
+    builder.add_node("tools", _build_tools_node())
     builder.add_node("merge", merge_node)
     builder.add_node("replan_check", replan_check_node)
     builder.add_node("replanner", replanner_node)

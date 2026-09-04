@@ -25,7 +25,9 @@ pdf_outputs/
 # 工具链本地配置
 .claude/
 .vscode/
-.cursor/
+# .cursor/mcp.json 是对外交付的 MCP server 挂载配置,保留入库;忽略其余 cursor 本地文件
+.cursor/*
+!.cursor/mcp.json
 
 # PyCharm 相关
 .idea/

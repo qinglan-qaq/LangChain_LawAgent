@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "law-search": {
+      "url": "http://127.0.0.1:9381/mcp"
+    }
+  }
+}

@@ -11,6 +11,12 @@ langchain-text-splitters>=1.0,<2
 langgraph>=1.2,<2
 langgraph-checkpoint-postgres>=3.1,<4
 
+# ── MCP 双向 (A2) ──
+# 注意: 不用 fastmcp 包(其 2.x/4.x 与本栈的 langchain-mcp-adapters 存在 mcp 主次版本冲突),
+# server 端用 mcp 内置的 FastMCP, agent 端用 adapters 的 MultiServerMCPClient
+mcp>=1.24,<2
+langchain-mcp-adapters>=0.3,<0.4
+
 # ── LLM 追踪 ──
 langsmith>=0.2
 
