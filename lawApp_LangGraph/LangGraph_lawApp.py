@@ -34,7 +34,7 @@ import json
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -45,12 +45,16 @@ from langgraph.types import interrupt
 
 from lawApp_LangGraph.FastAPI.logging import debug
 from lawApp_LangGraph.state import (
+    MAX_CLARIFY_ROUNDS,
     RESET,
     AgentState,
+    ClarifyExchange,
+    ElementQuestion,
     EvaluationResult,
     PlanStep,
     PromptsRecord,
     ToolCallRecord,
+    default_case_elements,
 )
 from lawApp_LangGraph.tools import ALL_TOOLS
 
@@ -60,12 +64,14 @@ load_dotenv()
 # 文件内同名旧常量已改名 _LEGACY_*(文本原样保留,Task 6 重构时删除),
 # 否则下方旧赋值会遮蔽本 import,节点将拿不到 v2 提示词.
 from lawApp_LangGraph.prompts import (
+    ELEMENT_ASSESS_PROMPT,
     EXECUTOR_PROMPT,
     FINALIZE_CASE_PROMPT,
     FINALIZE_DIRECT_PROMPT,
     PLANNER_SYSTEM,
     REPLAN_CHECK_PROMPT,
     REPLANNER_SYSTEM_PROMPT,
+    RISK_GATE_PROMPT,
 )
 from lawApp_LangGraph.tools.rag_tools import analyze_legal_issue  # noqa — 已有,确认不缺
 
@@ -151,19 +157,33 @@ def _schema_models():
         needs_replan: bool = Field(description="当前信息是否不足以生成高质量回答")
         reason: str = Field(default="", description="简短判断依据,不超过50字")
 
-    class ClarifySchema(BaseModel):
-        need_clarification: bool = Field(
-            description="问题是否缺少关键事实,需要先向用户反问"
+    class RiskSchema(BaseModel):
+        high_risk: bool = Field(description="是否命中高风险判定标准")
+        reason: str = Field(default="", description="命中的标准,不超过30字")
+
+    class ElementUpdate(BaseModel):
+        key: str = Field(description="要素 key,必须是清单内的 key")
+        value: str = Field(default="", description="从用户回答提取的要素摘要")
+        status: Literal["known", "na"] = Field(default="known")
+
+    class ElementAssessmentSchema(BaseModel):
+        applicable: bool = Field(description="是否婚姻家事类咨询")
+        element_updates: List[ElementUpdate] = Field(
+            default_factory=list, description="用户上轮回答映射到的要素"
         )
-        question: str = Field(default="", description="需要向用户反问的问题,一句话")
-        high_risk: bool = Field(
-            default=False, description="问题是否涉及高风险话题(自伤/暴力/刑事等)"
+        na_keys: List[str] = Field(default_factory=list, description="本案不涉及的要素")
+        promote_keys: List[str] = Field(
+            default_factory=list, description="按案由升关键的要素"
         )
+        questions: List[ElementQuestion] = Field(
+            default_factory=list, description="本轮反问,只问关键且缺失,最多3个"
+        )
+        done: bool = Field(description="要素已足够,无需再问")
 
-    return PlanSchema, ReplanCheckSchema, ClarifySchema
+    return PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema
 
 
-PlanSchema, ReplanCheckSchema, ClarifySchema = _schema_models()
+PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema = _schema_models()
 
 
 # Node 0: Ingest — 每轮请求入口,重置累积字段
@@ -189,117 +209,255 @@ def ingest_node(state: AgentState) -> dict:
         "is_pdf_output": False,
         "pdf_path": None,
         "error": None,
-        "clarification_round": 0,
-        "clarification": None,
         "risk_confirmed": False,
         "pdf_confirmed": False,
         "hitl_event": None,
+        # 子项目A: 要素清单重建 + 澄清/故障计数归零 + 一次性标记复位
+        "case_elements": default_case_elements(),
+        "clarify_rounds": 0,
+        "error_streak": 0,
+        "mid_clarify_used": False,
+        "budget_hitl_used": False,
+        "degrade_used": False,
+        "pending_questions": [],
         # 累积语义字段 → RESET 清空
         "tool_calls": RESET,
         "reasoning": RESET,
         "web_search_results": RESET,
         "law_results": RESET,
+        "clarify_history": RESET,
     }
 
 
-# Node 0.5: Clarify — HITL ①关键事实反问 + ②高风险话题确认
-
-CLARIFY_PROMPT = """你是法律AI系统的接诊助理.判断用户的咨询是否需要先补充关键事实,或是否涉及高风险话题.
-
-## 判断标准
-1. 问题缺少无法推断的关键事实(如:金额、时间、婚姻状态、是否已有诉讼),
-   且没有这些事实无法给出有价值的法律分析 → 需要反问
-2. 闲聊、问候、概念解释类问题 → 不需要反问
-3. 高风险话题: 自伤自杀倾向、家庭暴力正在发生、扬言报复伤害他人、涉及刑事犯罪自首等 → high_risk
-
-## 用户问题
-{query}
-
-## 输出
-按给定 JSON Schema 判断."""
+# Node 0.5a: Risk Gate — 高风险话题确认 (HITL ①)
 
 
-async def clarify_node(state: AgentState) -> dict:
-    """HITL 入口：关键事实缺失时反问用户（每轮最多一次）；高风险话题需确认。"""
+async def risk_gate_node(state: AgentState) -> dict:
+    """LLM 高风险判定;未确认的高风险 → interrupt 确认,拒绝则热线文案中止.
+
+    Args:
+        state (AgentState): 图状态,读取 query 与 risk_confirmed.
+
+    Returns:
+        dict: 状态更新,各分支语义——空 query 或本轮已确认过
+            (risk_confirmed=True) → 空 dict 放行;LLM 判定无风险(含 LLM
+            失败软放行) → 空 dict 放行;interrupt 用户拒绝 →
+            final_answer(热线中止文案) + risk_confirmed +
+            hitl_event(type=risk_confirm, confirmed=False);
+            interrupt 用户确认 → risk_confirmed +
+            hitl_event(type=risk_confirm, confirmed=True),流程继续.
+    """
     t0 = time.time()
     query = state.query.strip()
-
-    if not query or state.clarification_round > 0:
+    if not query or state.risk_confirmed:
         return {}
 
-    verdict = None
+    high_risk = False
     try:
-        chain = PromptTemplate.from_template(
-            CLARIFY_PROMPT
-        ) | get_executor_llm().with_structured_output(ClarifySchema)
-        verdict = await chain.ainvoke({"query": query[:2000]})
-    except Exception as e:
-        debug.warning("Clarify LLM 失败,走规则兜底", detail=str(e)[:100])
-
-    need_clarify = bool(verdict and verdict.need_clarification and verdict.question)
-    high_risk = bool(verdict and verdict.high_risk)
-
-    if not need_clarify and not high_risk:
-        debug.debug(
-            "← Clarify 通过",
-            detail="无需反问",
-            result=f"elapsed={time.time() - t0:.2f}s",
+        chain = (
+            PromptTemplate.from_template(RISK_GATE_PROMPT)
+            | get_executor_llm().with_structured_output(RiskSchema)
         )
+        verdict = await chain.ainvoke({"query": query[:2000]})
+        high_risk = bool(verdict.high_risk)
+    except Exception as e:
+        # LLM 失败 → 视为无风险放行(HITL 是增强项不是阻塞项)
+        debug.warning("Risk Gate LLM 失败,放行", detail=str(e)[:100])
+
+    if not high_risk:
+        debug.debug("← Risk Gate 通过", result=f"elapsed={time.time() - t0:.2f}s")
         return {}
 
-    # ② 高风险确认优先（先确认风险，再补事实）
-    if high_risk and not state.risk_confirmed:
-        confirmed = interrupt(
-            {
-                "type": "risk_confirm",
-                "message": "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险，请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗？",
-            }
-        )
-        if not confirmed:
-            return {
-                "final_answer": (
-                    "已中止本次咨询。请优先保证人身安全：紧急情况拨打110，"
-                    "家暴可拨打全国妇联维权热线12338，心理困境可拨打希望热线400-161-9995。"
-                    "安全得到保障后，欢迎随时回来咨询法律问题。"
-                ),
-                "risk_confirmed": True,
-                "hitl_event": {
-                    "type": "risk_confirm",
-                    "confirmed": False,
-                    "at": datetime.now().isoformat(),
-                },
-            }
-        # 用户确认继续 → 继续反问判断
+    confirmed = interrupt(
+        {
+            "type": "risk_confirm",
+            "message": "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险，请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗？",
+        }
+    )
+    if not confirmed:
         return {
+            "final_answer": (
+                "已中止本次咨询。请优先保证人身安全：紧急情况拨打110，"
+                "家暴可拨打全国妇联维权热线12338，心理困境可拨打希望热线400-161-9995。"
+                "安全得到保障后，欢迎随时回来咨询法律问题。"
+            ),
             "risk_confirmed": True,
             "hitl_event": {
                 "type": "risk_confirm",
-                "confirmed": True,
+                "confirmed": False,
+                "at": datetime.now().isoformat(),
+            },
+        }
+    return {
+        "risk_confirmed": True,
+        "hitl_event": {
+            "type": "risk_confirm",
+            "confirmed": True,
+            "at": datetime.now().isoformat(),
+        },
+    }
+
+
+# Node 0.5b: Element Assess — LLM 评估要素缺口 + 解读上轮回答
+
+
+async def element_assess_node(state: AgentState) -> dict:
+    """评估案件要素:①应用用户上轮回答的要素映射 ②生成下一轮反问.
+
+    Args:
+        state (AgentState): 图状态,读取 query / case_elements /
+            clarify_history / clarify_rounds.
+
+    Returns:
+        dict: 状态更新,键语义——case_elements: 深拷贝后应用要素更新
+            (回答映射/na 标记/关键级提升)的清单,覆盖写回;
+            pending_questions: 本轮反问列表,非空 → 路由继续反问,空 →
+            放行进 planner. 分支:非婚姻家事类 → 全要素标 na 直通;
+            LLM 失败 → pending_questions 置空,软放行不阻塞.
+    """
+    t0 = time.time()
+    debug.debug(
+        "→ 进入 Element Assess 节点",
+        detail=f"round={state.clarify_rounds}/{MAX_CLARIFY_ROUNDS}",
+    )
+
+    ce = state.case_elements.model_copy(deep=True)
+    last_q, last_a = "", ""
+    if state.clarify_history:
+        ex = state.clarify_history[-1]
+        last_q, last_a = ex.question, ex.answer
+
+    try:
+        chain = (
+            PromptTemplate.from_template(ELEMENT_ASSESS_PROMPT)
+            | get_executor_llm().with_structured_output(ElementAssessmentSchema)
+        )
+        v = await chain.ainvoke(
+            {
+                "query": state.query[:2000],
+                "elements_digest": ce.digest(),
+                "last_question": last_q,
+                "last_answer": last_a or "(尚未反问)",
+                "round": state.clarify_rounds + 1,
+                "max_rounds": MAX_CLARIFY_ROUNDS,
+            }
+        )
+    except Exception as e:
+        debug.warning(
+            "Element Assess LLM 失败,软放行进 planner", detail=str(e)[:100]
+        )
+        return {"pending_questions": [], "case_elements": ce}
+
+    # ① 非婚姻家事类 → 全 na,直接放行
+    if not v.applicable:
+        ce.mark_na([e.key for e in ce.elements])
+        debug.info(
+            "← Element Assess: 非目标类咨询,全 na 直通",
+            result=f"elapsed={time.time() - t0:.2f}s",
+        )
+        return {"pending_questions": [], "case_elements": ce}
+
+    # ② 应用要素更新(用户回答映射 + na + 关键级提升)
+    valid_keys = {e.key for e in ce.elements}
+    for u in v.element_updates:
+        if u.key in valid_keys:
+            ce.update(u.key, u.value, by="assess")
+    if v.na_keys:
+        ce.mark_na([k for k in v.na_keys if k in valid_keys])
+    if v.promote_keys:
+        ce.promote([k for k in v.promote_keys if k in valid_keys])
+
+    # ③ 决定是否继续问
+    questions = []
+    if not v.done and state.clarify_rounds < MAX_CLARIFY_ROUNDS:
+        questions = [q for q in v.questions if q.key in valid_keys][:3]
+        # 关键缺口为空时不再问
+        if not ce.critical_missing():
+            questions = []
+
+    debug.info(
+        "← Element Assess 完成",
+        detail=f"known={len([e for e in ce.elements if e.status == 'known'])}"
+        f"/{len(ce.elements)} | critical_missing={len(ce.critical_missing())}",
+        result=f"elapsed={time.time() - t0:.2f}s | {'继续反问' if questions else '放行'}",
+    )
+    return {"case_elements": ce, "pending_questions": questions}
+
+
+# Node 0.5c: Ask Element — HITL ② 要素反问(纯记账,resume 重跑幂等)
+
+
+def ask_element_node(state: AgentState) -> dict:
+    """发起要素反问 interrupt;resume 后记录 clarify_history、轮数自增.
+
+    纯记账节点不调 LLM;无 pending_questions 时直接返回,保证 resume
+    重跑幂等. resume 返回值: 非空字符串=用户回答;空/None=跳过(轮数置满).
+
+    Args:
+        state (AgentState): 图状态,读取 pending_questions /
+            case_elements / clarify_rounds / query.
+
+    Returns:
+        dict: 状态更新,各分支语义——无待问问题 → 空 dict 不重复
+            interrupt;用户回答 → query 追加「[用户补充信息]」增强,
+            clarify_rounds 自增,clarify_history 追加本轮
+            ClarifyExchange,hitl_event(type=clarify, question=反问文本);
+            用户跳过 → clarify_rounds 置满 MAX_CLARIFY_ROUNDS 按原问题
+            继续,hitl_event(type=clarify, skipped=True).
+    """
+    questions = state.pending_questions
+    if not questions:
+        return {}  # 防御:无问题不 interrupt
+
+    question_text = " ".join(q.question for q in questions)
+    keys = [q.key for q in questions]
+    answer = interrupt(
+        {
+            "type": "clarify",
+            "round": f"{state.clarify_rounds + 1}/{MAX_CLARIFY_ROUNDS}",
+            "question": question_text,
+            "elements": [
+                {"key": e.key, "label": e.label, "status": e.status}
+                for e in state.case_elements.elements
+            ],
+        }
+    )
+
+    answer = str(answer).strip() if answer else ""
+    if not answer:
+        # 用户跳过 → 轮数置满,按原问题继续(与存量"未补充→按原问题继续"语义一致)
+        debug.info("← Ask Element: 用户跳过反问", detail="按原问题继续")
+        return {
+            "clarify_rounds": MAX_CLARIFY_ROUNDS,
+            "pending_questions": [],
+            "hitl_event": {
+                "type": "clarify",
+                "skipped": True,
                 "at": datetime.now().isoformat(),
             },
         }
 
-    # ① 关键事实反问（interrupt 暂停图,等待 Command(resume=用户回复)）
-    answer = interrupt({"type": "clarify", "question": verdict.question})
-    if not answer or not str(answer).strip():
-        # 用户跳过反问 → 按原问题继续
-        debug.info("← Clarify 用户未补充", detail="按原问题继续")
-        return {"clarification_round": 1}
-
-    answer = str(answer).strip()
-    augmented_query = f"{query}\n[用户补充信息] {answer}"
+    # 答案织入增强 query(下游 planner/executor/检索全部基于此)
+    augmented_query = f"{state.query}\n[用户补充信息] {answer}"
     debug.info(
-        "← Clarify 完成",
-        detail=f"补充信息: {answer[:80]}",
-        result=f"elapsed={time.time() - t0:.2f}s",
+        "← Ask Element 完成",
+        detail=f"answer={answer[:80]}",
+        result=f"round={state.clarify_rounds + 1}/{MAX_CLARIFY_ROUNDS}",
     )
     return {
-        "clarification_round": 1,
-        "clarification": {"question": verdict.question, "answer": answer},
+        "clarify_rounds": state.clarify_rounds + 1,
+        "clarify_history": [
+            ClarifyExchange(
+                round=state.clarify_rounds + 1,
+                question=question_text,
+                answer=answer,
+                element_keys=keys,
+            )
+        ],
         "query": augmented_query,
         "hitl_event": {
             "type": "clarify",
-            "question": verdict.question,
+            "question": question_text,
             "at": datetime.now().isoformat(),
         },
     }
