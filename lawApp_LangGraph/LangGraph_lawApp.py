@@ -64,10 +64,13 @@ load_dotenv()
 # 文件内同名旧常量已改名 _LEGACY_*(文本原样保留,Task 6 重构时删除),
 # 否则下方旧赋值会遮蔽本 import,节点将拿不到 v2 提示词.
 from lawApp_LangGraph.prompts import (
+    BUDGET_CONFIRM_MSG,
+    DEGRADE_CONFIRM_MSG,
     ELEMENT_ASSESS_PROMPT,
     EXECUTOR_PROMPT,
     FINALIZE_CASE_PROMPT,
     FINALIZE_DIRECT_PROMPT,
+    MID_CLARIFY_PROMPT,
     PLANNER_SYSTEM,
     REPLAN_CHECK_PROMPT,
     REPLANNER_SYSTEM_PROMPT,
@@ -156,6 +159,10 @@ def _schema_models():
     class ReplanCheckSchema(BaseModel):
         needs_replan: bool = Field(description="当前信息是否不足以生成高质量回答")
         reason: str = Field(default="", description="简短判断依据,不超过50字")
+        insufficient_reason: Literal["vague", "not_found", "error", "none"] = Field(
+            default="none",
+            description="不足原因: vague=问题笼统(先问人) / not_found=案例库覆盖不到(联网) / error=执行错误 / none=不不足",
+        )
 
     class RiskSchema(BaseModel):
         high_risk: bool = Field(description="是否命中高风险判定标准")
@@ -180,10 +187,22 @@ def _schema_models():
         )
         done: bool = Field(description="要素已足够,无需再问")
 
-    return PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema
+    class MidClarifySchema(BaseModel):
+        question: str = Field(description="一个聚焦追问,律师问诊语气,一句话")
+        element_key: str = Field(default="", description="追问对应的要素 key")
+
+    return (
+        PlanSchema,
+        ReplanCheckSchema,
+        RiskSchema,
+        ElementAssessmentSchema,
+        MidClarifySchema,
+    )
 
 
-PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema = _schema_models()
+PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema, MidClarifySchema = (
+    _schema_models()
+)
 
 
 # Node 0: Ingest — 每轮请求入口,重置累积字段
@@ -737,6 +756,7 @@ async def executor_node(state: AgentState) -> dict:
             "plan": failed,
             "current_step_index": idx + 1,
             "error": f"步骤{step.step_id}({step.tool_name}) LLM 参数提取失败",
+            "error_streak": state.error_streak + 1,
             "messages": [AIMessage(content="")],
         }
 
@@ -804,11 +824,13 @@ async def merge_node(state: AgentState) -> dict:
     if tool_msg is None:
         step_status = "failed"
         updates["error"] = f"步骤{step.step_id} 工具未返回结果"
+        updates["error_streak"] = state.error_streak + 1
     elif getattr(tool_msg, "status", None) == "error":
         step_status = "failed"
         updates["error"] = (
             f"工具 {step.tool_name} 执行失败: {str(tool_msg.content)[:200]}"
         )
+        updates["error_streak"] = state.error_streak + 1
         output = {"error": str(tool_msg.content)[:500]}
     else:
         try:
@@ -816,6 +838,8 @@ async def merge_node(state: AgentState) -> dict:
             output = json.loads(content) if isinstance(content, str) else content
         except (json.JSONDecodeError, TypeError):
             output = {"raw": str(tool_msg.content)[:500]}
+        # 成功路径: 连续失败计数清零
+        updates["error_streak"] = 0
 
     if isinstance(output, dict):
         for k, v in output.items():
@@ -869,6 +893,7 @@ async def merge_node(state: AgentState) -> dict:
         web_search_results=merged_web,
         laws_results=merged_law,
         evaluate_retrieved_documents=eval_docs,
+        known_elements=state.case_elements.digest(),
     )
 
     new_plan = [
@@ -931,7 +956,7 @@ async def replan_check_node(state: AgentState) -> dict:
             f"中等{ev.ambiguous_count}, 低质量{ev.incorrect_count})"
         )
 
-    needs, reason = False, ""
+    needs, reason, insufficient_reason = False, "", "none"
     try:
         chain = PromptTemplate.from_template(
             REPLAN_CHECK_PROMPT
@@ -949,9 +974,14 @@ async def replan_check_node(state: AgentState) -> dict:
         )
         needs = bool(result.needs_replan)
         reason = result.reason
+        insufficient_reason = (
+            result.insufficient_reason
+            if needs and hasattr(result, "insufficient_reason")
+            else "none"
+        )
     except Exception as e:
         debug.warning("Replan Check LLM 失败,降级为规则判断", detail=str(e)[:100])
-        needs, reason = _fallback_replan_check(state)
+        needs, reason, insufficient_reason = _fallback_replan_check(state)
 
     elapsed = time.time() - t0
     target = "Replanner" if needs else "Finalize"
@@ -960,21 +990,109 @@ async def replan_check_node(state: AgentState) -> dict:
         detail=reason,
         result=f"elapsed={elapsed:.2f}s | → {target}",
     )
-    return {"replan_needed": needs, "replan_reason": reason or None}
+    return {
+        "replan_needed": needs,
+        "replan_reason": reason or None,
+        "insufficient_reason": insufficient_reason,
+    }
 
 
-def _fallback_replan_check(state: AgentState) -> tuple[bool, str]:
-    """规则兜底判断 —— LLM 判断失败时使用"""
+def _fallback_replan_check(state: AgentState) -> tuple[bool, str, str]:
+    """规则兜底判断 —— LLM 判断失败时使用.
+
+    Args:
+        state (AgentState): 图状态,读取 error / evaluation / tool_calls /
+            rag_documents.
+
+    Returns:
+        tuple[bool, str, str]: (needs_replan, replan_reason, insufficient_reason)
+            三元组,insufficient_reason 取值 vague/not_found/error/none:
+            执行错误 → (True, 异常摘要, "error");评估结论不足且尚未联网 →
+            检索为空记 "not_found"(案例库覆盖不到),有检索但问题笼统记
+            "vague";其余 → (False, 无明显问题, "none").
+    """
     if state.error:
-        return True, f"执行异常: {state.error[:60]}"
+        return True, f"执行异常: {state.error[:60]}", "error"
     if (
         state.evaluation
         and state.evaluation.quality_verdict == "不足,建议进行网络搜索补充"
     ):
         executed = {tc.tool_name for tc in state.tool_calls}
         if "get_google_search" not in executed:
-            return True, "检索质量不足,需补联网搜索"
-    return False, "规则兜底: 无明显问题"
+            if not state.rag_documents:
+                return True, "检索为空,案例库覆盖不到", "not_found"
+            return True, "检索质量不足且问题笼统", "vague"
+    return False, "规则兜底: 无明显问题", "none"
+
+
+# Node 5.5: Mid Clarify — HITL ⑤ 检索反馈追问(先问人后搜网)
+
+
+async def mid_clarify_node(state: AgentState) -> dict:
+    """基于检索结果的共同情形生成聚焦追问,先问人后搜网.
+
+    Args:
+        state (AgentState): 图状态,读取 query / rag_documents / case_elements.
+
+    Returns:
+        dict: 状态更新,分支语义——LLM 生成追问失败或用户未补充 →
+            {"mid_clarify_used": True} 静默放行,由 replanner 联网兜底;
+            用户补充 → query 织入「[检索反馈追问]/[用户澄清]」增强,
+            case_elements 深拷贝后按 element_key 记录(来源 mid_clarify),
+            附 hitl_event(type=mid_clarify, question=追问文本).
+    """
+    t0 = time.time()
+    top_docs = "\n".join(
+        f"- [{d.case_number}] {d.chunk_text[:120]}..."
+        for d in state.rag_documents[:5]
+    ) or "(检索为空)"
+
+    try:
+        chain = (
+            PromptTemplate.from_template(MID_CLARIFY_PROMPT)
+            | get_executor_llm().with_structured_output(MidClarifySchema)
+        )
+        v = await chain.ainvoke(
+            {
+                "query": state.query[:1500],
+                "top_docs_summary": top_docs,
+            }
+        )
+    except Exception as e:
+        debug.warning("Mid Clarify LLM 失败,转联网兜底", detail=str(e)[:100])
+        return {"mid_clarify_used": True}
+
+    answer = interrupt(
+        {
+            "type": "mid_clarify",
+            "question": v.question,
+            "context_hint": f"检索到的案例集中在: {top_docs[:200]}",
+        }
+    )
+    answer = str(answer).strip() if answer else ""
+    if not answer:
+        debug.info("← Mid Clarify: 用户未补充", detail="转联网兜底")
+        return {"mid_clarify_used": True}
+
+    augmented_query = f"{state.query}\n[检索反馈追问] {v.question}\n[用户澄清] {answer}"
+    ce = state.case_elements.model_copy(deep=True)
+    if v.element_key in {e.key for e in ce.elements}:
+        ce.update(v.element_key, answer, by="mid_clarify")
+    debug.info(
+        "← Mid Clarify 完成",
+        detail=f"answer={answer[:80]}",
+        result=f"elapsed={time.time() - t0:.2f}s | → replanner",
+    )
+    return {
+        "mid_clarify_used": True,
+        "query": augmented_query,
+        "case_elements": ce,
+        "hitl_event": {
+            "type": "mid_clarify",
+            "question": v.question,
+            "at": datetime.now().isoformat(),
+        },
+    }
 
 
 # Node 6: The Replanner — Pro LLM 补充计划
@@ -1129,6 +1247,151 @@ async def finalize_node(state: AgentState) -> dict:
         result=f"elapsed={time.time() - t0:.2f}s",
     )
     return {"final_answer": answer}
+
+
+# Node 8.5: HITL Degrade — HITL ④ 工具连续失败降级询问
+
+
+def hitl_degrade_node(state: AgentState) -> dict:
+    """interrupt: 重试/跳过/终止. resume 值由 API normalize_resume 归一为
+    'retry'/'skip'/'abort'.
+
+    Args:
+        state (AgentState): 图状态,读取 plan / current_step_index 定位
+            连续失败的工具名.
+
+    Returns:
+        dict: 状态更新,分支语义——resume 为 retry → degrade_used +
+            error_streak 清零 + error 清空 + replan_needed/replan_reason
+            (回 replanner 重新规划重试),hitl_event(choice=retry);
+            abort → degrade_used + final_answer(服务不可用中止文案),
+            hitl_event(choice=abort);skip(默认) → degrade_used +
+            error_streak 清零 + error 清空,hitl_event(choice=skip),
+            继续后续步骤.
+    """
+    failed_tool = "未知工具"
+    if state.plan and state.current_step_index < len(state.plan):
+        failed_tool = state.plan[state.current_step_index].tool_name or "未知工具"
+
+    choice = interrupt(
+        {
+            "type": "degrade_confirm",
+            "failed_tool": failed_tool,
+            "options": ["重试", "跳过", "终止"],
+            "message": DEGRADE_CONFIRM_MSG.format(failed_tool=failed_tool),
+        }
+    )
+    choice = str(choice).strip().lower() if choice else "skip"
+
+    if "retry" in choice or "重试" in choice:
+        debug.info("← Degrade: 用户选择重试", detail=f"tool={failed_tool}")
+        return {
+            "degrade_used": True,
+            "error_streak": 0,
+            "error": None,
+            "replan_needed": True,
+            "replan_reason": f"用户要求重试失败的服务调用({failed_tool})",
+            "hitl_event": {
+                "type": "degrade_confirm",
+                "choice": "retry",
+                "at": datetime.now().isoformat(),
+            },
+        }
+    if "abort" in choice or "终止" in choice or "结束" in choice:
+        return {
+            "degrade_used": True,
+            "final_answer": (
+                "本次咨询因服务暂时不可用而中止，已收集的信息不会丢失。"
+                "请稍后再试，或联系专业律师获取帮助。"
+            ),
+            "hitl_event": {
+                "type": "degrade_confirm",
+                "choice": "abort",
+                "at": datetime.now().isoformat(),
+            },
+        }
+    # skip(默认)
+    debug.info("← Degrade: 用户选择跳过", detail=f"tool={failed_tool}")
+    return {
+        "degrade_used": True,
+        "error_streak": 0,
+        "error": None,
+        "hitl_event": {
+            "type": "degrade_confirm",
+            "choice": "skip",
+            "at": datetime.now().isoformat(),
+        },
+    }
+
+
+# Node 8.6: HITL Budget — HITL ⑥ 重规划预算耗尽询问
+
+
+def hitl_budget_node(state: AgentState) -> dict:
+    """interrupt: 补充(原文) / 收尾(finish). resume 值经 normalize_resume:
+    空或含收尾关键词 → 'finish'; 其余非空文本 → 原文.
+
+    Args:
+        state (AgentState): 图状态,读取 evaluation / rag_documents / error /
+            query 拼装缺失信息摘要.
+
+    Returns:
+        dict: 状态更新,分支语义——resume 为收尾(空或含收尾关键词) →
+            budget_hitl_used + hitl_event(choice=finish),带现有材料
+            finalize;补充原文 → budget_hitl_used + query 织入
+            「[用户补充信息]」+ replan_needed/replan_reason(最后一次
+            执行) + error 清空,hitl_event(choice=supplement).
+    """
+    missing_parts = []
+    if state.evaluation and state.evaluation.total > 0:
+        ev = state.evaluation
+        missing_parts.append(
+            f"案例质量评估为「{ev.quality_verdict}」"
+            f"(高质量{ev.correct_count}条/中等{ev.ambiguous_count}条)"
+        )
+    if not state.rag_documents:
+        missing_parts.append("尚未检索到相关案例")
+    if state.error:
+        missing_parts.append(f"执行中出现错误: {state.error[:80]}")
+    missing = "; ".join(missing_parts) or "信息仍不充分"
+
+    answer = interrupt(
+        {
+            "type": "budget_confirm",
+            "missing": missing,
+            "options": ["补充", "收尾"],
+            "message": BUDGET_CONFIRM_MSG.format(missing=missing),
+        }
+    )
+    answer = str(answer).strip() if answer else ""
+
+    if not answer or any(w in answer.lower() for w in ("收尾", "结束", "finish")):
+        debug.info("← Budget: 用户选择收尾", detail="带现有材料 finalize")
+        return {
+            "budget_hitl_used": True,
+            "hitl_event": {
+                "type": "budget_confirm",
+                "choice": "finish",
+                "at": datetime.now().isoformat(),
+            },
+        }
+
+    augmented_query = f"{state.query}\n[用户补充信息] {answer}"
+    debug.info(
+        "← Budget: 用户补充", detail=f"answer={answer[:80]} | 最后一次 replan"
+    )
+    return {
+        "budget_hitl_used": True,
+        "query": augmented_query,
+        "replan_needed": True,
+        "replan_reason": "预算耗尽,用户补充关键信息,最后一次执行",
+        "error": None,
+        "hitl_event": {
+            "type": "budget_confirm",
+            "choice": "supplement",
+            "at": datetime.now().isoformat(),
+        },
+    }
 
 
 # 条件路由函数 (Conditional Edges)

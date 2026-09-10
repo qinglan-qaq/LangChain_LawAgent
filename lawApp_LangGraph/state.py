@@ -323,6 +323,8 @@ class AgentState(BaseModel):
     current_step_index: int = 0
     replan_needed: bool = False
     replan_reason: Optional[str] = None
+    # 不足原因诊断(vague/not_found/error/none) — replan_check 写入,路由读取
+    insufficient_reason: str = "none"
 
     # ============= HITL(人机协同)=============
     # 案件要素清单(覆盖语义, ingest 重建默认清单)
