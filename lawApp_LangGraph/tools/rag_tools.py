@@ -25,6 +25,7 @@ from lawApp_LangGraph.FastAPI.logging import (
     system as sys_log,
 )
 from lawApp_LangGraph.prompts import get_analysis_prompt
+from lawApp_LangGraph.config import settings
 from lawApp_LangGraph.state import (
     LawsResult,
     WebSearchResult,
@@ -131,10 +132,6 @@ async def retrieve_legal_knowledge(
 
 # Tool 2: 检索质量评估 (CRAG 三档)
 
-CORRECT_THRESHOLD = 0.5
-INCORRECT_THRESHOLD = 0.2
-MIN_QUALITY_DOCS = 3
-
 
 def _to_simple_doc(doc: Any) -> simpleRetrievedDocument:
     """将 dict 或对象转换为 simpleRetrievedDocument."""
@@ -201,9 +198,9 @@ def evaluate_case_relevance(
     for doc in documents:
         score = doc.get("hybrid_score", 0) if isinstance(doc, dict) else getattr(doc, "hybrid_score", 0)
         sdoc = _to_simple_doc(doc)
-        if score >= CORRECT_THRESHOLD:
+        if score >= settings.correct_threshold:
             correct.append(sdoc)
-        elif score >= INCORRECT_THRESHOLD:
+        elif score >= settings.incorrect_threshold:
             ambiguous.append(sdoc)
         else:
             incorrect.append(sdoc)
@@ -211,7 +208,7 @@ def evaluate_case_relevance(
     total_usable = len(correct) + len(ambiguous)
     quality_verdict = (
         "充足"
-        if len(correct) >= MIN_QUALITY_DOCS or total_usable >= MIN_QUALITY_DOCS
+        if len(correct) >= settings.min_quality_docs or total_usable >= settings.min_quality_docs
         else "不足,建议进行网络搜索补充"
     )
 

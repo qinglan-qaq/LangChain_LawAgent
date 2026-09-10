@@ -47,3 +47,13 @@ def test_config_defaults_and_env(monkeypatch):
     monkeypatch.setenv("RECURSION_LIMIT", "abc")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_graph_config_recursion():
+    """graph_config 携带 recursion_limit, 与 settings 单一来源。"""
+    from lawApp_LangGraph.FastAPI.utils import graph_config
+    from lawApp_LangGraph.config import settings
+
+    cfg = graph_config("s-r1")
+    assert cfg["configurable"]["thread_id"] == "s-r1"
+    assert cfg["recursion_limit"] == settings.recursion_limit

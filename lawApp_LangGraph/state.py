@@ -123,9 +123,7 @@ class PromptsRecord(BaseModel):
 
 
 #  案件要素清单 — 子项目A 澄清循环的数据基础
-
-MAX_CLARIFY_ROUNDS = 5      # 入口澄清轮数上限
-ERROR_STREAK_THRESHOLD = 2  # 连续失败触发降级询问
+#  轮数上限/连败阈值见 config.py(settings.max_clarify_rounds / error_streak_threshold)
 
 # 默认要素清单:(key, label, 关键级) — 婚姻家事与语料库领域对齐
 _DEFAULT_ELEMENTS: tuple[tuple[str, str, bool], ...] = (
@@ -335,12 +333,12 @@ class AgentState(BaseModel):
     )
     # 评估节点写入、反问节点读取(覆盖语义)
     pending_questions: List[ElementQuestion] = Field(default_factory=list)
-    # 澄清轮数(上限 MAX_CLARIFY_ROUNDS, ingest 归零)
+    # 澄清轮数(上限 settings.max_clarify_rounds, ingest 归零)
     clarify_rounds: int = 0
     # 用户已确认高风险话题 / PDF 生成
     risk_confirmed: bool = False
     pdf_confirmed: bool = False
-    # 工具连续失败计数(成功清零, >=ERROR_STREAK_THRESHOLD 触发降级)
+    # 工具连续失败计数(成功清零, >=settings.error_streak_threshold 触发降级)
     error_streak: int = 0
     # 一次性标记(防循环, ingest 重置)
     mid_clarify_used: bool = False

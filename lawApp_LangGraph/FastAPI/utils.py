@@ -5,6 +5,7 @@ import uuid
 from typing import Optional
 
 from lawApp_LangGraph.FastAPI.model import QueryResponse, SourceInfo
+from lawApp_LangGraph.config import settings
 
 
 #  工具函数
@@ -24,7 +25,10 @@ def get_graph():
 
 
 def graph_config(session_id: str) -> dict:
-    return {"configurable": {"thread_id": session_id}}
+    return {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": settings.recursion_limit,
+    }
 
 
 def extract_interrupt(snapshot) -> Optional[dict]:

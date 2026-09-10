@@ -146,10 +146,8 @@ def test_state_reducers():
 
 
 def test_case_elements_model():
-    from lawApp_LangGraph.state import (
-        CaseElements, default_case_elements, MAX_CLARIFY_ROUNDS,
-        ERROR_STREAK_THRESHOLD,
-    )
+    from lawApp_LangGraph.state import CaseElements, default_case_elements
+    from lawApp_LangGraph.config import settings
 
     ce = default_case_elements()
     # 默认 7 要素，关键 3 个
@@ -180,8 +178,8 @@ def test_case_elements_model():
     assert "婚姻现状" in d and "一套房,双方名下" in d
     assert "核心诉求" not in d
 
-    assert MAX_CLARIFY_ROUNDS == 5
-    assert ERROR_STREAK_THRESHOLD == 2
+    assert settings.max_clarify_rounds == 5
+    assert settings.error_streak_threshold == 2
 
 
 def test_agent_state_new_fields():

@@ -7,7 +7,7 @@ Plan & Execute Agent v2 — 法律咨询智能体 (LangGraph 1.x)
 
 Graph 流程 (14 节点):
     START → ingest → risk_gate(HITL① 高风险确认) → element_assess
-    element_assess ⇄ ask_element(HITL② 要素反问, 最多 MAX_CLARIFY_ROUNDS 轮)
+    element_assess ⇄ ask_element(HITL② 要素反问, 最多 settings.max_clarify_rounds 轮)
     element_assess ──[要素齐/轮数尽]──→ planner
     planner ──[plan 空]──→ finalize → END
     planner ──[有步骤]──→ executor ⇄ tools(ToolNode) → merge
@@ -29,7 +29,7 @@ v2 变更 (upgrade-v1):
   多轮对话不再泄漏上一轮的检索/调用记录
 - HITL 六处 interrupt() + Command(resume=...)：
     ① risk_gate: 高风险话题确认(拒绝 → 热线文案中止)
-    ② ask_element: 关键要素缺失反问(要素循环, 最多 MAX_CLARIFY_ROUNDS 轮)
+    ② ask_element: 关键要素缺失反问(要素循环, 最多 settings.max_clarify_rounds 轮)
     ③ executor: markdown_to_pdf 执行前确认
     ④ hitl_degrade: 工具连续失败降级询问(重试/跳过/终止)
     ⑤ mid_clarify: 检索反馈追问(先问人后搜网)
@@ -56,8 +56,6 @@ from langgraph.types import interrupt
 
 from lawApp_LangGraph.FastAPI.logging import debug
 from lawApp_LangGraph.state import (
-    ERROR_STREAK_THRESHOLD,
-    MAX_CLARIFY_ROUNDS,
     RESET,
     AgentState,
     ClarifyExchange,
@@ -71,6 +69,8 @@ from lawApp_LangGraph.state import (
 from lawApp_LangGraph.tools import ALL_TOOLS
 
 load_dotenv()
+
+from lawApp_LangGraph.config import settings
 
 #  Task 3: 提示词统一改用 prompts.py 单一来源(旧版常量已于 Task 6 删除).
 from lawApp_LangGraph.prompts import (
@@ -143,8 +143,6 @@ _STATE_KEYS = {
     "law_results",
     "prompts_record",
 }
-
-MAX_ROUNDS = 10  # 工具调用总数上限，防无限重规划
 
 
 #  Structured Output Schemas — 取代「剥栅栏 + json.loads」
@@ -347,7 +345,7 @@ async def element_assess_node(state: AgentState) -> dict:
     t0 = time.time()
     debug.debug(
         "→ 进入 Element Assess 节点",
-        detail=f"round={state.clarify_rounds}/{MAX_CLARIFY_ROUNDS}",
+        detail=f"round={state.clarify_rounds}/{settings.max_clarify_rounds}",
     )
 
     ce = state.case_elements.model_copy(deep=True)
@@ -368,7 +366,7 @@ async def element_assess_node(state: AgentState) -> dict:
                 "last_question": last_q,
                 "last_answer": last_a or "(尚未反问)",
                 "round": state.clarify_rounds + 1,
-                "max_rounds": MAX_CLARIFY_ROUNDS,
+                "max_rounds": settings.max_clarify_rounds,
             }
         )
     except Exception as e:
@@ -398,7 +396,7 @@ async def element_assess_node(state: AgentState) -> dict:
 
     # ③ 决定是否继续问
     questions = []
-    if not v.done and state.clarify_rounds < MAX_CLARIFY_ROUNDS:
+    if not v.done and state.clarify_rounds < settings.max_clarify_rounds:
         questions = [q for q in v.questions if q.key in valid_keys][:3]
         # 关键缺口为空时不再问
         if not ce.critical_missing():
@@ -431,7 +429,7 @@ def ask_element_node(state: AgentState) -> dict:
             interrupt;用户回答 → query 追加「[用户补充信息]」增强,
             clarify_rounds 自增,clarify_history 追加本轮
             ClarifyExchange,hitl_event(type=clarify, question=反问文本);
-            用户跳过 → clarify_rounds 置满 MAX_CLARIFY_ROUNDS 按原问题
+            用户跳过 → clarify_rounds 置满 settings.max_clarify_rounds 按原问题
             继续,hitl_event(type=clarify, skipped=True).
     """
     questions = state.pending_questions
@@ -443,7 +441,7 @@ def ask_element_node(state: AgentState) -> dict:
     answer = interrupt(
         {
             "type": "clarify",
-            "round": f"{state.clarify_rounds + 1}/{MAX_CLARIFY_ROUNDS}",
+            "round": f"{state.clarify_rounds + 1}/{settings.max_clarify_rounds}",
             "question": question_text,
             "elements": [
                 {"key": e.key, "label": e.label, "status": e.status}
@@ -457,7 +455,7 @@ def ask_element_node(state: AgentState) -> dict:
         # 用户跳过 → 轮数置满,按原问题继续(与存量"未补充→按原问题继续"语义一致)
         debug.info("← Ask Element: 用户跳过反问", detail="按原问题继续")
         return {
-            "clarify_rounds": MAX_CLARIFY_ROUNDS,
+            "clarify_rounds": settings.max_clarify_rounds,
             "pending_questions": [],
             "hitl_event": {
                 "type": "clarify",
@@ -471,7 +469,7 @@ def ask_element_node(state: AgentState) -> dict:
     debug.info(
         "← Ask Element 完成",
         detail=f"answer={answer[:80]}",
-        result=f"round={state.clarify_rounds + 1}/{MAX_CLARIFY_ROUNDS}",
+        result=f"round={state.clarify_rounds + 1}/{settings.max_clarify_rounds}",
     )
     return {
         "clarify_rounds": state.clarify_rounds + 1,
@@ -1334,7 +1332,7 @@ def route_after_assess(state: AgentState) -> str:
         str: 下一节点名 —— 有关键缺口反问且未达轮数上限 → "ask_element";
             否则(要素齐/轮数尽/软放行) → "planner".
     """
-    if state.pending_questions and state.clarify_rounds < MAX_CLARIFY_ROUNDS:
+    if state.pending_questions and state.clarify_rounds < settings.max_clarify_rounds:
         return "ask_element"
     return "planner"
 
@@ -1346,7 +1344,7 @@ def route_after_ask(state: AgentState) -> str:
         str: 下一节点名 —— 轮数耗尽 → "planner"(软放行,按原问题继续);
             否则 → "element_assess"(应用用户回答后重新评估).
     """
-    if state.clarify_rounds >= MAX_CLARIFY_ROUNDS:
+    if state.clarify_rounds >= settings.max_clarify_rounds:
         return "planner"
     return "element_assess"
 
@@ -1371,7 +1369,7 @@ def route_after_executor(state: AgentState) -> str:
             最新 AIMessage 带 tool_calls → "tools";其余按剩余步骤 →
             "executor"(还有步骤) / "replan_check"(全部完成).
     """
-    if state.error_streak >= ERROR_STREAK_THRESHOLD and not state.degrade_used:
+    if state.error_streak >= settings.error_streak_threshold and not state.degrade_used:
         return "hitl_degrade"
     last_ai = next(
         (m for m in reversed(state.messages) if isinstance(m, AIMessage)), None
@@ -1395,7 +1393,7 @@ def route_after_merge(state: AgentState) -> str:
         str: 下一节点名 —— 连续失败达阈值且未用过降级 → "hitl_degrade";
             其余按剩余步骤 → "executor"(还有步骤) / "replan_check"(全部完成).
     """
-    if state.error_streak >= ERROR_STREAK_THRESHOLD and not state.degrade_used:
+    if state.error_streak >= settings.error_streak_threshold and not state.degrade_used:
         return "hitl_degrade"
     target = (
         "executor" if state.current_step_index < len(state.plan) else "replan_check"
@@ -1412,7 +1410,7 @@ def route_after_replan_check(state: AgentState) -> str:
 
     Returns:
         str: 下一节点名，优先级从高到低 —— 质量通过(不需重规划) →
-            "finalize";预算耗尽(工具调用数达 MAX_ROUNDS) → 已问过
+            "finalize";预算耗尽(工具调用数达 settings.max_rounds) → 已问过
             budget 则 "finalize"、未问过 → "hitl_budget";不足原因为
             vague(问题笼统)且未用过 → "mid_clarify";其余(not_found/
             error/已用过 mid) → "replanner".
@@ -1422,7 +1420,7 @@ def route_after_replan_check(state: AgentState) -> str:
     if not state.replan_needed:
         return "finalize"
     # 2. 预算耗尽
-    if executed >= MAX_ROUNDS:
+    if executed >= settings.max_rounds:
         if state.budget_hitl_used:
             return "finalize"
         return "hitl_budget"
