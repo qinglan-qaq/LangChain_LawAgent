@@ -40,6 +40,53 @@ def extract_interrupt(snapshot) -> Optional[dict]:
     return None
 
 
+_YES = ("y", "yes", "是", "确认", "好", "继续")
+_NO = ("n", "no", "否", "跳过", "不要")
+
+
+def normalize_resume(interrupt_type: str, answer: str) -> object:
+    """按 interrupt 类型归一用户回复(spec §7.2).
+
+    Args:
+        interrupt_type: interrupt 载荷的 type 标签,取值为
+            risk_confirm / pdf_confirm / degrade_confirm /
+            budget_confirm / clarify / mid_clarify。
+        answer: 用户的原始回复文本(可能为空)。
+
+    Returns:
+        risk_confirm / pdf_confirm: bool,确认词 True / 拒绝词 False,
+            未识别默认拒绝(保守);
+        degrade_confirm: "retry" / "skip" / "abort" 之一,默认 skip;
+        budget_confirm: 空回复或含收尾指令(收尾/结束/finish)返回
+            "finish",否则补充原文透传;
+        clarify / mid_clarify: 原文透传(空=跳过)。
+    """
+    ans = (answer or "").strip()
+    lowered = ans.lower()
+
+    if interrupt_type in ("risk_confirm", "pdf_confirm"):
+        if lowered in _YES:
+            return True
+        if lowered in _NO:
+            return False
+        return bool(lowered in _YES)  # 未识别默认拒绝(保守)
+
+    if interrupt_type == "degrade_confirm":
+        if "重试" in ans or "retry" in lowered:
+            return "retry"
+        if "终止" in ans or "结束" in ans or "abort" in lowered:
+            return "abort"
+        return "skip"  # 默认跳过
+
+    if interrupt_type == "budget_confirm":
+        if not ans or any(w in lowered for w in ("收尾", "结束", "finish")):
+            return "finish"
+        return ans  # 补充原文
+
+    # clarify / mid_clarify: 原文透传
+    return ans
+
+
 def _field(item, key: str, default: str = ""):
     if isinstance(item, dict):
         return item.get(key, default)
@@ -85,6 +132,13 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
         if hasattr(pr, "model_dump")
         else (pr if isinstance(pr, dict) else {})
     )
+    # 案件要素面板数据(子项目A 澄清循环);无 case_elements 时为空列表
+    ce = state.get("case_elements")
+    elements = [
+        {"key": e.key, "label": e.label, "critical": e.critical,
+         "status": e.status, "value": e.value}
+        for e in (ce.elements if ce else [])
+    ] if ce else []
     return QueryResponse(
         query=state.get("query", ""),
         session_id=session_id,
@@ -94,6 +148,7 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
         tool_calls=build_tool_calls(state),
         reasoning=state.get("reasoning", []) or [],
         prompts_record=prompts_record,
+        elements=elements,
     )
 
 

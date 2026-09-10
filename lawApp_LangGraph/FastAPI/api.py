@@ -45,6 +45,7 @@ from lawApp_LangGraph.FastAPI.utils import (
     extract_interrupt,
     get_graph,
     graph_config,
+    normalize_resume,
     sse_event,
 )
 
@@ -184,15 +185,11 @@ async def ask_resume(request: ResumeRequest):
     graph = get_graph()
     config = graph_config(sid)
 
-    # 回复语义归一:y/是 → True;n/否/跳过 → False;其他 → 原文(反问补充)
-    ans = request.answer.strip()
-    lowered = ans.lower()
-    if lowered in ("y", "yes", "是", "确认", "好", "继续"):
-        resume_value: object = True
-    elif lowered in ("n", "no", "否", "跳过", "不要"):
-        resume_value = False
-    else:
-        resume_value = ans
+    # 先读快照取 interrupt 类型,再类型感知归一
+    snapshot = await graph.aget_state(config)
+    interrupt_req = extract_interrupt(snapshot)
+    itype = (interrupt_req or {}).get("type", "")
+    resume_value = normalize_resume(itype, request.answer)
 
     t0 = time.time()
     try:
@@ -265,6 +262,14 @@ async def ask_stream(query: str = "", session_id: str | None = None):
                                 if k in updates and updates[k]:
                                     n = len(updates[k]) if isinstance(updates[k], list) else 1
                                     yield sse_event("tool_result", f"{k}: {n}")
+                        if node_name == "element_assess" and "case_elements" in updates:
+                            ce = updates.get("case_elements")
+                            elems = getattr(ce, "elements", None) or []
+                            yield sse_event("elements", [
+                                {"key": e.key, "label": e.label,
+                                 "status": e.status}
+                                for e in elems
+                            ])
                 elif stream_mode == "values":
                     final_state = chunk
 

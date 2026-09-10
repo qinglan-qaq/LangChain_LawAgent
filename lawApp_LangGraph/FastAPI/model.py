@@ -64,3 +64,5 @@ class QueryResponse(BaseModel):
     interrupt: Optional[Dict[str, Any]] = None
     # 结构化提示词记录(评估 + 网络检索 + 法条)
     prompts_record: Dict[str, Any] = Field(default_factory=dict)
+    # 案件要素面板数据(子项目A 澄清循环)
+    elements: List[Dict[str, Any]] = Field(default_factory=list)
