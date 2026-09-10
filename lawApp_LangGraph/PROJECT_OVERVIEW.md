@@ -104,7 +104,7 @@ flowchart TD
 | `risk_gate` | Flash | `RiskSchema{high_risk, reason}` 高风险判定（自伤自杀/正在发生家暴/扬言报复/刑事自首/未成年人受害）；高风险未确认 → ⏸①，拒绝 → 热线文案中止；LLM 失败视为无风险放行 |
 | `element_assess` | Flash | 双职责：① 解读上一轮用户回答（`element_updates`）映射到要素；② 评估剩余关键缺口生成 `pending_questions`（≤3 个律师式反问，按案由动态提升关键级）；非婚姻家事 → 全 na 直通；LLM 失败 → done=True 软放行 |
 | `ask_element` | — | 读 `pending_questions` 发 ⏸②（载荷含 `round: "n/5"` 与要素面板快照）；resume 后写 `clarify_history`、`clarify_rounds+1`、答案织入增强 query；LLM-free |
-| `planner` | Pro | `PlanSchema` 生成 JSON 计划 + 思考链（≤8 步）；失败兜底默认法律检索三步计划；提示词注入「已知案件要素」段（`digest()`） |
+| `planner` | Pro | `PlanSchema` 生成 JSON 计划 + 思考链（≤8 步）；失败兜底默认法律检索四步计划（检索案例→评估质量→检索法条→综合分析）；提示词注入「已知案件要素」段（`digest()`） |
 | `executor` | Flash | 为当前步骤生成 tool_calls（bind_tools 全量 ALL_TOOLS 含 MCP）；LLM 失败严格重试一次，再失败标记 failed 并 `error_streak+1`；`markdown_to_pdf` 步骤前 ⏸③ 确认（存量） |
 | `tools` | — | prebuilt ToolNode 执行工具（构建时读取 `ALL_TOOLS()` 快照，`handle_tool_errors=True`） |
 | `merge` | — | 解析 ToolMessage 合并状态字段、记录 ToolCallRecord、推进步骤索引；新增：工具报错 `error_streak+1`、成功清零；重建 `PromptsRecord`（含 `known_elements` digest） |
@@ -330,7 +330,7 @@ C. 顶层 AgentState
 | `REPLANNER_SYSTEM_PROMPT` | `PlanSchema` | 补充步骤生成，只输出新增步骤（≤3 步） |
 | `FINALIZE_CASE_PROMPT` / `FINALIZE_DIRECT_PROMPT` v2 | — | 兜底回答 Kim 人设 + 免责声明行 |
 | `DEGRADE_CONFIRM_MSG` / `BUDGET_CONFIRM_MSG` | —（静态模板） | interrupt 文案，不调 LLM |
-| `LEGAL_ANALYSIS_PROMPT_Kim` / `LEGAL_ANALYSIS_PROMPT_Saul` | — | 分析角色双版本，经 `get_analysis_prompt()` 按 `LEGAL_ANALYSIS_ROLE` 切换 |
+| `LEGAL_ANALYSIS_PROMPT_KIM` / `LEGAL_ANALYSIS_PROMPT_Saul` | — | 分析角色双版本，经 `get_analysis_prompt()` 按 `LEGAL_ANALYSIS_ROLE` 切换 |
 
 `digest()` 注入链：planner 提示词「已知案件要素」段 → executor 提示词（`elements_digest` 变量） → 分析上下文（merge 填充 `PromptsRecord.known_elements` → `_build_analysis_context`）。模板渲染、Kim 标记与 digest 注入断言由 `prompts_test.ipynb` 验证。
 
