@@ -17,7 +17,6 @@ v2 变更 (upgrade-v1)：
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Union
 
@@ -304,14 +303,8 @@ class AgentState(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
-    # 会话标识
-    session_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
-    user_id: Optional[str] = None
-
     # 当前请求
     query: str = ""
-    # 是否输出为 PDF
-    is_pdf_output: bool = False
 
     # 对话历史（多轮，跨请求保留）
     messages: Annotated[List[Any], add_messages] = Field(default_factory=list)
@@ -371,23 +364,12 @@ class AgentState(BaseModel):
     web_search_results: Annotated[List[WebSearchResult], append_list] = Field(
         default_factory=list
     )
-    # 拼装后的 CRAG 上下文（覆盖）
-    crag_context: EvaluationResult = Field(default_factory=EvaluationResult)
-    # 长期记忆检索结果（覆盖）
-    memory_results: List[Dict[str, Any]] = Field(default_factory=list)
     # 法律条文检索结果（增量追加）
     law_results: Annotated[List[LawsResult], append_list] = Field(
         default_factory=list
     )
-    # 长期记忆写入确认（覆盖）
-    memory_update: Optional[Dict[str, Any]] = None
 
     # =============以下为路由控制判断=============
 
-    is_law_questions: bool = False
-    is_simple_questions: bool = False
     pdf_path: Optional[str] = None
-
-    # 流程控制
-    should_continue: bool = True
     error: Optional[str] = None

@@ -88,3 +88,25 @@ def test_json_logging(tmp_path):
         # 清掉指向 tmp_path 的 handler, 不污染后续用例
         for logger in lg._loggers.values():
             logger.handlers.clear()
+
+
+def test_state_dead_fields_removed():
+    """9 个死字段已删; 存活字段(有消费方/B预留)仍在。
+
+    pydantic v2 字段不在类属性命名空间(hasattr 恒 False), 经 model_fields 断言。
+    """
+    from lawApp_LangGraph.state import AgentState
+
+    fields = AgentState.model_fields
+    dead = (
+        "session_id", "user_id", "is_law_questions", "is_simple_questions",
+        "should_continue", "crag_context", "memory_results", "memory_update",
+        "is_pdf_output",
+    )
+    for f in dead:
+        assert f not in fields, f"死字段未删: {f}"
+    for alive in (
+        "final_prompts", "pdf_path", "reasoning", "hitl_event",
+        "case_elements", "clarify_history", "pending_questions",
+    ):
+        assert alive in fields, f"存活字段缺失: {alive}"
