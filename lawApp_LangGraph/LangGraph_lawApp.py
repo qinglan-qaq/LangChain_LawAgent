@@ -41,9 +41,9 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
-from langgraph.types import Command, interrupt
+from langgraph.types import interrupt
 
-from lawApp_LangGraph.FastAPI.logging import debug, flow
+from lawApp_LangGraph.FastAPI.logging import debug
 from lawApp_LangGraph.state import (
     RESET,
     AgentState,
@@ -60,19 +60,14 @@ load_dotenv()
 # 文件内同名旧常量已改名 _LEGACY_*(文本原样保留,Task 6 重构时删除),
 # 否则下方旧赋值会遮蔽本 import,节点将拿不到 v2 提示词.
 from lawApp_LangGraph.prompts import (
-    DEGRADE_CONFIRM_MSG,
-    ELEMENT_ASSESS_PROMPT,
     EXECUTOR_PROMPT,
     FINALIZE_CASE_PROMPT,
     FINALIZE_DIRECT_PROMPT,
-    MID_CLARIFY_PROMPT,
     PLANNER_SYSTEM,
-    REPLANNER_SYSTEM_PROMPT,
     REPLAN_CHECK_PROMPT,
-    RISK_GATE_PROMPT,
+    REPLANNER_SYSTEM_PROMPT,
 )
 from lawApp_LangGraph.tools.rag_tools import analyze_legal_issue  # noqa — 已有,确认不缺
-
 
 #  LLM 懒加载单例 — 导入期不触碰 API Key
 
@@ -148,7 +143,9 @@ def _schema_models():
 
     class PlanSchema(BaseModel):
         reasoning: List[str] = Field(default_factory=list, description="思考过程")
-        plan: List[PlannedStepSchema] = Field(default_factory=list, description="执行计划")
+        plan: List[PlannedStepSchema] = Field(
+            default_factory=list, description="执行计划"
+        )
 
     class ReplanCheckSchema(BaseModel):
         needs_replan: bool = Field(description="当前信息是否不足以生成高质量回答")
@@ -158,9 +155,7 @@ def _schema_models():
         need_clarification: bool = Field(
             description="问题是否缺少关键事实,需要先向用户反问"
         )
-        question: str = Field(
-            default="", description="需要向用户反问的问题,一句话"
-        )
+        question: str = Field(default="", description="需要向用户反问的问题,一句话")
         high_risk: bool = Field(
             default=False, description="问题是否涉及高风险话题(自伤/暴力/刑事等)"
         )
@@ -172,6 +167,7 @@ PlanSchema, ReplanCheckSchema, ClarifySchema = _schema_models()
 
 
 # Node 0: Ingest — 每轮请求入口,重置累积字段
+
 
 def ingest_node(state: AgentState) -> dict:
     """重置上一轮遗留的计划/结果/累积字段（messages 保留，支撑多轮对话）。"""
@@ -233,9 +229,9 @@ async def clarify_node(state: AgentState) -> dict:
 
     verdict = None
     try:
-        chain = PromptTemplate.from_template(CLARIFY_PROMPT) | get_executor_llm().with_structured_output(
-            ClarifySchema
-        )
+        chain = PromptTemplate.from_template(
+            CLARIFY_PROMPT
+        ) | get_executor_llm().with_structured_output(ClarifySchema)
         verdict = await chain.ainvoke({"query": query[:2000]})
     except Exception as e:
         debug.warning("Clarify LLM 失败,走规则兜底", detail=str(e)[:100])
@@ -244,7 +240,11 @@ async def clarify_node(state: AgentState) -> dict:
     high_risk = bool(verdict and verdict.high_risk)
 
     if not need_clarify and not high_risk:
-        debug.debug("← Clarify 通过", detail="无需反问", result=f"elapsed={time.time() - t0:.2f}s")
+        debug.debug(
+            "← Clarify 通过",
+            detail="无需反问",
+            result=f"elapsed={time.time() - t0:.2f}s",
+        )
         return {}
 
     # ② 高风险确认优先（先确认风险，再补事实）
@@ -263,20 +263,24 @@ async def clarify_node(state: AgentState) -> dict:
                     "安全得到保障后，欢迎随时回来咨询法律问题。"
                 ),
                 "risk_confirmed": True,
-                "hitl_event": {"type": "risk_confirm", "confirmed": False,
-                               "at": datetime.now().isoformat()},
+                "hitl_event": {
+                    "type": "risk_confirm",
+                    "confirmed": False,
+                    "at": datetime.now().isoformat(),
+                },
             }
         # 用户确认继续 → 继续反问判断
         return {
             "risk_confirmed": True,
-            "hitl_event": {"type": "risk_confirm", "confirmed": True,
-                           "at": datetime.now().isoformat()},
+            "hitl_event": {
+                "type": "risk_confirm",
+                "confirmed": True,
+                "at": datetime.now().isoformat(),
+            },
         }
 
     # ① 关键事实反问（interrupt 暂停图,等待 Command(resume=用户回复)）
-    answer = interrupt(
-        {"type": "clarify", "question": verdict.question}
-    )
+    answer = interrupt({"type": "clarify", "question": verdict.question})
     if not answer or not str(answer).strip():
         # 用户跳过反问 → 按原问题继续
         debug.info("← Clarify 用户未补充", detail="按原问题继续")
@@ -293,8 +297,11 @@ async def clarify_node(state: AgentState) -> dict:
         "clarification_round": 1,
         "clarification": {"question": verdict.question, "answer": answer},
         "query": augmented_query,
-        "hitl_event": {"type": "clarify", "question": verdict.question,
-                       "at": datetime.now().isoformat()},
+        "hitl_event": {
+            "type": "clarify",
+            "question": verdict.question,
+            "at": datetime.now().isoformat(),
+        },
     }
 
 
@@ -358,24 +365,37 @@ async def planner_node(state: AgentState) -> dict:
         }
 
     try:
-        chain = (
-            PromptTemplate.from_template(PLANNER_SYSTEM)
-            | get_planner_llm().with_structured_output(PlanSchema)
-        )
+        chain = PromptTemplate.from_template(
+            PLANNER_SYSTEM
+        ) | get_planner_llm().with_structured_output(PlanSchema)
         result = await chain.ainvoke(
             {"query": query[:3000], "available_tools": _tools_desc()}
         )
         plan = _normalize_plan(result)
         reasoning = list(result.reasoning or [])
     except Exception as e:
-        debug.warning("Planner structured output 失败,使用默认法律检索计划", detail=str(e)[:100])
+        debug.warning(
+            "Planner structured output 失败,使用默认法律检索计划", detail=str(e)[:100]
+        )
         return {
             "reasoning": [f"Planner 输出解析失败,使用默认法律检索计划: {str(e)[:80]}"],
             "plan": [
-                PlanStep(step_id=1, description="检索相关法律案例", tool_name="retrieve_legal_knowledge"),
-                PlanStep(step_id=2, description="评估检索质量", tool_name="evaluate_case_relevance"),
+                PlanStep(
+                    step_id=1,
+                    description="检索相关法律案例",
+                    tool_name="retrieve_legal_knowledge",
+                ),
+                PlanStep(
+                    step_id=2,
+                    description="评估检索质量",
+                    tool_name="evaluate_case_relevance",
+                ),
                 PlanStep(step_id=3, description="检索法律条文", tool_name="fetch_laws"),
-                PlanStep(step_id=4, description="综合信息生成法律分析", tool_name="analyze_legal_issue"),
+                PlanStep(
+                    step_id=4,
+                    description="综合信息生成法律分析",
+                    tool_name="analyze_legal_issue",
+                ),
             ],
         }
 
@@ -432,8 +452,16 @@ def _step_summaries(state: AgentState) -> dict[str, str]:
     if state.web_search_results:
         parts = []
         for item in state.web_search_results[-3:]:
-            title = item.get("title", "") if isinstance(item, dict) else getattr(item, "title", "")
-            snippet = item.get("snippet", "") if isinstance(item, dict) else getattr(item, "snippet", "")
+            title = (
+                item.get("title", "")
+                if isinstance(item, dict)
+                else getattr(item, "title", "")
+            )
+            snippet = (
+                item.get("snippet", "")
+                if isinstance(item, dict)
+                else getattr(item, "snippet", "")
+            )
             parts.append(f"[{title}] {snippet[:80]}...")
         web_summary = " | ".join(parts)
     law_summary = "暂无"
@@ -473,8 +501,10 @@ async def executor_node(state: AgentState) -> dict:
 
     # 无工具步骤 → 跳过并推进
     if not step.tool_name:
-        done = [s.model_copy(update={"status": "done"}) if i == idx else s
-                for i, s in enumerate(plan)]
+        done = [
+            s.model_copy(update={"status": "done"}) if i == idx else s
+            for i, s in enumerate(plan)
+        ]
         return {"plan": done, "current_step_index": idx + 1}
 
     # HITL ③: PDF 生成前确认（resume 后 confirmed 为真则继续）
@@ -486,15 +516,20 @@ async def executor_node(state: AgentState) -> dict:
             }
         )
         if not confirmed or str(confirmed).strip().lower() in ("n", "no", "否", "跳过"):
-            done = [s.model_copy(update={"status": "done"}) if i == idx else s
-                    for i, s in enumerate(plan)]
+            done = [
+                s.model_copy(update={"status": "done"}) if i == idx else s
+                for i, s in enumerate(plan)
+            ]
             debug.info("← Executor PDF 步骤被用户跳过", detail=f"step={idx + 1}")
             return {
                 "plan": done,
                 "current_step_index": idx + 1,
                 "pdf_confirmed": True,
-                "hitl_event": {"type": "pdf_confirm", "confirmed": False,
-                               "at": datetime.now().isoformat()},
+                "hitl_event": {
+                    "type": "pdf_confirm",
+                    "confirmed": False,
+                    "at": datetime.now().isoformat(),
+                },
             }
         # 确认 → 继续 LLM 参数提取
 
@@ -519,8 +554,10 @@ async def executor_node(state: AgentState) -> dict:
         # 严格重试一次（取代旧版 _TOOL_FALLBACK_ARGS 参数映射）
         try:
             retry_prompt = f"{prompt}\n\n注意:上一次调用失败({str(first_err)[:80]}).必须立即调用工具 {step.tool_name}."
-            response = await get_executor_llm().bind_tools([tool]).ainvoke(
-                [SystemMessage(content=retry_prompt)]
+            response = (
+                await get_executor_llm()
+                .bind_tools([tool])
+                .ainvoke([SystemMessage(content=retry_prompt)])
             )
             if isinstance(response, AIMessage) and response.tool_calls:
                 ai_msg = response
@@ -532,8 +569,12 @@ async def executor_node(state: AgentState) -> dict:
 
     # 失败路径:标记步骤 failed、推进索引、追加空 AIMessage 防止 ToolNode 误路由
     if ai_msg is None:
-        failed = [s.model_copy(update={"status": "failed", "retry_count": s.retry_count + 1})
-                  if i == idx else s for i, s in enumerate(plan)]
+        failed = [
+            s.model_copy(update={"status": "failed", "retry_count": s.retry_count + 1})
+            if i == idx
+            else s
+            for i, s in enumerate(plan)
+        ]
         return {
             "plan": failed,
             "current_step_index": idx + 1,
@@ -544,12 +585,17 @@ async def executor_node(state: AgentState) -> dict:
     # analyze_legal_issue 需要完整 PromptsRecord,LLM 无法自行构造 → 注入
     if step.tool_name == "analyze_legal_issue" and state.prompts_record:
         tc = dict(ai_msg.tool_calls[0])
-        args = {**tc.get("args", {}), "prompts_record": state.prompts_record.model_dump()}
+        args = {
+            **tc.get("args", {}),
+            "prompts_record": state.prompts_record.model_dump(),
+        }
         tc["args"] = args
         ai_msg = AIMessage(content=ai_msg.content, tool_calls=[tc])
 
-    doing = [s.model_copy(update={"status": "doing"}) if i == idx else s
-             for i, s in enumerate(plan)]
+    doing = [
+        s.model_copy(update={"status": "doing"}) if i == idx else s
+        for i, s in enumerate(plan)
+    ]
     debug.info(
         "← Executor 生成工具调用",
         detail=f"tool={step.tool_name} | args={str(ai_msg.tool_calls[0]['args'])[:150]}",
@@ -567,6 +613,7 @@ def _build_tools_node():
 
 
 # Node 4: Merge — 合并工具结果到 AgentState,推进步骤索引
+
 
 def _field(item, key: str, default: str = ""):
     """从 dict 或 Pydantic 对象中安全提取字段值."""
@@ -601,14 +648,14 @@ async def merge_node(state: AgentState) -> dict:
         updates["error"] = f"步骤{step.step_id} 工具未返回结果"
     elif getattr(tool_msg, "status", None) == "error":
         step_status = "failed"
-        updates["error"] = f"工具 {step.tool_name} 执行失败: {str(tool_msg.content)[:200]}"
+        updates["error"] = (
+            f"工具 {step.tool_name} 执行失败: {str(tool_msg.content)[:200]}"
+        )
         output = {"error": str(tool_msg.content)[:500]}
     else:
         try:
             content = tool_msg.content
-            output = (
-                json.loads(content) if isinstance(content, str) else content
-            )
+            output = json.loads(content) if isinstance(content, str) else content
         except (json.JSONDecodeError, TypeError):
             output = {"raw": str(tool_msg.content)[:500]}
 
@@ -631,8 +678,11 @@ async def merge_node(state: AgentState) -> dict:
                 tool_name=step.tool_name or "",
                 tool_input=executed_args,
                 output=(
-                    output if not isinstance(output, dict) else
-                    {k: v for k, v in output.items() if k not in ("prompts_record",)}
+                    output
+                    if not isinstance(output, dict)
+                    else {
+                        k: v for k, v in output.items() if k not in ("prompts_record",)
+                    }
                 ),
             )
         ]
@@ -642,11 +692,17 @@ async def merge_node(state: AgentState) -> dict:
     merged_web = merged_web or []
     merged_law = output.get("law_results") if isinstance(output, dict) else None
     merged_law = merged_law or []
-    merged_eval = output.get("evaluation", state.evaluation) if isinstance(output, dict) else state.evaluation
+    merged_eval = (
+        output.get("evaluation", state.evaluation)
+        if isinstance(output, dict)
+        else state.evaluation
+    )
     eval_docs: list = []
     if merged_eval:
         if isinstance(merged_eval, dict):
-            eval_docs = list(merged_eval.get("correct", [])) + list(merged_eval.get("ambiguous", []))
+            eval_docs = list(merged_eval.get("correct", [])) + list(
+                merged_eval.get("ambiguous", [])
+            )
         else:
             eval_docs = list(merged_eval.correct) + list(merged_eval.ambiguous)
 
@@ -657,8 +713,10 @@ async def merge_node(state: AgentState) -> dict:
         evaluate_retrieved_documents=eval_docs,
     )
 
-    new_plan = [s.model_copy(update={"status": step_status}) if i == idx else s
-                for i, s in enumerate(plan)]
+    new_plan = [
+        s.model_copy(update={"status": step_status}) if i == idx else s
+        for i, s in enumerate(plan)
+    ]
     updates["plan"] = new_plan
     updates["current_step_index"] = idx + 1
 
@@ -717,10 +775,9 @@ async def replan_check_node(state: AgentState) -> dict:
 
     needs, reason = False, ""
     try:
-        chain = (
-            PromptTemplate.from_template(REPLAN_CHECK_PROMPT)
-            | get_executor_llm().with_structured_output(ReplanCheckSchema)
-        )
+        chain = PromptTemplate.from_template(
+            REPLAN_CHECK_PROMPT
+        ) | get_executor_llm().with_structured_output(ReplanCheckSchema)
         result = await chain.ainvoke(
             {
                 "user_query": state.query[:1000],
@@ -795,7 +852,9 @@ async def replanner_node(state: AgentState) -> dict:
     """Pro LLM: 生成补充计划 → 返回 Executor；解析失败降级为默认补充两步。"""
     t0 = time.time()
     reason = state.replan_reason or "质量不足"
-    debug.debug("→ 进入 Replanner 节点", detail=f"原因: {reason} | 已完成{len(state.plan)}步")
+    debug.debug(
+        "→ 进入 Replanner 节点", detail=f"原因: {reason} | 已完成{len(state.plan)}步"
+    )
 
     executed = "\n".join(
         f"[{'done' if s.status == 'done' else s.status}] "
@@ -829,10 +888,20 @@ async def replanner_node(state: AgentState) -> dict:
         ][:3]
         new_reasoning = [f"[Replan] {reason}"] + list(result.reasoning or [])
     except Exception as e:
-        debug.warning("Replanner structured output 失败,使用默认补充步骤", detail=str(e)[:100])
+        debug.warning(
+            "Replanner structured output 失败,使用默认补充步骤", detail=str(e)[:100]
+        )
         additional = [
-            PlanStep(step_id=len(state.plan) + 1, description="联网搜索补充", tool_name="get_google_search"),
-            PlanStep(step_id=len(state.plan) + 2, description="综合信息生成分析", tool_name="analyze_legal_issue"),
+            PlanStep(
+                step_id=len(state.plan) + 1,
+                description="联网搜索补充",
+                tool_name="get_google_search",
+            ),
+            PlanStep(
+                step_id=len(state.plan) + 2,
+                description="综合信息生成分析",
+                tool_name="analyze_legal_issue",
+            ),
         ]
         new_reasoning = [f"[Replan 降级] {reason} → 插入默认补充步骤"]
 
@@ -1007,7 +1076,9 @@ def build_graph(checkpointer=None, store=None):
     )
     builder.add_edge("tools", "merge")
     builder.add_conditional_edges(
-        "merge", route_after_merge, {"executor": "executor", "replan_check": "replan_check"}
+        "merge",
+        route_after_merge,
+        {"executor": "executor", "replan_check": "replan_check"},
     )
     builder.add_conditional_edges(
         "replan_check",
