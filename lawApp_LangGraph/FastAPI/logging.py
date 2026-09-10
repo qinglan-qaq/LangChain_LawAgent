@@ -16,7 +16,8 @@ Agent 分层结构化日志系统
     ERROR    — 致命错误
 
 日志格式:
-    时间 | LEVEL    | 会话ID | 模块.节点 | 概要 | 详细 | → 结果
+    控制台 — 彩色人类可读 (时间 | LEVEL | 会话ID | 模块.节点 | 概要 | 详细 | → 结果)
+    文件   — JSON 行 (结构化字段独立成键, 供日志采集消费)
 
 用法:
     from lawApp_LangGraph.FastAPI.logging import (
@@ -33,6 +34,7 @@ Agent 分层结构化日志系统
     system.warning("Pinecone 连接超时重试", detail=f"attempt={n}")
 """
 
+import json
 import logging
 import logging.handlers
 import sys
@@ -70,9 +72,6 @@ _COLORS = {
     "RESET": "\033[0m",
 }
 
-# 简洁版——给 agent_flow 文件日志用,一行一个事件
-_FILE_FMT = "%(asctime)s | %(levelname)-5s | %(session)-8s | %(name)-20s | %(msg)s"
-
 
 class _AgentFormatter(logging.Formatter):
     """控制台格式化器: 注入 session_id、颜色、结构化字段"""
@@ -103,23 +102,27 @@ class _AgentFormatter(logging.Formatter):
         return super().format(record)
 
 
-class _FileFormatter(logging.Formatter):
-    """文件格式化器: 无颜色,一行一个事件"""
+class _JsonFormatter(logging.Formatter):
+    """文件 JSON 行格式化器: 结构化字段独立成键, 供日志采集消费。
 
-    def __init__(self):
-        super().__init__(fmt=_FILE_FMT, datefmt="%Y-%m-%d %H:%M:%S")
+    字段: ts/level/session/logger/msg + summary/detail/result(有值才有键)。
+    """
 
     def format(self, record: logging.LogRecord) -> str:
-        record.session = get_session()[:8]
-        # 同样拼上扩展字段
-        extras: list[str] = []
+        obj = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "session": get_session()[:8],
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
         for attr in ("summary", "detail", "result"):
             val = getattr(record, attr, None) or ""
             if val:
-                extras.append(val)
-        if extras:
-            record.msg = record.msg + " | " + " | ".join(extras)
-        return super().format(record)
+                obj[attr] = val
+        if record.exc_info:
+            obj["exc"] = self.formatException(record.exc_info)
+        return json.dumps(obj, ensure_ascii=False)
 
 
 #  Logger 工厂
@@ -141,6 +144,7 @@ def setup_logging(
     log_dir: str = "./logs",
     console_level: int | str = logging.INFO,
     file_level: int | str = logging.INFO,
+    force: bool = False,
 ) -> None:
     """初始化所有日志 handler —— 在 FastAPI lifespan 中调用一次
 
@@ -148,9 +152,10 @@ def setup_logging(
         log_dir: 日志文件目录
         console_level: 控制台最低输出级别 (DEBUG / INFO / WARNING / ERROR)
         file_level:   文件最低输出级别
+        force: 重复初始化(测试用), 重挂 handler 前先清理旧 handler
     """
     global _initialized
-    if _initialized:
+    if _initialized and not force:
         return
 
     os.makedirs(log_dir, exist_ok=True)
@@ -177,7 +182,7 @@ def setup_logging(
         encoding="utf-8",
     )
     flow_file_handler.setLevel(file_level)
-    flow_file_handler.setFormatter(_FileFormatter())
+    flow_file_handler.setFormatter(_JsonFormatter())
 
     # ---- 文件 handler: system.log (启动/关闭/致命错误, 便于运维) ----
     sys_file_handler = logging.handlers.RotatingFileHandler(
@@ -187,7 +192,7 @@ def setup_logging(
         encoding="utf-8",
     )
     sys_file_handler.setLevel(logging.INFO)
-    sys_file_handler.setFormatter(_FileFormatter())
+    sys_file_handler.setFormatter(_JsonFormatter())
 
     # 为每个 logger 挂载对应 handler
     for name, logger in _loggers.items():

@@ -57,3 +57,34 @@ def test_graph_config_recursion():
     cfg = graph_config("s-r1")
     assert cfg["configurable"]["thread_id"] == "s-r1"
     assert cfg["recursion_limit"] == settings.recursion_limit
+
+
+def test_json_logging(tmp_path):
+    """文件日志为 JSON 行, 结构化字段独立成键; force 可重复初始化。"""
+    import json as _json
+
+    import lawApp_LangGraph.FastAPI.logging as lg
+
+    lg.setup_logging(
+        log_dir=str(tmp_path), console_level="ERROR",
+        file_level="DEBUG", force=True,
+    )
+    try:
+        lg.set_session("s-json-test")
+        lg.flow.info("JSON日志验证", detail="known=3/7", result="elapsed=0.42s")
+        for h in lg.agent_flow.handlers:
+            h.flush()
+        lines = (tmp_path / "agent_flow.log").read_text(
+            encoding="utf-8"
+        ).strip().splitlines()
+        obj = _json.loads(lines[-1])
+        assert obj["level"] == "INFO"
+        assert obj["session"] == "s-json-test"[:8]
+        assert obj["logger"] == "agent_flow"
+        assert obj["msg"] == "JSON日志验证"
+        assert obj["detail"] == "known=3/7"
+        assert obj["result"] == "elapsed=0.42s"
+    finally:
+        # 清掉指向 tmp_path 的 handler, 不污染后续用例
+        for logger in lg._loggers.values():
+            logger.handlers.clear()
