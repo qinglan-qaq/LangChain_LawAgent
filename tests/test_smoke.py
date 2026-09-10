@@ -6,7 +6,7 @@
     2. State reducers(append / RESET 清空)
     3. 图构建(节点拓扑 + InMemory checkpointer/store 装配)
     4. 空计划 → finalize 直接回答(monkeypatch LLM)
-    5. HITL: 真实 clarify 节点 interrupt → Command(resume) 恢复
+    5. HITL: 要素循环 assess → ask_element interrupt → Command(resume) 恢复
     6. 重启续聊: 同 thread_id 跨图实例状态保持 + 请求间累积字段重置
 
 运行: /Users/qinglan/miniconda3/envs/lawagent/bin/python -m pytest tests/ -q
@@ -37,11 +37,15 @@ class _FakeMsg:
 
 
 class _FakeVerdict:
-    """通用 structured output 替身,同时满足 Clarify / Plan / ReplanCheck
-    三种 Schema 的属性形状(图内各节点按需读取各自属性)。"""
+    """通用 structured output 替身,同时满足 Risk / ElementAssessment /
+    Plan / ReplanCheck / MidClarify 各 Schema 的属性形状
+    (图内各节点按需读取各自属性)。"""
 
     def __init__(self, *, plan=(), reasoning=(), need_clarification=False,
-                 question="", high_risk=False, needs_replan=False, reason=""):
+                 question="", high_risk=False, needs_replan=False, reason="",
+                 applicable=True, element_updates=(), na_keys=(),
+                 promote_keys=(), questions=(), done=False,
+                 insufficient_reason="none"):
         self.plan = list(plan)
         self.reasoning = list(reasoning)
         self.need_clarification = need_clarification
@@ -49,6 +53,13 @@ class _FakeVerdict:
         self.high_risk = high_risk
         self.needs_replan = needs_replan
         self.reason = reason
+        self.applicable = applicable
+        self.element_updates = list(element_updates)
+        self.na_keys = list(na_keys)
+        self.promote_keys = list(promote_keys)
+        self.questions = list(questions)
+        self.done = done
+        self.insufficient_reason = insufficient_reason
 
 
 class _FakeChain(Runnable):
@@ -229,8 +240,9 @@ def test_graph_topology():
     g = app.build_graph()
     nodes = set(g.get_graph().nodes.keys())
     expected = {
-        "ingest", "clarify", "planner", "executor", "tools", "merge",
-        "replan_check", "replanner", "finalize",
+        "ingest", "risk_gate", "element_assess", "ask_element",
+        "planner", "executor", "tools", "merge", "replan_check",
+        "mid_clarify", "hitl_degrade", "hitl_budget", "replanner", "finalize",
     }
     assert expected <= nodes, f"missing: {expected - nodes}"
 
@@ -266,35 +278,46 @@ def test_chitchat_short_circuit(no_llm):
     asyncio.run(run())
 
 
-#  4. HITL interrupt → resume(真实 clarify 节点)
+#  4. HITL interrupt → resume(要素循环: assess → ask interrupt → resume 补充)
 
 
 def test_interrupt_resume(no_llm):
-    """clarify 判定需反问 → interrupt 暂停 → Command(resume=用户补充) 恢复后完成回答."""
+    """要素循环: assess 判定缺关键要素 → ask interrupt → resume 补充 → 要素齐 → planner."""
     import lawApp_LangGraph.LangGraph_lawApp as lg
+    from lawApp_LangGraph.state import ElementQuestion
     from langgraph.checkpoint.memory import MemorySaver
     from langgraph.types import Command
 
+    # ① 首轮: 缺 marriage_status, 生成反问
     no_llm["plan_result"] = _FakeVerdict(
-        need_clarification=True, question="请问结婚多少年了?", plan=[]
+        need_clarification=True, question="请问结婚多少年了?",
+        applicable=True, done=False,
+        questions=[ElementQuestion(key="marriage_status",
+                                   question="请问结婚多少年了?")],
+        plan=[],
     )
 
     async def run():
         g = lg.build_graph(checkpointer=MemorySaver())
-        cfg = {"configurable": {"thread_id": "t-hitl"}}
+        cfg = {"configurable": {"thread_id": "t-hitl2"}}
         result = await g.ainvoke({"query": "我想离婚"}, config=cfg)
         assert not result.get("final_answer")
 
         snap = await g.aget_state(cfg)
-        assert snap.next  # 图停在 interrupt,有待执行节点
+        assert snap.next
         intr = next(iter(snap.interrupts), None)
         assert intr and intr.value["type"] == "clarify"
-        assert intr.value["question"] == "请问结婚多少年了?"
+        assert "结婚多少年" in intr.value["question"]
 
-        result2 = await g.ainvoke(Command(resume="结婚5年,有个3岁孩子"), config=cfg)
+        # ② resume 补充 → assess 二轮(无新反问) → planner(空计划) → finalize
+        no_llm["plan_result"] = _FakeVerdict(reasoning=["要素齐"], plan=[])
+        result2 = await g.ainvoke(
+            Command(resume="结婚5年,有个3岁孩子"), config=cfg
+        )
         assert result2.get("final_answer") == "测试回答"
-        # 反问答案被织入增强 query,继续走 planner
-        assert "用户补充信息" in result2["query"]
+        assert "[用户补充信息]" in result2["query"]
+        assert result2["clarify_history"], "应记录澄清历史"
+        assert result2["clarify_rounds"] == 1
 
     asyncio.run(run())
 

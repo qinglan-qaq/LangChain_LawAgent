@@ -5,12 +5,20 @@ Plan & Execute Agent v2 — 法律咨询智能体 (LangGraph 1.x)
     llm_planner  (DeepSeek Pro)   → structured output 制定计划/重规划
     llm_executor (DeepSeek Flash) → bind_tools 逐步执行、调用工具
 
-Graph 流程:
-    START → ingest → clarify(HITL①②) → planner
-              planner ──[plan 空]──→ finalize → END
-              planner ──[有步骤]──→ executor ⇄ tools(ToolNode) → merge
-                          ↑                │
-                          └── replanner ← replan_check ←┘ (质量不足)
+Graph 流程 (14 节点):
+    START → ingest → risk_gate(HITL① 高风险确认) → element_assess
+    element_assess ⇄ ask_element(HITL② 要素反问, 最多 MAX_CLARIFY_ROUNDS 轮)
+    element_assess ──[要素齐/轮数尽]──→ planner
+    planner ──[plan 空]──→ finalize → END
+    planner ──[有步骤]──→ executor ⇄ tools(ToolNode) → merge
+    executor/merge ──[连续失败≥阈值]──→ hitl_degrade(HITL④)
+        hitl_degrade ──[retry→replanner | skip→replan_check | abort→finalize]
+    executor/merge ──[步骤完成]──→ replan_check
+        replan_check ──[质量通过]──→ finalize
+        replan_check ──[预算耗尽]──→ hitl_budget(HITL⑥)
+            hitl_budget ──[补充→replanner | 收尾→finalize]
+        replan_check ──[vague 未问过]──→ mid_clarify(HITL⑤) → replanner
+        replan_check ──[其余]──→ replanner → executor
 
 v2 变更 (upgrade-v1):
 - 4 处「剥代码栅栏 + json.loads」全部改为 with_structured_output(Pydantic Schema)
@@ -19,10 +27,13 @@ v2 变更 (upgrade-v1):
 - 删除 _TOOL_FALLBACK_ARGS 字典（structured 单次重试取代）
 - 新增 ingest 节点：每轮请求重置累积字段（reducer + RESET 标记），
   多轮对话不再泄漏上一轮的检索/调用记录
-- HITL 三处 interrupt() + Command(resume=...)：
-    ① clarify 节点: 关键事实缺失反问（每轮最多一次）
-    ② clarify 节点: 高风险话题确认
+- HITL 六处 interrupt() + Command(resume=...)：
+    ① risk_gate: 高风险话题确认(拒绝 → 热线文案中止)
+    ② ask_element: 关键要素缺失反问(要素循环, 最多 MAX_CLARIFY_ROUNDS 轮)
     ③ executor: markdown_to_pdf 执行前确认
+    ④ hitl_degrade: 工具连续失败降级询问(重试/跳过/终止)
+    ⑤ mid_clarify: 检索反馈追问(先问人后搜网)
+    ⑥ hitl_budget: 重规划预算耗尽询问(补充/收尾)
 - LLM 懒加载单例，模块导入不再要求 API Key（可安全冒烟测试）
 - 持久化: checkpointer(PostgresSaver/MemorySaver) + store(PostgresStore/InMemoryStore)
   由 FastAPI lifespan 注入；记忆工具经 langgraph.config.get_store() 访问
@@ -45,6 +56,7 @@ from langgraph.types import interrupt
 
 from lawApp_LangGraph.FastAPI.logging import debug
 from lawApp_LangGraph.state import (
+    ERROR_STREAK_THRESHOLD,
     MAX_CLARIFY_ROUNDS,
     RESET,
     AgentState,
@@ -60,9 +72,7 @@ from lawApp_LangGraph.tools import ALL_TOOLS
 
 load_dotenv()
 
-#  Task 3: 提示词统一改用 prompts.py 单一来源.
-# 文件内同名旧常量已改名 _LEGACY_*(文本原样保留,Task 6 重构时删除),
-# 否则下方旧赋值会遮蔽本 import,节点将拿不到 v2 提示词.
+#  Task 3: 提示词统一改用 prompts.py 单一来源(旧版常量已于 Task 6 删除).
 from lawApp_LangGraph.prompts import (
     BUDGET_CONFIRM_MSG,
     DEGRADE_CONFIRM_MSG,
@@ -484,27 +494,6 @@ def ask_element_node(state: AgentState) -> dict:
 
 # Node 1: The Planner — Pro LLM 制定计划 + 思考链
 
-#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
-_LEGACY_PLANNER_SYSTEM = """你是法律AI系统的任务规划师.分析用户问题,制定可执行的步骤计划.
-
-## 可用工具
-{available_tools}
-
-## 计划原则
-- 法律问题: retrieve_legal_knowledge → evaluate_case_relevance → analyze_legal_issue
-- 如需要引用具体法律条文作为依据: 在检索案例后插入 fetch_laws 获取相关法条原文
-- 如评估结果为"不足": 插入 get_google_search 联网补充再分析
-- 如用户提及之前讨论过的话题: 先用 search_memory 搜索历史记忆获取上下文
-- 一般情况下,在生成最终回答后用 save_to_memory 保存
-- 一般情况下不需要过多网络搜索,优先利用 RAG 检索到的案例;如案例不足再补充网络搜索
-- 如用户要求输出 PDF 报告: 最后一步调用 markdown_to_pdf 生成 PDF 文件(执行前系统会请求用户确认)
-- 简单闲聊: plan 为空数组 []
-- tool_name 必须是上述列表中的名称,不需要工具则填写 null
-- 计划步骤不超过 8 步
-
-## 用户问题
-{query}"""
-
 
 def _tools_desc() -> str:
     return "\n".join(f"- {t.name}: {(t.description or '')[:120]}" for t in ALL_TOOLS())
@@ -546,7 +535,11 @@ async def planner_node(state: AgentState) -> dict:
             PLANNER_SYSTEM
         ) | get_planner_llm().with_structured_output(PlanSchema)
         result = await chain.ainvoke(
-            {"query": query[:3000], "available_tools": _tools_desc()}
+            {
+                "query": query[:3000],
+                "available_tools": _tools_desc(),
+                "elements_digest": state.case_elements.digest(),
+            }
         )
         plan = _normalize_plan(result)
         reasoning = list(result.reasoning or [])
@@ -590,25 +583,6 @@ async def planner_node(state: AgentState) -> dict:
 
 
 # Node 2: The Executor — Flash LLM 为当前步骤生成工具调用
-
-#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
-_LEGACY_EXECUTOR_PROMPT = """你是执行器,只做一件事:调用指定的工具.
-
-当前步骤: {step_description}
-指定工具: {tool_name}
-用户问题: {user_query}
-
-上下文数据:
-- 已检索案例: {rag_summary}
-- 案例评估: {eval_summary}
-- 检索法条: {law_summary}
-- 网络搜索: {web_summary}
-
-规则:
-1. 只调用 {tool_name},不要调用其他工具
-2. 从上下文和用户问题中提取参数
-3. 不要做推理,只需正确调用工具
-4. 必须发起一次工具调用"""
 
 
 def _step_summaries(state: AgentState) -> dict[str, str]:
@@ -716,6 +690,7 @@ async def executor_node(state: AgentState) -> dict:
         step_description=step.description,
         tool_name=step.tool_name,
         user_query=state.query,
+        elements_digest=state.case_elements.digest(),
         **summaries,
     )
 
@@ -913,29 +888,6 @@ async def merge_node(state: AgentState) -> dict:
 
 # Node 5: Replan Check — Flash LLM 质量门控
 
-#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
-_LEGACY_REPLAN_CHECK_PROMPT = """你是法律AI系统的质量审核员。检查已执行步骤的结果，判断当前信息是否足以生成高质量的法律回答。
-
-## 用户原始问题
-{user_query}
-
-## 已执行步骤及结果
-{executed_summary}
-
-## 当前数据状态
-- 检索到的案例数量: {doc_count}
-- 案例质量评估: {quality_verdict}
-- 网络搜索补充: {web_count} 条
-- 法律条文检索: {law_count} 条
-- 执行错误: {error_info}
-
-## 判断标准
-1. 如果已检索到相关案例且质量评估为"充足" → 不需要重规划
-2. 如果检索结果为空或质量评估为"不足"，且尚未进行网络搜索 → 需要重规划（补充 get_google_search）
-3. 如果执行中出现了无法恢复的错误 → 需要重规划
-4. 如果已有 final_answer 或 analyze_legal_issue 已成功执行 → 不需要重规划
-5. 如果已有足够案例且进行了法律分析 → 不需要重规划"""
-
 
 async def replan_check_node(state: AgentState) -> dict:
     """Flash LLM 语义判断是否需要重规划；失败降级为规则判断。"""
@@ -1097,32 +1049,6 @@ async def mid_clarify_node(state: AgentState) -> dict:
 
 # Node 6: The Replanner — Pro LLM 补充计划
 
-#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
-_LEGACY_REPLANNER_SYSTEM_PROMPT = """你是任务规划师.基于已执行的步骤和当前结果,生成**补充步骤**.
-
-## 已执行步骤
-{executed_steps}
-
-## 当前状态
-- 案例数量: {doc_count}
-- 评估结论: {quality}
-- 网络搜索: {web_count} 条
-- 法律条文: {law_count} 条
-- 错误: {error}
-
-## 重规划原因
-{replan_reason}
-
-## 可用工具
-{available_tools}
-
-## 用户问题
-{user_query}
-
-## 要求
-只输出需要**新增**的步骤,不要重复已完成的步骤.新增步骤不超过 3 步.
-下一个步骤编号从 {next_id} 开始."""
-
 
 async def replanner_node(state: AgentState) -> dict:
     """Pro LLM: 生成补充计划 → 返回 Executor；解析失败降级为默认补充两步。"""
@@ -1198,15 +1124,6 @@ async def replanner_node(state: AgentState) -> dict:
 
 
 # Node 7: Finalize — 组装最终回答
-
-#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
-_LEGACY_FINALIZE_CASE_PROMPT = PromptTemplate.from_template(
-    "基于以下案例,简要回答用户问题.\n案例:\n{docs}\n\n问题: {query}\n\n法律建议:"
-)
-
-_LEGACY_FINALIZE_DIRECT_PROMPT = PromptTemplate.from_template(
-    "你是经验丰富的法律AI助手,七成理智,二成细腻,一成傲娇,请根据你的知识回答用户问题.\n问题: {query}\n回答:"
-)
 
 
 async def finalize_node(state: AgentState) -> dict:
@@ -1395,25 +1312,67 @@ def hitl_budget_node(state: AgentState) -> dict:
 
 
 # 条件路由函数 (Conditional Edges)
+# 路由为 state 的纯函数: 只读状态返回节点名,不产生副作用;build_graph 只负责装配.
 
 
-def route_after_clarify(state: AgentState) -> str:
-    """已生成中止回答 → finalize；否则 → planner。"""
+def route_after_risk_gate(state: AgentState) -> str:
+    """风险门控出口路由。
+
+    Returns:
+        str: 下一节点名 —— 已有 final_answer(高风险被拒,热线中止文案已写)
+            → "finalize";否则(放行) → "element_assess".
+    """
     if state.final_answer:
         return "finalize"
+    return "element_assess"
+
+
+def route_after_assess(state: AgentState) -> str:
+    """要素评估出口路由。
+
+    Returns:
+        str: 下一节点名 —— 有关键缺口反问且未达轮数上限 → "ask_element";
+            否则(要素齐/轮数尽/软放行) → "planner".
+    """
+    if state.pending_questions and state.clarify_rounds < MAX_CLARIFY_ROUNDS:
+        return "ask_element"
     return "planner"
 
 
+def route_after_ask(state: AgentState) -> str:
+    """要素反问出口路由。
+
+    Returns:
+        str: 下一节点名 —— 轮数耗尽 → "planner"(软放行,按原问题继续);
+            否则 → "element_assess"(应用用户回答后重新评估).
+    """
+    if state.clarify_rounds >= MAX_CLARIFY_ROUNDS:
+        return "planner"
+    return "element_assess"
+
+
 def route_after_planner(state: AgentState) -> str:
-    """有步骤 → executor | 无步骤 → finalize"""
+    """规划器出口路由。
+
+    Returns:
+        str: 下一节点名 —— 计划有步骤 → "executor";计划为空(闲聊/直答)
+            → "finalize".
+    """
     target = "executor" if state.plan else "finalize"
     debug.debug(f"路由: Planner → {target}", detail=f"plan_steps={len(state.plan)}")
     return target
 
 
 def route_after_executor(state: AgentState) -> str:
-    """最新 AIMessage 带 tool_calls → tools；否则（跳过/失败步骤已推进索引）
-    按剩余步骤决定回 executor 或进 replan_check。"""
+    """执行器出口路由（含降级分支）。
+
+    Returns:
+        str: 下一节点名 —— 连续失败达阈值且未用过降级 → "hitl_degrade";
+            最新 AIMessage 带 tool_calls → "tools";其余按剩余步骤 →
+            "executor"(还有步骤) / "replan_check"(全部完成).
+    """
+    if state.error_streak >= ERROR_STREAK_THRESHOLD and not state.degrade_used:
+        return "hitl_degrade"
     last_ai = next(
         (m for m in reversed(state.messages) if isinstance(m, AIMessage)), None
     )
@@ -1430,7 +1389,14 @@ def route_after_executor(state: AgentState) -> str:
 
 
 def route_after_merge(state: AgentState) -> str:
-    """还有步骤 → executor | 全部完成 → replan_check"""
+    """合并出口路由（含降级分支）。
+
+    Returns:
+        str: 下一节点名 —— 连续失败达阈值且未用过降级 → "hitl_degrade";
+            其余按剩余步骤 → "executor"(还有步骤) / "replan_check"(全部完成).
+    """
+    if state.error_streak >= ERROR_STREAK_THRESHOLD and not state.degrade_used:
+        return "hitl_degrade"
     target = (
         "executor" if state.current_step_index < len(state.plan) else "replan_check"
     )
@@ -1442,27 +1408,63 @@ def route_after_merge(state: AgentState) -> str:
 
 
 def route_after_replan_check(state: AgentState) -> str:
-    """需重规划 → replanner | 质量通过 → finalize；超过 MAX_ROUNDS 强制终止"""
+    """质量门控出口路由（优先级短路，见 spec §5.2）。
+
+    Returns:
+        str: 下一节点名，优先级从高到低 —— 质量通过(不需重规划) →
+            "finalize";预算耗尽(工具调用数达 MAX_ROUNDS) → 已问过
+            budget 则 "finalize"、未问过 → "hitl_budget";不足原因为
+            vague(问题笼统)且未用过 → "mid_clarify";其余(not_found/
+            error/已用过 mid) → "replanner".
+    """
     executed = len(state.tool_calls)
-    if executed >= MAX_ROUNDS:
-        debug.info(
-            "路由: ReplanCheck → finalize (已达最大轮数)",
-            detail=f"tool_calls={executed}/{MAX_ROUNDS}",
-        )
+    # 1. 质量通过
+    if not state.replan_needed:
         return "finalize"
-    target = "replanner" if state.replan_needed else "finalize"
-    debug.debug(
-        f"路由: ReplanCheck → {target}",
-        detail=f"replan_needed={state.replan_needed} | executed={executed}",
-    )
-    return target
+    # 2. 预算耗尽
+    if executed >= MAX_ROUNDS:
+        if state.budget_hitl_used:
+            return "finalize"
+        return "hitl_budget"
+    # 3. 不足 · 笼统 · 未用过 mid_clarify
+    if state.insufficient_reason == "vague" and not state.mid_clarify_used:
+        return "mid_clarify"
+    # 4. 其余(not_found/error/已用过 mid) → replanner
+    return "replanner"
+
+
+def route_after_degrade(state: AgentState) -> str:
+    """降级询问出口路由。
+
+    Returns:
+        str: 下一节点名 —— abort(final_answer 中止文案已写) → "finalize";
+            retry(replan_needed 已置) → "replanner" 重新规划;
+            skip(默认) → "replan_check" 质量门控收口.
+    """
+    if state.final_answer:
+        return "finalize"
+    if state.replan_needed:
+        return "replanner"
+    return "replan_check"
+
+
+def route_after_budget(state: AgentState) -> str:
+    """预算询问出口路由。
+
+    Returns:
+        str: 下一节点名 —— 补充(replan_needed 已置,最后一次执行) →
+            "replanner";收尾(默认) → "finalize".
+    """
+    if state.replan_needed:
+        return "replanner"
+    return "finalize"
 
 
 # 构建 Graph
 
 
 def build_graph(checkpointer=None, store=None):
-    """构建 Plan & Execute 主图。
+    """构建 Plan & Execute 主图（14 节点，子项目A 最终拓扑）。
 
     Args:
         checkpointer: LangGraph checkpointer（PostgresSaver / MemorySaver），
@@ -1473,37 +1475,62 @@ def build_graph(checkpointer=None, store=None):
     builder = StateGraph(AgentState)
 
     builder.add_node("ingest", ingest_node)
-    builder.add_node("clarify", clarify_node)
+    builder.add_node("risk_gate", risk_gate_node)
+    builder.add_node("element_assess", element_assess_node)
+    builder.add_node("ask_element", ask_element_node)
     builder.add_node("planner", planner_node)
     builder.add_node("executor", executor_node)
     builder.add_node("tools", _build_tools_node())
     builder.add_node("merge", merge_node)
     builder.add_node("replan_check", replan_check_node)
+    builder.add_node("mid_clarify", mid_clarify_node)
+    builder.add_node("hitl_degrade", hitl_degrade_node)
+    builder.add_node("hitl_budget", hitl_budget_node)
     builder.add_node("replanner", replanner_node)
     builder.add_node("finalize", finalize_node)
 
     builder.add_edge(START, "ingest")
-    builder.add_edge("ingest", "clarify")
+    builder.add_edge("ingest", "risk_gate")
     builder.add_conditional_edges(
-        "clarify", route_after_clarify, {"planner": "planner", "finalize": "finalize"}
+        "risk_gate", route_after_risk_gate,
+        {"element_assess": "element_assess", "finalize": "finalize"},
     )
     builder.add_conditional_edges(
-        "planner", route_after_planner, {"executor": "executor", "finalize": "finalize"}
+        "element_assess", route_after_assess,
+        {"ask_element": "ask_element", "planner": "planner"},
     )
     builder.add_conditional_edges(
-        "executor",
-        route_after_executor,
-        {"tools": "tools", "executor": "executor", "replan_check": "replan_check"},
+        "ask_element", route_after_ask,
+        {"element_assess": "element_assess", "planner": "planner"},
+    )
+    builder.add_conditional_edges(
+        "planner", route_after_planner,
+        {"executor": "executor", "finalize": "finalize"},
+    )
+    builder.add_conditional_edges(
+        "executor", route_after_executor,
+        {"tools": "tools", "executor": "executor",
+         "replan_check": "replan_check", "hitl_degrade": "hitl_degrade"},
     )
     builder.add_edge("tools", "merge")
     builder.add_conditional_edges(
-        "merge",
-        route_after_merge,
-        {"executor": "executor", "replan_check": "replan_check"},
+        "merge", route_after_merge,
+        {"executor": "executor", "replan_check": "replan_check",
+         "hitl_degrade": "hitl_degrade"},
     )
     builder.add_conditional_edges(
-        "replan_check",
-        route_after_replan_check,
+        "replan_check", route_after_replan_check,
+        {"mid_clarify": "mid_clarify", "replanner": "replanner",
+         "hitl_budget": "hitl_budget", "finalize": "finalize"},
+    )
+    builder.add_edge("mid_clarify", "replanner")
+    builder.add_conditional_edges(
+        "hitl_degrade", route_after_degrade,
+        {"replanner": "replanner", "replan_check": "replan_check",
+         "finalize": "finalize"},
+    )
+    builder.add_conditional_edges(
+        "hitl_budget", route_after_budget,
         {"replanner": "replanner", "finalize": "finalize"},
     )
     builder.add_edge("replanner", "executor")

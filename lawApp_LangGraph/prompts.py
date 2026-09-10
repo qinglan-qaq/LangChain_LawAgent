@@ -209,7 +209,7 @@ DEGRADE_CONFIRM_MSG = "工具 {failed_tool} 已连续失败多次。请选择处
 BUDGET_CONFIRM_MSG = "本次咨询的执行预算即将用尽,当前信息可能不足以给出高质量回答。\n还缺: {missing}\n回复补充内容将继续深入分析,回复「收尾」将基于现有材料给出回答。"
 
 
-#  兜底回答 (v2: Kim 人设替换"七成傲娇")
+#  兜底回答 (v2: 统一 Kim 人设,替换旧版个性设定)
 FINALIZE_CASE_PROMPT = PromptTemplate.from_template(
     KIM_PERSONA_BLOCK + """
 
