@@ -13,6 +13,7 @@ v2 变更 (upgrade-v1):
 - 移除全局 stream_queue;token 流由 graph.astream(stream_mode="messages") 驱动
 """
 
+import threading
 import time
 from typing import Any, List, Optional
 
@@ -33,24 +34,27 @@ from lawApp_LangGraph.state import (
     PromptsRecord,
 )
 
-#  LLM 懒加载单例 — analyze_legal_issue 用
+#  LLM 懒加载单例 — analyze_legal_issue 用; Lock 双检防多线程重复初始化
 
 _llm = None
+_llm_lock = threading.Lock()
 
 
 def _get_llm():
     """Flash LLM 懒加载（导入期不触碰 API Key）。"""
     global _llm
     if _llm is None:
-        from langchain_openai import ChatOpenAI
+        with _llm_lock:
+            if _llm is None:
+                from langchain_openai import ChatOpenAI
 
-        _llm = ChatOpenAI(
-            model=settings.deepseek_flash_model,
-            openai_api_key=settings.deepseek_api_key,
-            openai_api_base=settings.deepseek_base_url,
-            temperature=0.4,
-            max_tokens=4096,
-        )
+                _llm = ChatOpenAI(
+                    model=settings.deepseek_flash_model,
+                    openai_api_key=settings.deepseek_api_key,
+                    openai_api_base=settings.deepseek_base_url,
+                    temperature=0.4,
+                    max_tokens=4096,
+                )
     return _llm
 
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
 from lawApp_LangGraph.config import settings
@@ -15,17 +16,23 @@ from lawApp_LangGraph.config import settings
 logger = logging.getLogger("lawApp.rag")
 
 _embedder = None
+_embedder_lock = threading.Lock()
 _reranker = None
+_reranker_lock = threading.Lock()
 
 
 def get_embedder():
     """SentenceTransformer BGE 嵌入模型（懒加载单例）。"""
     global _embedder
     if _embedder is None:
-        from sentence_transformers import SentenceTransformer
+        with _embedder_lock:
+            if _embedder is None:
+                from sentence_transformers import SentenceTransformer
 
-        logger.info("初始化 Embedder (冷启动) | model=%s", settings.memory_embed_model)
-        _embedder = SentenceTransformer(settings.memory_embed_model)
+                logger.info(
+                    "初始化 Embedder (冷启动) | model=%s", settings.memory_embed_model
+                )
+                _embedder = SentenceTransformer(settings.memory_embed_model)
     return _embedder
 
 
@@ -33,12 +40,17 @@ def get_reranker():
     """CrossEncoder 重排序模型（懒加载单例，RERANK_ENABLED=0 可禁用）。"""
     global _reranker
     if _reranker is None:
-        if settings.rerank_enabled == "0":
-            return None
-        from sentence_transformers import CrossEncoder
+        with _reranker_lock:
+            # 禁用分支不缓存单例, 后续调用仍可重新判定
+            if _reranker is None:
+                if settings.rerank_enabled == "0":
+                    return None
+                from sentence_transformers import CrossEncoder
 
-        logger.info("初始化 CrossEncoder (冷启动) | model=%s", settings.rerank_model)
-        _reranker = CrossEncoder(settings.rerank_model, max_length=512)
+                logger.info(
+                    "初始化 CrossEncoder (冷启动) | model=%s", settings.rerank_model
+                )
+                _reranker = CrossEncoder(settings.rerank_model, max_length=512)
     return _reranker
 
 

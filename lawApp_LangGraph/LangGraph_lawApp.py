@@ -42,6 +42,7 @@ v2 变更 (upgrade-v1):
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
@@ -87,25 +88,29 @@ from lawApp_LangGraph.prompts import (
 )
 from lawApp_LangGraph.tools.rag_tools import analyze_legal_issue  # noqa — 已有,确认不缺
 
-#  LLM 懒加载单例 — 导入期不触碰 API Key
+#  LLM 懒加载单例 — 导入期不触碰 API Key; Lock 双检防多线程/多 worker 重复初始化
 
 _llm_planner = None
+_llm_planner_lock = threading.Lock()
 _llm_executor = None
+_llm_executor_lock = threading.Lock()
 
 
 def get_planner_llm():
     """Pro LLM（规划/重规划，强推理）。测试可 monkeypatch 本函数。"""
     global _llm_planner
     if _llm_planner is None:
-        from langchain_openai import ChatOpenAI
+        with _llm_planner_lock:
+            if _llm_planner is None:
+                from langchain_openai import ChatOpenAI
 
-        _llm_planner = ChatOpenAI(
-            model=settings.deepseek_pro_model,
-            temperature=0.4,
-            max_tokens=4096,
-            openai_api_key=settings.deepseek_api_key,
-            openai_api_base=settings.deepseek_base_url,
-        )
+                _llm_planner = ChatOpenAI(
+                    model=settings.deepseek_pro_model,
+                    temperature=0.4,
+                    max_tokens=4096,
+                    openai_api_key=settings.deepseek_api_key,
+                    openai_api_base=settings.deepseek_base_url,
+                )
     return _llm_planner
 
 
@@ -113,15 +118,17 @@ def get_executor_llm():
     """Flash LLM（执行/质量门控，低成本低延迟）。测试可 monkeypatch 本函数。"""
     global _llm_executor
     if _llm_executor is None:
-        from langchain_openai import ChatOpenAI
+        with _llm_executor_lock:
+            if _llm_executor is None:
+                from langchain_openai import ChatOpenAI
 
-        _llm_executor = ChatOpenAI(
-            model=settings.deepseek_flash_model,
-            temperature=0.25,
-            max_tokens=2048,
-            openai_api_key=settings.deepseek_api_key,
-            openai_api_base=settings.deepseek_base_url,
-        )
+                _llm_executor = ChatOpenAI(
+                    model=settings.deepseek_flash_model,
+                    temperature=0.25,
+                    max_tokens=2048,
+                    openai_api_key=settings.deepseek_api_key,
+                    openai_api_base=settings.deepseek_base_url,
+                )
     return _llm_executor
 
 

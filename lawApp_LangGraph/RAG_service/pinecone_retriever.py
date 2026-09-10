@@ -10,6 +10,7 @@ Pinecone 检索后端 — 混合检索（密集 + BM25 稀疏 + CrossEncoder 重
 from __future__ import annotations
 
 import logging
+import threading
 
 from lawApp_LangGraph.RAG_service.base import BaseRetriever
 from lawApp_LangGraph.config import settings
@@ -17,22 +18,25 @@ from lawApp_LangGraph.config import settings
 logger = logging.getLogger("lawApp.rag")
 
 _service = None
+_service_lock = threading.Lock()
 
 
 def _get_service():
     global _service
     if _service is None:
-        from lawApp_LangGraph.RAG_service.RAG_program import RAG_service
+        with _service_lock:
+            if _service is None:
+                from lawApp_LangGraph.RAG_service.RAG_program import RAG_service
 
-        logger.info("初始化 Pinecone RAG_service (冷启动)")
-        _service = RAG_service(
-            index_name=settings.pinecone_index_name,
-            api_key=settings.pinecone_api_key,  # type: ignore[arg-type]
-            cloud=settings.pinecone_cloud,
-            region=settings.pinecone_region,
-        )
-        # 检索路径只附着到已存在的索引，不创建
-        _service.index = _service.pc.Index(_service.index_name)
+                logger.info("初始化 Pinecone RAG_service (冷启动)")
+                _service = RAG_service(
+                    index_name=settings.pinecone_index_name,
+                    api_key=settings.pinecone_api_key,  # type: ignore[arg-type]
+                    cloud=settings.pinecone_cloud,
+                    region=settings.pinecone_region,
+                )
+                # 检索路径只附着到已存在的索引，不创建
+                _service.index = _service.pc.Index(_service.index_name)
     return _service
 
 
