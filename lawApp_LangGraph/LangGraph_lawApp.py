@@ -56,6 +56,23 @@ from lawApp_LangGraph.tools import ALL_TOOLS
 
 load_dotenv()
 
+#  Task 3: 提示词统一改用 prompts.py 单一来源.
+# 文件内同名旧常量已改名 _LEGACY_*(文本原样保留,Task 6 重构时删除),
+# 否则下方旧赋值会遮蔽本 import,节点将拿不到 v2 提示词.
+from lawApp_LangGraph.prompts import (
+    DEGRADE_CONFIRM_MSG,
+    ELEMENT_ASSESS_PROMPT,
+    EXECUTOR_PROMPT,
+    FINALIZE_CASE_PROMPT,
+    FINALIZE_DIRECT_PROMPT,
+    MID_CLARIFY_PROMPT,
+    PLANNER_SYSTEM,
+    REPLANNER_SYSTEM_PROMPT,
+    REPLAN_CHECK_PROMPT,
+    RISK_GATE_PROMPT,
+)
+from lawApp_LangGraph.tools.rag_tools import analyze_legal_issue  # noqa — 已有,确认不缺
+
 
 #  LLM 懒加载单例 — 导入期不触碰 API Key
 
@@ -283,7 +300,8 @@ async def clarify_node(state: AgentState) -> dict:
 
 # Node 1: The Planner — Pro LLM 制定计划 + 思考链
 
-PLANNER_SYSTEM = """你是法律AI系统的任务规划师.分析用户问题,制定可执行的步骤计划.
+#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
+_LEGACY_PLANNER_SYSTEM = """你是法律AI系统的任务规划师.分析用户问题,制定可执行的步骤计划.
 
 ## 可用工具
 {available_tools}
@@ -376,7 +394,8 @@ async def planner_node(state: AgentState) -> dict:
 
 # Node 2: The Executor — Flash LLM 为当前步骤生成工具调用
 
-EXECUTOR_PROMPT = """你是执行器,只做一件事:调用指定的工具.
+#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
+_LEGACY_EXECUTOR_PROMPT = """你是执行器,只做一件事:调用指定的工具.
 
 当前步骤: {step_description}
 指定工具: {tool_name}
@@ -653,7 +672,8 @@ async def merge_node(state: AgentState) -> dict:
 
 # Node 5: Replan Check — Flash LLM 质量门控
 
-REPLAN_CHECK_PROMPT = """你是法律AI系统的质量审核员。检查已执行步骤的结果，判断当前信息是否足以生成高质量的法律回答。
+#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
+_LEGACY_REPLAN_CHECK_PROMPT = """你是法律AI系统的质量审核员。检查已执行步骤的结果，判断当前信息是否足以生成高质量的法律回答。
 
 ## 用户原始问题
 {user_query}
@@ -744,7 +764,8 @@ def _fallback_replan_check(state: AgentState) -> tuple[bool, str]:
 
 # Node 6: The Replanner — Pro LLM 补充计划
 
-REPLANNER_SYSTEM_PROMPT = """你是任务规划师.基于已执行的步骤和当前结果,生成**补充步骤**.
+#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
+_LEGACY_REPLANNER_SYSTEM_PROMPT = """你是任务规划师.基于已执行的步骤和当前结果,生成**补充步骤**.
 
 ## 已执行步骤
 {executed_steps}
@@ -833,11 +854,12 @@ async def replanner_node(state: AgentState) -> dict:
 
 # Node 7: Finalize — 组装最终回答
 
-FINALIZE_CASE_PROMPT = PromptTemplate.from_template(
+#  旧版常量 — Task 6 删除;改名 _LEGACY_* 避免遮蔽顶部 prompts.py 导入
+_LEGACY_FINALIZE_CASE_PROMPT = PromptTemplate.from_template(
     "基于以下案例,简要回答用户问题.\n案例:\n{docs}\n\n问题: {query}\n\n法律建议:"
 )
 
-FINALIZE_DIRECT_PROMPT = PromptTemplate.from_template(
+_LEGACY_FINALIZE_DIRECT_PROMPT = PromptTemplate.from_template(
     "你是经验丰富的法律AI助手,七成理智,二成细腻,一成傲娇,请根据你的知识回答用户问题.\n问题: {query}\n回答:"
 )
 
