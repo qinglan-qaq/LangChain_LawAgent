@@ -252,6 +252,8 @@ def _resolve_prompts_record(prompts_record: Any) -> PromptsRecord:
 def _build_analysis_context(pr: PromptsRecord) -> str:
     """从 PromptsRecord 的 web/law/case 字段拼装提示词上下文."""
     parts: list[str] = []
+    if pr.known_elements and pr.known_elements != "暂无已知要素":
+        parts.append(f"[已知案件要素]\n{pr.known_elements}")
 
     for law in pr.laws_results:
         parts.append(
