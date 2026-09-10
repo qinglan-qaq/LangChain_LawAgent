@@ -134,6 +134,60 @@ def test_state_reducers():
     assert isinstance(RESET, str)
 
 
+def test_case_elements_model():
+    from lawApp_LangGraph.state import (
+        CaseElements, default_case_elements, MAX_CLARIFY_ROUNDS,
+        ERROR_STREAK_THRESHOLD,
+    )
+
+    ce = default_case_elements()
+    # 默认 7 要素，关键 3 个
+    keys = [e.key for e in ce.elements]
+    assert keys == [
+        "marriage_status", "demand", "property",
+        "children", "timeline", "evidence", "opposing_stance",
+    ]
+    assert [e.label for e in ce.elements if e.critical] == ["婚姻现状", "核心诉求", "主要财产与归属"]
+    assert len(ce.critical_missing()) == 3
+
+    # mark_na / promote / update
+    ce.mark_na(["evidence"])
+    ce.promote(["timeline"])
+    assert ce.elements[4].critical is True          # timeline 升关键
+    assert ce.elements[5].status == "na"            # evidence 不适用
+    ce.update("marriage_status", "在婚,分居中", by="assess")
+    assert ce.elements[0].status == "known"
+    assert ce.elements[0].value == "在婚,分居中"
+    assert ce.elements[0].updated_by == "assess"
+
+    # critical_missing 随更新收缩
+    assert [e.key for e in ce.critical_missing()] == ["demand", "property", "timeline"]
+
+    # digest: known 的进文本, missing/na 不进
+    ce.update("property", "一套房,双方名下", by="assess")
+    d = ce.digest()
+    assert "婚姻现状" in d and "一套房,双方名下" in d
+    assert "核心诉求" not in d
+
+    assert MAX_CLARIFY_ROUNDS == 5
+    assert ERROR_STREAK_THRESHOLD == 2
+
+
+def test_agent_state_new_fields():
+    from lawApp_LangGraph.state import AgentState
+
+    s = AgentState(query="我想离婚")
+    for f in ("case_elements", "clarify_history", "pending_questions",
+              "clarify_rounds", "error_streak", "mid_clarify_used",
+              "budget_hitl_used", "degrade_used"):
+        assert hasattr(s, f), f"缺少新字段 {f}"
+    assert s.clarify_rounds == 0 and s.error_streak == 0
+    assert not (s.mid_clarify_used or s.budget_hitl_used or s.degrade_used)
+    # 旧字段已删
+    assert not hasattr(s, "clarification_round")
+    assert not hasattr(s, "clarification")
+
+
 def test_tools_registry():
     from lawApp_LangGraph.tools import ALL_TOOLS, MCP_TOOLS
 
