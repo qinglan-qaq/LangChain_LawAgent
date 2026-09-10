@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-import os
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -21,23 +20,25 @@ from typing import Any, Optional
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from lawApp_LangGraph.config import settings
+
 logger = logging.getLogger("lawApp.db")
 
 _pool: Optional[AsyncConnectionPool] = None
 
 
 def build_dsn() -> str:
-    """从环境变量构建 PostgreSQL 连接串."""
-    url = os.getenv("DATABASE_URL")
+    """从配置构建 PostgreSQL 连接串(DATABASE_URL 优先, 回退 DB_* 分项)."""
+    url = settings.database_url
     if url:
         return url
     return (
         "postgresql://{user}:{password}@{host}:{port}/{name}".format(
-            user=os.getenv("DB_USER", "postgres"),
-            password=os.getenv("DB_PASSWORD", "postgres"),
-            host=os.getenv("DB_HOST", "localhost"),
-            port=os.getenv("DB_PORT", "5432"),
-            name=os.getenv("DB_NAME", "Law_app"),
+            user=settings.db_user,
+            password=settings.db_password,
+            host=settings.db_host,
+            port=settings.db_port,
+            name=settings.db_name,
         )
     )
 
@@ -49,7 +50,7 @@ async def get_pool() -> AsyncConnectionPool:
         _pool = AsyncConnectionPool(
             conninfo=build_dsn(),
             min_size=1,
-            max_size=int(os.getenv("DB_POOL_MAX", "10")),
+            max_size=settings.db_pool_max,
             open=False,
         )
         await _pool.open(wait=False)

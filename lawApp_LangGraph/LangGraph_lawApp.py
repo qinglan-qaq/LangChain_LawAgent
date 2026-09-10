@@ -42,7 +42,6 @@ v2 变更 (upgrade-v1):
 from __future__ import annotations
 
 import json
-import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
@@ -101,11 +100,11 @@ def get_planner_llm():
         from langchain_openai import ChatOpenAI
 
         _llm_planner = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_PRO_MODEL", "deepseek-reasoner"),
+            model=settings.deepseek_pro_model,
             temperature=0.4,
             max_tokens=4096,
-            openai_api_key=os.getenv("DEEPSEEK_API_KEY"),
-            openai_api_base=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            openai_api_key=settings.deepseek_api_key,
+            openai_api_base=settings.deepseek_base_url,
         )
     return _llm_planner
 
@@ -117,11 +116,11 @@ def get_executor_llm():
         from langchain_openai import ChatOpenAI
 
         _llm_executor = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_FLASH_MODEL", "deepseek-chat"),
+            model=settings.deepseek_flash_model,
             temperature=0.25,
             max_tokens=2048,
-            openai_api_key=os.getenv("DEEPSEEK_API_KEY"),
-            openai_api_base=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            openai_api_key=settings.deepseek_api_key,
+            openai_api_base=settings.deepseek_base_url,
         )
     return _llm_executor
 

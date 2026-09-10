@@ -13,7 +13,6 @@ v2 变更 (upgrade-v1):
 - 移除全局 stream_queue;token 流由 graph.astream(stream_mode="messages") 驱动
 """
 
-import os
 import time
 from typing import Any, List, Optional
 
@@ -46,9 +45,9 @@ def _get_llm():
         from langchain_openai import ChatOpenAI
 
         _llm = ChatOpenAI(
-            model=os.getenv("DEEPSEEK_FLASH_MODEL", "deepseek-chat"),
-            openai_api_key=os.getenv("DEEPSEEK_API_KEY"),
-            openai_api_base=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+            model=settings.deepseek_flash_model,
+            openai_api_key=settings.deepseek_api_key,
+            openai_api_base=settings.deepseek_base_url,
             temperature=0.4,
             max_tokens=4096,
         )

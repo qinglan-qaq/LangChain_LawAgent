@@ -8,17 +8,14 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
+
+from lawApp_LangGraph.config import settings
 
 logger = logging.getLogger("lawApp.rag")
 
 _embedder = None
 _reranker = None
-
-EMBED_MODEL = os.getenv("MEMORY_EMBED_MODEL", "BAAI/bge-large-zh-v1.5")
-RERANK_MODEL = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-large")
-EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
 
 
 def get_embedder():
@@ -27,8 +24,8 @@ def get_embedder():
     if _embedder is None:
         from sentence_transformers import SentenceTransformer
 
-        logger.info("初始化 Embedder (冷启动) | model=%s", EMBED_MODEL)
-        _embedder = SentenceTransformer(EMBED_MODEL)
+        logger.info("初始化 Embedder (冷启动) | model=%s", settings.memory_embed_model)
+        _embedder = SentenceTransformer(settings.memory_embed_model)
     return _embedder
 
 
@@ -36,12 +33,12 @@ def get_reranker():
     """CrossEncoder 重排序模型（懒加载单例，RERANK_ENABLED=0 可禁用）。"""
     global _reranker
     if _reranker is None:
-        if os.getenv("RERANK_ENABLED", "1") == "0":
+        if settings.rerank_enabled == "0":
             return None
         from sentence_transformers import CrossEncoder
 
-        logger.info("初始化 CrossEncoder (冷启动) | model=%s", RERANK_MODEL)
-        _reranker = CrossEncoder(RERANK_MODEL, max_length=512)
+        logger.info("初始化 CrossEncoder (冷启动) | model=%s", settings.rerank_model)
+        _reranker = CrossEncoder(settings.rerank_model, max_length=512)
     return _reranker
 
 

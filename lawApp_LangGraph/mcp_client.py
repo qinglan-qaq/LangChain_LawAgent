@@ -20,12 +20,11 @@ MCP 客户端挂载 — agent 自举侧 (A2)
 from __future__ import annotations
 
 import logging
-import os
 from typing import List, Optional
 
-logger = logging.getLogger("lawApp.mcp_client")
+from lawApp_LangGraph.config import settings
 
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:9381/mcp")
+logger = logging.getLogger("lawApp.mcp_client")
 
 # 已拉取的 MCP 工具(进程级缓存)
 _mcp_tools: List = []
@@ -43,7 +42,7 @@ async def get_mcp_tools() -> List:
         return _mcp_tools
     _loaded = True
 
-    if os.getenv("MCP_TOOLS_ENABLED", "1").lower() in ("0", "false", "no"):
+    if settings.mcp_tools_enabled.lower() in ("0", "false", "no"):
         logger.info("MCP 工具挂载已通过 MCP_TOOLS_ENABLED 关闭")
         return _mcp_tools
 
@@ -53,7 +52,7 @@ async def get_mcp_tools() -> List:
         _client = MultiServerMCPClient(
             {
                 "law-search": {
-                    "url": MCP_SERVER_URL,
+                    "url": settings.mcp_server_url,
                     "transport": "streamable_http",  # adapters TypedDict 字面量(非 fastmcp 的 'streamable-http')
                 }
             }
@@ -61,7 +60,7 @@ async def get_mcp_tools() -> List:
         _mcp_tools = await _client.get_tools()
         logger.info(
             "MCP 工具挂载成功 | server=%s | tools=%s",
-            MCP_SERVER_URL,
+            settings.mcp_server_url,
             [t.name for t in _mcp_tools],
         )
     except Exception as e:

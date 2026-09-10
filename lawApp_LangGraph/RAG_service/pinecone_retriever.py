@@ -10,9 +10,9 @@ Pinecone 检索后端 — 混合检索（密集 + BM25 稀疏 + CrossEncoder 重
 from __future__ import annotations
 
 import logging
-import os
 
 from lawApp_LangGraph.RAG_service.base import BaseRetriever
+from lawApp_LangGraph.config import settings
 
 logger = logging.getLogger("lawApp.rag")
 
@@ -26,10 +26,10 @@ def _get_service():
 
         logger.info("初始化 Pinecone RAG_service (冷启动)")
         _service = RAG_service(
-            index_name=os.getenv("PINECONE_INDEX_NAME", "pinecone-test-lawapp"),
-            api_key=os.getenv("PINECONE_API_KEY"),  # type: ignore[arg-type]
-            cloud=os.getenv("PINECONE_CLOUD", "aws"),
-            region=os.getenv("PINECONE_REGION", "us-east-1"),
+            index_name=settings.pinecone_index_name,
+            api_key=settings.pinecone_api_key,  # type: ignore[arg-type]
+            cloud=settings.pinecone_cloud,
+            region=settings.pinecone_region,
         )
         # 检索路径只附着到已存在的索引，不创建
         _service.index = _service.pc.Index(_service.index_name)

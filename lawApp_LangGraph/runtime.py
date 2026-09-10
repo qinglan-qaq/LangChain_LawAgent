@@ -15,7 +15,8 @@ PG 不依赖 docker:使用本机 PostgreSQL 服务(经 DATABASE_URL 或 DB_* 配
 from __future__ import annotations
 
 import logging
-import os
+
+from lawApp_LangGraph.config import settings
 
 logger = logging.getLogger("lawApp.runtime")
 
@@ -46,7 +47,7 @@ async def setup_runtime() -> None:
     if added:
         logger.info("MCP 工具已注入 ALL_TOOLS | %s", [t.name for t in added])
 
-    backend = os.getenv("CHECKPOINT_BACKEND", "auto").lower()
+    backend = settings.checkpoint_backend.lower()
     checkpointer = None
     store = None
 

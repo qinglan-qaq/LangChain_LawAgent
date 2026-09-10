@@ -16,6 +16,7 @@ from pinecone_text.hybrid import hybrid_convex_scale
 from pinecone_text.sparse import BM25Encoder
 from sentence_transformers import CrossEncoder
 from lawApp_LangGraph.FastAPI.logging import rag as rag_log
+from lawApp_LangGraph.config import settings
 
 load_dotenv()
 
@@ -84,7 +85,7 @@ class RAG_service:
         self.reranker = CrossEncoder("BAAI/bge-reranker-large", max_length=512)
 
         # 稀疏向量（BM25 参数默认随仓库分发，可经 BM25_PATH 覆盖）
-        bm25_path = os.getenv("BM25_PATH") or os.path.join(
+        bm25_path = settings.bm25_path or os.path.join(
             os.path.dirname(__file__), "bm25_law_params.json"
         )
 

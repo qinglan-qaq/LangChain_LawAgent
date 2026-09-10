@@ -24,9 +24,10 @@ Cursor 挂载见 .cursor/mcp.json
 from __future__ import annotations
 
 import logging
-import os
 
 from mcp.server.fastmcp import FastMCP
+
+from lawApp_LangGraph.config import settings
 
 logger = logging.getLogger("lawApp.mcp")
 
@@ -178,8 +179,8 @@ async def recall_memory(query: str, top_k: int = 3) -> str:
 def main() -> None:
     """启动 law-search MCP server (streamable-http)."""
     logging.basicConfig(level=logging.INFO)
-    port = int(os.getenv("MCP_PORT", "9381"))
-    host = os.getenv("MCP_HOST", "127.0.0.1")
+    port = settings.mcp_port
+    host = settings.mcp_host
     # streamable-http 端点为 {settings.streamable_http_path} = /mcp
     logger.info("law-search MCP server 启动: http://%s:%s/mcp", host, port)
     mcp.settings.host = host

@@ -145,9 +145,10 @@ def test_register_mcp_tools_dedup():
 
 
 def test_mcp_client_degrades_when_server_down(monkeypatch):
-    monkeypatch.setenv("MCP_SERVER_URL", "http://127.0.0.1:59999/mcp")
     import lawApp_LangGraph.mcp_client as mc
 
+    # settings.mcp_server_url 指向无人监听端口 → get_mcp_tools 返回空列表
+    monkeypatch.setattr(mc.settings, "mcp_server_url", "http://127.0.0.1:59999/mcp")
     # 重置模块级缓存以强制重连
     monkeypatch.setattr(mc, "_loaded", False)
     monkeypatch.setattr(mc, "_mcp_tools", [])
@@ -161,10 +162,19 @@ def test_mcp_client_degrades_when_server_down(monkeypatch):
 
 
 def test_mcp_client_env_switch(monkeypatch):
-    """MCP_TOOLS_ENABLED=0 → 不发起连接直接返回空."""
+    """MCP_TOOLS_ENABLED=0 → 不发起连接直接返回空.
+
+    模块经 settings 单例读取, 故 env 断言用临时 Settings 实例(setenv +
+    不 reload 全局单例), 模块行为用 patch settings 属性验证。
+    """
+    from lawApp_LangGraph.config import Settings
+
     monkeypatch.setenv("MCP_TOOLS_ENABLED", "0")
+    assert Settings(_env_file=None).mcp_tools_enabled == "0"
+
     import lawApp_LangGraph.mcp_client as mc
 
+    monkeypatch.setattr(mc.settings, "mcp_tools_enabled", "0")
     monkeypatch.setattr(mc, "_loaded", False)
     monkeypatch.setattr(mc, "_mcp_tools", [])
     monkeypatch.setattr(mc, "_client", None)

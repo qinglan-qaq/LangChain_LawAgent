@@ -48,6 +48,7 @@ from lawApp_LangGraph.FastAPI.utils import (
     normalize_resume,
     sse_event,
 )
+from lawApp_LangGraph.config import settings
 
 load_dotenv(dotenv_path="lawApp_LangGraph/.env")
 
@@ -55,9 +56,9 @@ load_dotenv(dotenv_path="lawApp_LangGraph/.env")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(
-        log_dir=os.getenv("LOG_DIR", "./logs"),
-        console_level=os.getenv("LOG_CONSOLE_LEVEL", "DEBUG"),
-        file_level=os.getenv("LOG_FILE_LEVEL", "INFO"),
+        log_dir=settings.log_dir,
+        console_level=settings.log_console_level,
+        file_level=settings.log_file_level,
     )
     from lawApp_LangGraph import runtime
 
