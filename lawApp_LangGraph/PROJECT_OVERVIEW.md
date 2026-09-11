@@ -445,11 +445,11 @@ C. 顶层 AgentState
 
 ## 十二、已知问题与改进方向
 
-1. **递归限制**：当前 LangGraph recursive limit = 25，极复杂查询可能触发 `GRAPH_RECURSION_LIMIT` 错误
-2. **BM25 路径硬编码**：`bm25_law_params.json` 路径为绝对路径，需改为相对路径或配置化
-3. **角色切换**：分析角色已支持环境变量切换（`LEGAL_ANALYSIS_ROLE=saul` 彩蛋，默认 Kim Wexler 全链路统一）；会话级/用户偏好级动态切换留待后续迭代
-4. **并发性能**：工具中的懒加载单例在多线程/多进程下可能存在竞争条件，生产环境建议使用连接池
-5. **评估阈值**：CORRECT_THRESHOLD(0.7)、INCORRECT_THRESHOLD(0.3)、MIN_QUALITY_DOCS(3) 等常量可能需要根据检索质量持续调优
+1. **角色切换粒度**：分析角色支持环境变量切换（`LEGAL_ANALYSIS_ROLE=saul` 彩蛋，默认 Kim Wexler 全链路统一）；会话级/用户偏好级动态切换留待后续迭代
+2. **评估阈值调优**：三档阈值已配置化（`CORRECT_THRESHOLD=0.5` / `INCORRECT_THRESHOLD=0.2` / `MIN_QUALITY_DOCS=3`，env 可覆盖），具体取值仍需根据检索质量持续调优
+3. **并发性能**：懒加载单例已加 `threading.Lock` 双检防护；多 worker 生产部署仍建议连接池（作品集定位暂不做）
+4. **递归限制**：已配置化（`RECURSION_LIMIT` 默认 60，env 可覆盖）；极复杂查询若触发 `GRAPH_RECURSION_LIMIT` 可调大
+5. ~~**BM25 路径硬编码**~~：已修复（`RAG_program.py` 模块相对路径 + `BM25_PATH` env 覆盖）
 
 ---
 
@@ -459,6 +459,7 @@ C. 顶层 AgentState
 lawApp_LangGraph/
 ├── LangGraph_lawApp.py          # 主入口：14 节点 Plan & Execute 主图 + 9 条件路由 + 6 处 HITL interrupt
 ├── state.py                     # 统一 Pydantic 数据模型 (三层模型体系 + 案件要素清单)
+├── config.py                   # 运行时配置中心 (pydantic-settings, env 同名覆盖)
 ├── prompts.py                   # 提示词集中模块 (v2)：Kim 人设/要素评估/检索反馈追问/interrupt 文案
 ├── db.py                        # PostgreSQL 访问 (反馈/审计记录)
 ├── mcp_client.py                # MCP 客户端：动态挂载外部 MCP 工具
@@ -488,10 +489,6 @@ lawApp_LangGraph/
 │   ├── base.py                  # 检索器抽象基类
 │   ├── bm25_law_params.json     # 预计算 BM25 参数 (~387KB)
 │   └── RAG_Service_Test.ipynb   # RAG 测试笔记本
-│
-├── node/                        # 备用节点工厂(legacy 实现)
-│   ├── langgraph_nodes.py       # 节点工厂函数 (替代架构)
-│   └── nodes_test.ipynb         # 节点测试笔记本
 │
 ├── Documents/                   # 法律文档数据
 │   ├── LawDocument/             # 7个相关法律 TXT 文件 (民法典、反家暴法、涉彩礼解释等)
@@ -534,4 +531,27 @@ uvicorn lawApp_LangGraph.FastAPI.api:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-*文档生成时间：2026-09-10 | 项目版本：v3.1.0 (子项目A)*
+## 十五、配置一览（lawApp_LangGraph/config.py）
+
+优先级：进程 env > `.env` 文件 > 默认值。完整字段见 `config.py`，常用项：
+
+| env 名 | 默认值 | 说明 |
+|--------|--------|------|
+| RECURSION_LIMIT | 60 | LangGraph 超步上限 |
+| MAX_ROUNDS | 10 | 工具调用总数上限 |
+| MAX_CLARIFY_ROUNDS | 5 | 入口澄清轮数上限 |
+| ERROR_STREAK_THRESHOLD | 2 | 连续失败触发降级询问 |
+| CORRECT_THRESHOLD / INCORRECT_THRESHOLD / MIN_QUALITY_DOCS | 0.5 / 0.2 / 3 | CRAG 评估三档 |
+| DEEPSEEK_PRO_MODEL / DEEPSEEK_FLASH_MODEL | deepseek-reasoner / deepseek-chat | Pro/Flash 模型 |
+| MEMORY_EMBED_MODEL / RERANK_MODEL / EMBED_DIM | BAAI/bge-large-zh-v1.5 / BAAI/bge-reranker-large / 1024 | 嵌入/重排序 |
+| RERANK_ENABLED | 1 | "0" 禁用重排序 |
+| BM25_PATH | (模块路径兜底) | BM25 参数文件 |
+| PINECONE_INDEX_NAME / PINECONE_API_KEY | pinecone-test-lawapp / - | Pinecone 检索 |
+| LOG_DIR / LOG_CONSOLE_LEVEL / LOG_FILE_LEVEL | ./logs / DEBUG / INFO | 日志 |
+| MCP_SERVER_URL / MCP_TOOLS_ENABLED | http://127.0.0.1:9381/mcp / 1 | MCP 客户端 |
+| DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD / DB_POOL_MAX | localhost / 5432 / Law_app / postgres / postgres / 10 | PostgreSQL |
+| DATABASE_URL / CHECKPOINT_BACKEND | - / auto | 连接串直连 / 持久化后端选择 |
+
+---
+
+*文档生成时间：2026-09-11 | 项目版本：v3.2.0 (子项目C)*

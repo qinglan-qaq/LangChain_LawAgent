@@ -81,8 +81,9 @@
 
 | 亮点 | 说明 |
 |------|------|
-| **懒加载单例** | RAG 服务、嵌入模型、LLM、数据库连接全部延迟初始化，避免冷启动峰值 |
-| **5 类结构化日志** | 通过 contextvars 实现 session_id 全链路透传，无需修改任何函数签名 |
+| **配置中心** | pydantic-settings 单一入口（`config.py`），进程 env > `.env` > 默认值同名覆盖，零散 getenv 全部收拢 |
+| **懒加载单例** | RAG 服务、嵌入模型、LLM、数据库连接全部延迟初始化，`threading.Lock` 双检防护多线程冷启动竞态 |
+| **5 类结构化日志** | 通过 contextvars 实现 session_id 全链路透传；文件日志 JSON 行输出，结构化字段独立成键，可直接供日志采集消费 |
 | **SSE 流式推送** | 实时展示推理 token、工具调用、最终答案，消除长等待焦虑 |
 | **并发安全** | 基于 LangGraph MemorySaver 检查点实现线程级会话隔离 |
 
@@ -295,7 +296,7 @@ cp lawApp_LangGraph/.env.example lawApp_LangGraph/.env
 DEEPSEEK_API_KEY=sk-xxx
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 PINECONE_API_KEY=xxx
-PINECONE_INDEX_NAME=pinecone-law-agent
+PINECONE_INDEX_NAME=pinecone-law-agent   # 示例值，默认见 config.py (pinecone-test-lawapp)
 SERPAPI_API_KEY=xxx
 DB_NAME=Law_app
 DB_USER=postgres
@@ -303,6 +304,8 @@ DB_PASSWORD=xxx
 DB_HOST=localhost
 DB_PORT=5433
 ```
+
+其余可配置项（RECURSION_LIMIT / MAX_ROUNDS / CRAG 三档阈值 / 日志级别等）见 `lawApp_LangGraph/PROJECT_OVERVIEW.md` §15 配置一览表，字段与同名大写环境变量一一对应。
 
 ### 启动
 
@@ -324,6 +327,7 @@ uvicorn lawApp_LangGraph.FastAPI.api:app --host 0.0.0.0 --port 8000 --reload
 lawApp_LangGraph/
 ├── LangGraph_lawApp.py          # 主入口：StateGraph 定义 (5节点 + 4条件边)
 ├── state.py                     # Pydantic 数据模型 (三层体系)
+├── config.py                    # 运行时配置中心 (pydantic-settings, env 同名覆盖)
 ├── requirements.txt             # Python 依赖
 ├── .env                         # 环境变量
 │
@@ -342,9 +346,6 @@ lawApp_LangGraph/
 ├── RAG_service/                 # RAG 检索服务
 │   ├── RAG_program.py           # 混合检索 + BM25 + CrossEncoder 重排序
 │   └── bm25_law_params.json     # 预计算 BM25 参数
-│
-├── node/                        # 备用节点实现 (legacy)
-│   └── langgraph_nodes.py       # 节点工厂函数
 │
 ├── Documents/                   # 法律文档
 │   ├── LawDocument/             # 7 部法律 TXT
