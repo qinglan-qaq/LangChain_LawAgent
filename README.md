@@ -280,10 +280,10 @@ AgentState         # 会话标识 · 请求上下文 · 计划执行 · 输出 �
 
 ```bash
 # 1. 克隆仓库
-git clone <repo-url> && cd LangChain
+git clone <repo-url> && cd LangChain_LawAgent-main
 
-# 2. 安装依赖
-pip install -r lawApp_LangGraph/requirements.txt
+# 2. 安装依赖（在仓库根目录执行，requirements.txt 位于根目录）
+pip install -r requirements.txt
 
 # 3. 配置环境变量
 cp lawApp_LangGraph/.env.example lawApp_LangGraph/.env
@@ -305,15 +305,13 @@ DB_HOST=localhost
 DB_PORT=5433
 ```
 
-其余可配置项（RECURSION_LIMIT / MAX_ROUNDS / CRAG 三档阈值 / 日志级别等）见 `lawApp_LangGraph/PROJECT_OVERVIEW.md` §15 配置一览表，字段与同名大写环境变量一一对应。
+其余可配置项（RECURSION_LIMIT / MAX_ROUNDS / CRAG 三档阈值 / 日志级别等）见 `docs/PROJECT_OVERVIEW.md` §15 配置一览表，字段与同名大写环境变量一一对应。
 
 ### 启动
 
-```bash
-cd lawApp_LangGraph/FastAPI
-python api.py
+在**仓库根目录**执行（`lawApp_LangGraph` 是包名，须从根目录导入）：
 
-# 或使用 uvicorn
+```bash
 uvicorn lawApp_LangGraph.FastAPI.api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -324,35 +322,72 @@ uvicorn lawApp_LangGraph.FastAPI.api:app --host 0.0.0.0 --port 8000 --reload
 ## 项目结构
 
 ```text
-lawApp_LangGraph/
-├── LangGraph_lawApp.py          # 主入口：StateGraph 定义 (5节点 + 4条件边)
-├── state.py                     # Pydantic 数据模型 (三层体系)
-├── config.py                    # 运行时配置中心 (pydantic-settings, env 同名覆盖)
-├── requirements.txt             # Python 依赖
-├── .env                         # 环境变量
+LangChain_LawAgent-main/
+├── README.md
+├── requirements.txt             # Python 依赖（直接安装）
+├── requirements.lock            # 锁定版本，复现环境用
+├── environment.lock             # conda 环境导出
+├── langgraph.json               # LangGraph CLI 配置
 │
-├── FastAPI/                     # Web 服务层
-│   ├── api.py                   # FastAPI 应用 (v2.0.0)，5端点 + CORS + 生命周期
-│   ├── model.py                 # 请求 / 响应模型
-│   ├── utils.py                 # 会话管理、图调用、响应构建、SSE 事件队列
-│   └── logging.py               # 5类日志 + contextvars 会话透传
+├── lawApp_LangGraph/            # 主体代码包（从仓库根目录导入）
+│   ├── LangGraph_lawApp.py      # 主入口：StateGraph 定义 (5节点 + 4条件边)
+│   ├── state.py                 # Pydantic 数据模型 (三层体系)
+│   ├── config.py                # 运行时配置中心 (pydantic-settings, env 同名覆盖)
+│   ├── prompts.py               # 提示词集中定义
+│   ├── runtime.py               # 运行时装配（工具 / 图 / 客户端）
+│   ├── db.py                    # PostgreSQL + pgvector 连接层
+│   ├── mcp_client.py            # MCP 客户端挂载，连接失败时优雅降级
+│   ├── mcp_server.py            # MCP server（http / stdio 两种传输）
+│   ├── .env.example             # 环境变量模板
+│   │
+│   ├── FastAPI/                 # Web 服务层
+│   │   ├── api.py               # FastAPI 应用 (v3.0.0)，7 端点 + CORS + 生命周期
+│   │   ├── model.py             # 请求 / 响应模型
+│   │   ├── utils.py             # 会话管理、图调用、响应构建、SSE 事件队列
+│   │   └── logging.py           # 5类日志 + contextvars 会话透传
+│   │
+│   ├── tools/                   # Agent 工具集
+│   │   ├── __init__.py          # 工具注册表 (ALL_TOOLS)
+│   │   ├── tools.py             # SerpAPI 搜索 + PDF 生成
+│   │   ├── rag_tools.py         # CRAG 管线 (检索 / 评估 / 分析 + 角色提示词)
+│   │   └── db_tools.py          # 长期记忆 + 法条检索 (pgvector)
+│   │
+│   └── RAG_service/             # RAG 检索服务
+│       ├── RAG_program.py       # RAG_service 类：混合检索 + BM25 + CrossEncoder 重排序
+│       ├── base.py              # 检索器抽象基类
+│       ├── embedder.py          # BGE 嵌入 / 重排序模型懒加载单例
+│       ├── pinecone_retriever.py # Pinecone 混合检索封装
+│       └── pgvector_retriever.py # pgvector 法条检索封装
 │
-├── tools/                       # Agent 工具集
-│   ├── __init__.py              # 工具注册表 (ALL_TOOLS)
-│   ├── tools.py                 # SerpAPI 搜索 + PDF 生成
-│   ├── rag_tools.py             # CRAG 管线 (检索 / 评估 / 分析 + 角色提示词)
-│   └── db_tools.py              # 长期记忆 + 法条检索 (pgvector)
+├── data/                        # 数据文件
+│   ├── Documents/
+│   │   ├── LawDocument/         # 7 部法律 TXT
+│   │   └── MarkDownFiles/       # 11 个案例 MD (2014-2024)
+│   ├── bm25_law_params.json     # 预计算 BM25 参数（随仓库分发）
+│   └── sample_law.txt
 │
-├── RAG_service/                 # RAG 检索服务
-│   ├── RAG_program.py           # 混合检索 + BM25 + CrossEncoder 重排序
-│   └── bm25_law_params.json     # 预计算 BM25 参数
+├── notebooks/                   # 实验与调试笔记本
+│   ├── AgentTest.ipynb          # 主图端到端演练
+│   ├── RAG_Service_Test.ipynb   # 混合检索验证
+│   ├── clarify_test.ipynb       # 澄清节点
+│   ├── hitl_test.ipynb          # Human-in-the-loop
+│   ├── prompts_test.ipynb       # 提示词
+│   └── tools_test.ipynb         # 工具集
 │
-├── Documents/                   # 法律文档
-│   ├── LawDocument/             # 7 部法律 TXT
-│   └── MarkDownFiles/           # 11 个案例 MD (2014-2024)
+├── tests/                       # pytest（在根目录执行 python -m pytest tests/ -q）
+│   ├── test_engineering.py      # 配置 / 导入 / 工程约束
+│   ├── test_smoke.py            # 冒烟
+│   └── test_mcp.py              # MCP 挂载与 stdio 端到端
 │
-└── logs/                        # 运行时日志
+├── scripts/
+│   └── run_nb.py                # 批量执行 notebook
+│
+└── docs/
+    ├── PROJECT_OVERVIEW.md      # 设计文档 (§1-§15)
+    └── superpowers/             # 历史设计与计划归档
 ```
+
+运行时产物（`logs/`、`__pycache__/`、`.pytest_cache/`）不入库。
 
 ---
 

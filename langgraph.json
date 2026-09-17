@@ -3,5 +3,5 @@
   "graphs": {
     "law_agent": "./lawApp_LangGraph/LangGraph_lawApp.py:get_graph"
   },
-  "env": ".env"
+  "env": "./lawApp_LangGraph/.env"
 }

@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 
+# pytest 缓存
+.pytest_cache/
+
 # Jupyter Notebook 检查点文件夹
 .ipynb_checkpoints/
 

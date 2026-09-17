@@ -16,12 +16,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 仓库根下的 data/。用 __file__ 计算, 不含盘符, 换机器/换盘符均可用
 _DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+# 包内 .env。同样用 __file__ 计算: 原先写 ".env" 是相对进程 CWD,
+# 从仓库根运行时会去找 <repo>/.env, 与 api.py / langgraph.json 的约定不符
+_ENV_FILE = Path(__file__).resolve().parent / ".env"
 
 
 class Settings(BaseSettings):
     """全量运行时配置, env 同名覆盖示例: RECURSION_LIMIT=80 即生效。"""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
 
     # ============ 图执行 ============
     # LangGraph 超步上限(A3 最坏路径约 42 超步, 60 留余量)

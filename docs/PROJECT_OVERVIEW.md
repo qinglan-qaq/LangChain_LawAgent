@@ -449,69 +449,89 @@ C. 顶层 AgentState
 2. **评估阈值调优**：三档阈值已配置化（`CORRECT_THRESHOLD=0.5` / `INCORRECT_THRESHOLD=0.2` / `MIN_QUALITY_DOCS=3`，env 可覆盖），具体取值仍需根据检索质量持续调优
 3. **并发性能**：懒加载单例已加 `threading.Lock` 双检防护；多 worker 生产部署仍建议连接池（作品集定位暂不做）
 4. **递归限制**：已配置化（`RECURSION_LIMIT` 默认 60，env 可覆盖）；极复杂查询若触发 `GRAPH_RECURSION_LIMIT` 可调大
-5. ~~**BM25 路径硬编码**~~：已修复（`RAG_program.py` 模块相对路径 + `BM25_PATH` env 覆盖）
+5. ~~**数据文件路径硬编码**~~：已修复。`config.py` 用 `Path(__file__).resolve().parents[1] / "data"` 计算仓库内 `data/` 目录，作为 `BM25_PATH` 与 `DOCUMENTS_DIR` 的默认值（不含盘符，换机器可用）；两者均可由同名大写 env 覆盖。
 
 ---
 
 ## 十三、项目目录结构
 
 ```
-lawApp_LangGraph/
-├── LangGraph_lawApp.py          # 主入口：14 节点 Plan & Execute 主图 + 9 条件路由 + 6 处 HITL interrupt
-├── state.py                     # 统一 Pydantic 数据模型 (三层模型体系 + 案件要素清单)
-├── config.py                   # 运行时配置中心 (pydantic-settings, env 同名覆盖)
-├── prompts.py                   # 提示词集中模块 (v2)：Kim 人设/要素评估/检索反馈追问/interrupt 文案
-├── db.py                        # PostgreSQL 访问 (反馈/审计记录)
-├── mcp_client.py                # MCP 客户端：动态挂载外部 MCP 工具
-├── mcp_server.py                # MCP 服务端：law-search 工具对外暴露
-├── runtime.py                   # 运行时装配 (持久化 checkpointer/store 注入)
-├── requirements.txt / requirements.lock
-├── sample_law.txt               # 法律文本样例
+LangChain_LawAgent-main/
+├── README.md
+├── requirements.txt / requirements.lock   # Python 依赖
+├── environment.lock                       # conda 环境导出
+├── langgraph.json                         # LangGraph CLI 配置
 │
-├── FastAPI/                     # Web 服务层
-│   ├── api.py                   # FastAPI 应用 (v3.0.0), 7 个端点 + SSE + HITL 恢复
-│   ├── model.py                 # 请求/响应 Pydantic 模型 (QueryResponse 含 elements/interrupt)
-│   ├── utils.py                 # 会话管理、normalize_resume 类型感知归一、响应构建、SSE工具
-│   └── logging.py               # 5类结构化日志系统 + contextvars 会话透传
+├── lawApp_LangGraph/            # 主体代码包（发布后从仓库根目录导入）
+│   ├── LangGraph_lawApp.py      # 主入口：14 节点 Plan & Execute 主图 + 9 条件路由 + 6 处 HITL interrupt
+│   ├── state.py                 # 统一 Pydantic 数据模型 (三层模型体系 + 案件要素清单)
+│   ├── config.py                # 运行时配置中心 (pydantic-settings, env 同名覆盖)
+│   ├── prompts.py               # 提示词集中模块 (v2)：Kim 人设/要素评估/检索反馈追问/interrupt 文案
+│   ├── db.py                    # PostgreSQL 访问 (反馈/审计记录)
+│   ├── mcp_client.py            # MCP 客户端：动态挂载外部 MCP 工具
+│   ├── mcp_server.py            # MCP 服务端：law-search 工具对外暴露
+│   ├── runtime.py               # 运行时装配 (持久化 checkpointer/store 注入)
+│   │
+│   ├── FastAPI/                 # Web 服务层
+│   │   ├── api.py               # FastAPI 应用 (v3.0.0), 7 个端点 + SSE + HITL 恢复
+│   │   ├── model.py             # 请求/响应 Pydantic 模型 (QueryResponse 含 elements/interrupt)
+│   │   ├── utils.py             # 会话管理、normalize_resume 类型感知归一、响应构建、SSE工具
+│   │   └── logging.py           # 5类结构化日志系统 + contextvars 会话透传
+│   │
+│   ├── tools/                   # Agent 工具集
+│   │   ├── __init__.py          # 工具注册表 (LOCAL_TOOLS 8 个 + MCP_TOOLS 动态扩展)
+│   │   ├── tools.py             # 网络搜索(SerpAPI) + PDF生成(markdown+pdfkit)
+│   │   ├── rag_tools.py         # CRAG 管线工具 (检索/评估/分析；提示词已迁 prompts.py)
+│   │   └── db_tools.py          # 长期记忆 + 法条检索工具 (PostgreSQL+pgvector+BGE)
+│   │
+│   └── RAG_service/             # RAG 向量检索服务
+│       ├── RAG_program.py       # RAG_service 类: 混合检索 + BM25 + CrossEncoder 重排序
+│       ├── pinecone_retriever.py # Pinecone 混合检索封装
+│       ├── pgvector_retriever.py # pgvector 法条检索封装
+│       ├── embedder.py          # BGE 嵌入/重排序模型懒加载单例
+│       └── base.py              # 检索器抽象基类
 │
-├── tools/                       # Agent 工具集
-│   ├── __init__.py              # 工具注册表 (LOCAL_TOOLS 8 个 + MCP_TOOLS 动态扩展)
-│   ├── tools.py                 # 网络搜索(SerpAPI) + PDF生成(markdown+pdfkit)
-│   ├── rag_tools.py             # CRAG 管线工具 (检索/评估/分析；提示词已迁 prompts.py)
-│   ├── db_tools.py              # 长期记忆 + 法条检索工具 (PostgreSQL+pgvector+BGE)
+├── data/                        # 数据文件（随仓库分发）
+│   ├── Documents/               # 法律文档数据
+│   │   ├── LawDocument/         # 7个相关法律 TXT 文件 (民法典、反家暴法、涉彩礼解释等)
+│   │   └── MarkDownFiles/       # 11个案例 MD 文件 (2014-2024年度)
+│   ├── bm25_law_params.json     # 预计算 BM25 参数 (~387KB)
+│   └── sample_law.txt           # 法律文本样例
+│
+├── notebooks/                   # 实验与调试笔记本 (scripts/run_nb.py 执行)
+│   ├── AgentTest.ipynb          # 主图端到端演练
+│   ├── RAG_Service_Test.ipynb   # RAG 混合检索测试
+│   ├── clarify_test.ipynb       # 要素澄清循环测试 (7 用例)
+│   ├── hitl_test.ipynb          # 执行中 HITL 测试 (6 用例: mid_clarify/degrade/budget)
+│   ├── prompts_test.ipynb       # 提示词模板/人设/digest 注入测试 (3 用例)
 │   └── tools_test.ipynb         # 工具测试笔记本
 │
-├── RAG_service/                 # RAG 向量检索服务
-│   ├── RAG_program.py           # RAG_service 类: 混合检索 + BM25 + CrossEncoder 重排序
-│   ├── pinecone_retriever.py   # Pinecone 混合检索封装
-│   ├── pgvector_retriever.py    # pgvector 法条检索封装
-│   ├── embedder.py              # BGE 嵌入/重排序模型懒加载单例
-│   ├── base.py                  # 检索器抽象基类
-│   ├── bm25_law_params.json     # 预计算 BM25 参数 (~387KB)
-│   └── RAG_Service_Test.ipynb   # RAG 测试笔记本
+├── tests/                       # pytest（根目录执行 python -m pytest tests/ -q）
+│   ├── test_engineering.py      # 配置/导入/工程约束
+│   ├── test_smoke.py            # 冒烟
+│   └── test_mcp.py              # MCP 挂载与 stdio 端到端
 │
-├── Documents/                   # 法律文档数据
-│   ├── LawDocument/             # 7个相关法律 TXT 文件 (民法典、反家暴法、涉彩礼解释等)
-│   └── MarkDownFiles/           # 11个案例 MD 文件 (2014-2024年度)
+├── scripts/
+│   └── run_nb.py                # 批量执行 notebook
 │
-├── clarify_test.ipynb           # 要素澄清循环测试 (7 用例, scripts/run_nb.py 执行)
-├── hitl_test.ipynb              # 执行中 HITL 测试 (6 用例: mid_clarify/degrade/budget)
-├── prompts_test.ipynb           # 提示词模板/人设/digest 注入测试 (3 用例)
-│
-├── logs/                        # 运行时日志 (agent_flow.log/system.log, 轮转)
-├── pdf_outputs/                 # 生成的 PDF 报告
-└── PGtest.ipynb                 # PostgreSQL 数据入库笔记本
+└── docs/
+    ├── PROJECT_OVERVIEW.md      # 本文档
+    └── superpowers/             # 历史设计与计划归档
 ```
+
+运行时产物 `logs/`、`pdf_outputs/`、`__pycache__/`、`.pytest_cache/` 不入库。
 
 ---
 
 ## 十四、部署与运行
 
 ```bash
-# 1. 安装依赖
+# 1. 安装依赖（在仓库根目录执行）
 pip install -r requirements.txt
 
-# 2. 配置环境变量 (.env)
+# 2. 配置环境变量
+cp lawApp_LangGraph/.env.example lawApp_LangGraph/.env
+# 编辑 lawApp_LangGraph/.env，至少填入下列项
 DEEPSEEK_API_KEY=xxx
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_PRO_MODEL=deepseek-reasoner    # Pro 规划模型
@@ -522,11 +542,11 @@ SERPAPI_API_KEY=xxx
 DB_NAME=Law_app DB_USER=xxx DB_PASSWORD=xxx DB_HOST=localhost DB_PORT=5433
 LEGAL_ANALYSIS_ROLE=kim                 # 可选彩蛋: saul 时法律分析切换 Saul Goodman 人设
 
-# 3. 启动 FastAPI 服务
-cd lawApp_LangGraph/FastAPI
-python api.py
-# 或
+# 3. 启动 FastAPI 服务（须在仓库根目录，lawApp_LangGraph 是包名）
 uvicorn lawApp_LangGraph.FastAPI.api:app --host 0.0.0.0 --port 8000 --reload
+
+# 4. 跑测试（同样在仓库根目录）
+python -m pytest tests/ -q
 ```
 
 ---
@@ -545,7 +565,8 @@ uvicorn lawApp_LangGraph.FastAPI.api:app --host 0.0.0.0 --port 8000 --reload
 | DEEPSEEK_PRO_MODEL / DEEPSEEK_FLASH_MODEL | deepseek-reasoner / deepseek-chat | Pro/Flash 模型 |
 | MEMORY_EMBED_MODEL / RERANK_MODEL / EMBED_DIM | BAAI/bge-large-zh-v1.5 / BAAI/bge-reranker-large / 1024 | 嵌入/重排序 |
 | RERANK_ENABLED | 1 | "0" 禁用重排序 |
-| BM25_PATH | (模块路径兜底) | BM25 参数文件 |
+| BM25_PATH | `<repo>/data/bm25_law_params.json` | 预计算 BM25 参数文件，由 `config.py` 按 `__file__` 计算 |
+| DOCUMENTS_DIR | `<repo>/data/Documents` | 法律文档目录（法条 TXT + 案例 MD） |
 | PINECONE_INDEX_NAME / PINECONE_API_KEY | pinecone-test-lawapp / - | Pinecone 检索 |
 | LOG_DIR / LOG_CONSOLE_LEVEL / LOG_FILE_LEVEL | ./logs / DEBUG / INFO | 日志 |
 | MCP_SERVER_URL / MCP_TOOLS_ENABLED | http://127.0.0.1:9381/mcp / 1 | MCP 客户端 |
