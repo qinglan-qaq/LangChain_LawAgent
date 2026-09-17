@@ -13,6 +13,21 @@ __pycache__/
 
 # 环境变量
 .env
+*.env
+env_backup.txt
+
+# 日志与运行时产物
+logs/
+*.log
+pdf_outputs/
+.DS_Store
+
+# 工具链本地配置
+.claude/
+.vscode/
+# .cursor/mcp.json 是对外交付的 MCP server 挂载配置,保留入库;忽略其余 cursor 本地文件
+.cursor/*
+!.cursor/mcp.json
 
 # PyCharm 相关
 .idea/

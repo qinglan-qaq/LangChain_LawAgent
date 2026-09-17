@@ -1,17 +1,42 @@
-langchain-core>=0.3.0,<0.4
-langchain-openai>=0.2.0
-langchain-community>=0.3.0
+# LawAgent v2 (upgrade-v1) — LangChain 1.x stack
+# Python 3.11
+
+# ── Agent 框架 (1.x) ──
+langchain>=1.3,<2
+langchain-core>=1.4,<2
+langchain-openai>=1.0,<2
+langchain-community>=0.3.5
 langchain-huggingface>=0.1.0
-langchain-text-splitters>=0.3.0
-langgraph>=0.2.0
-pydantic>=2.7.0,<2.11.0
+langchain-text-splitters>=1.0,<2
+langgraph>=1.2,<2
+langgraph-checkpoint-postgres>=3.1,<4
+
+# ── MCP 双向 (A2) ──
+# 注意: 不用 fastmcp 包(其 2.x/4.x 与本栈的 langchain-mcp-adapters 存在 mcp 主次版本冲突),
+# server 端用 mcp 内置的 FastMCP, agent 端用 adapters 的 MultiServerMCPClient
+mcp>=1.24,<2
+langchain-mcp-adapters>=0.3,<0.4
+
+# ── LLM 追踪 ──
+langsmith>=0.2
+
+# ── Web 服务 ──
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+pydantic>=2.7.0
+
+# ── 数据库 ──
+psycopg[pool,binary]>=3.1
+pgvector>=0.3.0
 pinecone>=5.0.0
 pinecone-text>=0.4.0
+
+# ── 本地模型 (嵌入 + 重排序) ──
 sentence-transformers>=3.0.0
 tqdm>=4.66.0
+
+# ── 输出与工具 ──
 markdown>=3.7
 pdfkit>=1.0.0
 python-dotenv>=1.0.0
-google-search-results>=2.4.0
+serpapi>=0.1.0              # langchain-community 0.4 的 SerpAPIWrapper 依赖新包名

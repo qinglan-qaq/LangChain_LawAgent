@@ -3,28 +3,25 @@ Agent 工具集 — 网络搜索与 PDF 生成
 
 工具列表:
     get_google_search   — SerpAPI 谷歌搜索,返回结构化结果(含 URL / 标题 / 摘要)
-    fetch_webpage_text  — 抓取指定 URL 的网页正文文本
-    markdown_to_pdf     — Markdown 转 PDF 文件
+    markdown_to_pdf     — Markdown 转 PDF 文件(阻塞渲染放线程池)
 """
 
+import asyncio
 import os
 import time
 from datetime import datetime
+
 import markdown
-from langchain_community.utilities import SerpAPIWrapper
 from langchain_core.tools import tool
 
 from lawApp_LangGraph.FastAPI.logging import tool as tool_log
 from lawApp_LangGraph.state import WebSearchResult
-from langsmith import traceable
-
 
 # Tool 1: 谷歌搜索
 
 
 @tool
-@traceable(run_type="tool", name="tool_Google搜索")
-def get_google_search(query: str) -> dict:
+async def get_google_search(query: str) -> dict:
     """使用谷歌搜索API在线搜索法律相关信息.返回结构化结果,每项包含标题、链接、摘要.
 
     适用场景:
@@ -44,18 +41,30 @@ def get_google_search(query: str) -> dict:
         detail=f"query={query[:80]}",
     )
 
-    search = SerpAPIWrapper()
-    raw = search.results(query)
+    try:
+        from langchain_community.utilities import SerpAPIWrapper
 
-    structured = []
-    for res in raw.get("organic_results", [])[:8]:
-        structured.append(
-            WebSearchResult(
-                title=res.get("title", ""),
-                link=res.get("link", ""),
-                snippet=res.get("snippet", ""),
-            )
+        search = SerpAPIWrapper()
+        raw = await asyncio.to_thread(search.results, query)
+    except Exception as e:
+        tool_log.error(
+            "← 工具异常: get_google_search",
+            detail=f"SerpAPI 不可用: {str(e)[:120]}",
         )
+        return {
+            "status": "error",
+            "message": f"联网搜索不可用: {str(e)[:200]}",
+            "web_search_results": [],
+        }
+
+    structured = [
+        WebSearchResult(
+            title=res.get("title", ""),
+            link=res.get("link", ""),
+            snippet=res.get("snippet", ""),
+        )
+        for res in raw.get("organic_results", [])[:8]
+    ]
     if not structured:
         tool_log.info(
             "← 工具返回: get_google_search",
@@ -76,7 +85,7 @@ def get_google_search(query: str) -> dict:
     return {
         "status": "success",
         "count": len(structured),
-        "web_search_results": structured
+        "web_search_results": structured,
     }
 
 
@@ -88,9 +97,24 @@ def markdown_to_html(markdown_text: str) -> str:
     return markdown.markdown(markdown_text, extensions=["extra", "codehilite"])
 
 
+def _render_pdf(styled_html: str, file_path: str) -> None:
+    """同步渲染 PDF(wkhtmltopdf),由 asyncio.to_thread 调度。"""
+    import pdfkit
+
+    options = {
+        "page-size": "A4",
+        "margin-top": "0.75in",
+        "margin-right": "0.75in",
+        "margin-bottom": "0.75in",
+        "margin-left": "0.75in",
+        "encoding": "UTF-8",
+        "no-outline": None,
+    }
+    pdfkit.from_string(styled_html, file_path, options=options)
+
+
 @tool
-@traceable(run_type="tool", name="tool_Markdown转PDF")
-def markdown_to_pdf(markdown_text: str, filename: str = None) -> dict:
+async def markdown_to_pdf(markdown_text: str, filename: str = "") -> dict:
     """MarkDown文件转为pdf,当用户指定pdf文件输出时使用.
 
     参数:
@@ -100,8 +124,6 @@ def markdown_to_pdf(markdown_text: str, filename: str = None) -> dict:
     返回:
     dict,含 pdf_path 和 is_pdf_output
     """
-    import pdfkit
-
     t0 = time.time()
     tool_log.info(
         "→ 调用工具: markdown_to_pdf",
@@ -119,7 +141,7 @@ def markdown_to_pdf(markdown_text: str, filename: str = None) -> dict:
     <head>
         <meta charset="UTF-8">
         <style>
-            body {{ font-family: 'SimHei', 'Microsoft YaHei', sans-serif; margin: 1cm; }}
+            body {{ font-family: 'PingFang SC', 'Hiragino Sans GB', 'SimHei', sans-serif; margin: 1cm; }}
             h1 {{ color: #333; }}
             code {{ font-family: monospace; background-color: #f4f4f4; }}
             pre {{ background-color: #f4f4f4; padding: 10px; border-radius: 5px; }}
@@ -131,25 +153,28 @@ def markdown_to_pdf(markdown_text: str, filename: str = None) -> dict:
     </html>
     """
 
-    options = {
-        "page-size": "A4",
-        "margin-top": "0.75in",
-        "margin-right": "0.75in",
-        "margin-bottom": "0.75in",
-        "margin-left": "0.75in",
-        "encoding": "UTF-8",
-        "no-outline": None,
-    }
-
-    output_dir = "./pdf_outputs"
+    output_dir = os.getenv("PDF_OUTPUT_DIR", "./pdf_outputs")
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, filename)
 
-    pdfkit.from_string(styled_html, file_path, options=options)
+    try:
+        # wkhtmltopdf 渲染为阻塞调用 → 线程池执行,不卡事件循环
+        await asyncio.to_thread(_render_pdf, styled_html, file_path)
+    except Exception as e:
+        tool_log.error(
+            "← 工具异常: markdown_to_pdf",
+            detail=f"PDF 渲染失败: {str(e)[:120]}",
+        )
+        return {
+            "status": "error",
+            "message": f"PDF 生成失败: {str(e)[:200]}",
+            "pdf_path": None,
+            "is_pdf_output": False,
+        }
 
     tool_log.info(
         "← 工具返回: markdown_to_pdf",
         detail=f"file={filename}",
         result=f"elapsed={time.time() - t0:.2f}s",
     )
-    return {"pdf_path": file_path, "is_pdf_output": True}
+    return {"status": "success", "pdf_path": file_path, "is_pdf_output": True}
