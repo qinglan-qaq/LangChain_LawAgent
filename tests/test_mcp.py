@@ -9,7 +9,7 @@ MCP 双向冒烟测试 (A2)
     3. agent 自举: stdio 挂载远端工具 → register_mcp_tools 去重注册
     4. 降级: MCP_SERVER_URL 指向无人监听端口 → get_mcp_tools 返回空列表
 
-运行: /Users/qinglan/miniconda3/envs/lawagent/bin/python -m pytest tests/ -q
+运行: python -m pytest tests/ -q
 """
 
 from __future__ import annotations
@@ -42,11 +42,35 @@ def test_mcp_server_registers_three_tools():
 
 
 def _stdio_config() -> dict:
+    """stdio 子进程挂载配置。
+
+    env 必须显式传: MCP SDK 默认只继承一份白名单环境变量
+    (mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS), 其中不含 HF_HOME。
+    一旦丢失, 子进程会改用默认缓存目录去找 BGE 嵌入模型, 找不到便转向
+    网络重试, 测试表现为长时间挂起而非报错。HF_HUB_OFFLINE=1 让缓存缺失
+    时立刻失败, 不再对着网络重试。
+    """
+    env: dict[str, str] = {
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+        "USERPROFILE": os.environ.get("USERPROFILE", ""),
+        "TEMP": os.environ.get("TEMP", ""),
+        "HF_HUB_OFFLINE": "1",
+        # 子进程输出中文, 固定编码避免 GBK 解码失败
+        "PYTHONIOENCODING": "utf-8",
+    }
+    for key in ("HF_HOME", "HF_ENDPOINT", "HF_HUB_CACHE"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
     return {
         "law-search-test": {
             "transport": "stdio",
             "command": PY,
             "args": ["-m", "lawApp_LangGraph.mcp_server_stdio"],
+            # 子进程按包名导入, 工作目录必须是仓库根
+            "cwd": str(ROOT),
+            "env": env,
         }
     }
 
