@@ -8,9 +8,14 @@
     HF_ENDPOINT          — 进程启动期生效, 留在 RAG_program.py
 """
 
+from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# 仓库根下的 data/。用 __file__ 计算, 不含盘符, 换机器/换盘符均可用
+_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
 
 class Settings(BaseSettings):
@@ -46,8 +51,12 @@ class Settings(BaseSettings):
     embed_dim: int = 1024
     # "0" 禁用(保持原字符串语义, 非 bool)
     rerank_enabled: str = "1"
-    # None 时 RAG_program 以模块相对路径兜底
-    bm25_path: Optional[str] = None
+    # 预计算 BM25 参数, env BM25_PATH 可覆盖
+    bm25_path: Optional[str] = str(_DATA_DIR / "bm25_law_params.json")
+
+    # ============ 数据文件 ============
+    # 法律文档目录(法条 TXT + 案例 MD), env DOCUMENTS_DIR 可覆盖
+    documents_dir: str = str(_DATA_DIR / "Documents")
 
     # ============ 检索: Pinecone ============
     pinecone_index_name: str = "pinecone-test-lawapp"

@@ -1,9 +1,11 @@
 """工程地基测试 — 配置中心 / JSON 日志 / 死字段清理 / 递归限制。
 
-运行: /Users/qinglan/miniconda3/envs/lawagent/bin/python -m pytest tests/ -q
+运行: python -m pytest tests/ -q
 设计来源: docs/superpowers/specs/2026-09-11-engineering-foundation-design.md
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -28,7 +30,10 @@ def test_config_defaults_and_env(monkeypatch):
     assert s.deepseek_flash_model == "deepseek-chat"
     assert s.memory_embed_model == "BAAI/bge-large-zh-v1.5"
     assert s.embed_dim == 1024
-    assert s.bm25_path is None
+    # 数据文件默认指向仓库 data/, 用 __file__ 计算
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    assert s.bm25_path == str(data_dir / "bm25_law_params.json")
+    assert s.documents_dir == str(data_dir / "Documents")
     assert s.database_url is None
     assert s.db_port == 5432
     # 全局单例存在且类型正确

@@ -1,6 +1,6 @@
 """程序化执行 notebook 验证（子项目A ipynb 测试约定）。
 
-用法: /Users/qinglan/miniconda3/envs/lawagent/bin/python scripts/run_nb.py <nb.ipynb>
+用法: python scripts/run_nb.py notebooks/<nb.ipynb>
 通过标准: 所有 cell 无异常执行完毕（末尾 cell 打印 ALL PASSED 由 notebook 自身保证）。
 kernel_name 取 lawagent（已注册）; 若未注册则回退 python3。
 """

@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
@@ -48,7 +49,7 @@ from lawApp_LangGraph.FastAPI.utils import (
     sse_event,
 )
 
-load_dotenv(dotenv_path="lawApp_LangGraph/.env")
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
 
 @asynccontextmanager

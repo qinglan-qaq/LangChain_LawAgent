@@ -8,11 +8,11 @@ MCP 客户端挂载 — agent 自举侧 (A2)
 
 设计取舍:
     - 连接失败时优雅降级: 本地工具(fetch_laws / retrieve_legal_knowledge /
-      search_memory)与 MCP 工具功能重合, server 不在线不影响图可用
+    search_memory)与 MCP 工具功能重合, server 不在线不影响图可用
     - 会话持有: MultiServerMCPClient 是 async context manager,
-      连接由 mcp_client 全局持有; 重复调用 get_mcp_tools() 幂等
+    连接由 mcp_client 全局持有; 重复调用 get_mcp_tools() 幂等
     - 工具名去重: MCP 工具与本地工具语义重合 → 只在本地无同名工具时注册,
-      避免 planner/ToolNode 出现重名歧义; 通过 MCP_TOOLS_ENABLED=0 关闭
+    避免 planner/ToolNode 出现重名歧义; 通过 MCP_TOOLS_ENABLED=0 关闭
 
 接入点: runtime.setup_runtime() 在装配图之前调用 get_mcp_tools()
 """
@@ -20,7 +20,7 @@ MCP 客户端挂载 — agent 自举侧 (A2)
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import List
 
 from lawApp_LangGraph.config import settings
 
