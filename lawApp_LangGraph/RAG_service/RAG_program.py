@@ -15,8 +15,9 @@ from pinecone import Pinecone, ServerlessSpec
 from pinecone_text.hybrid import hybrid_convex_scale
 from pinecone_text.sparse import BM25Encoder
 from sentence_transformers import CrossEncoder
-from lawApp_LangGraph.FastAPI.logging import rag as rag_log
+
 from lawApp_LangGraph.config import settings
+from lawApp_LangGraph.FastAPI.logging import rag as rag_log
 
 load_dotenv()
 

@@ -13,7 +13,6 @@ Legal Consultation API v3.0.0 (upgrade-v1)
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -25,8 +24,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from langgraph.types import Command
 
+from lawApp_LangGraph.config import settings
 from lawApp_LangGraph.FastAPI.logging import (
-    debug,
     flow,
     set_session,
     setup_logging,
@@ -48,7 +47,6 @@ from lawApp_LangGraph.FastAPI.utils import (
     normalize_resume,
     sse_event,
 )
-from lawApp_LangGraph.config import settings
 
 load_dotenv(dotenv_path="lawApp_LangGraph/.env")
 
@@ -258,19 +256,29 @@ async def ask_stream(query: str = "", session_id: str | None = None):
                                 step = plan[idx]
                                 yield sse_event("tool_call", step.tool_name or "无")
                         if node_name == "merge":
-                            for k in ("rag_documents", "web_search_results",
-                                      "law_results", "evaluation"):
+                            for k in (
+                                "rag_documents",
+                                "web_search_results",
+                                "law_results",
+                                "evaluation",
+                            ):
                                 if k in updates and updates[k]:
-                                    n = len(updates[k]) if isinstance(updates[k], list) else 1
+                                    n = (
+                                        len(updates[k])
+                                        if isinstance(updates[k], list)
+                                        else 1
+                                    )
                                     yield sse_event("tool_result", f"{k}: {n}")
                         if node_name == "element_assess" and "case_elements" in updates:
                             ce = updates.get("case_elements")
                             elems = getattr(ce, "elements", None) or []
-                            yield sse_event("elements", [
-                                {"key": e.key, "label": e.label,
-                                 "status": e.status}
-                                for e in elems
-                            ])
+                            yield sse_event(
+                                "elements",
+                                [
+                                    {"key": e.key, "label": e.label, "status": e.status}
+                                    for e in elems
+                                ],
+                            )
                 elif stream_mode == "values":
                     final_state = chunk
 
@@ -301,8 +309,11 @@ async def ask_stream(query: str = "", session_id: str | None = None):
                     {"tool_calls": final_state.get("tool_calls", [])},
                 )
             yield sse_event("done")
-            flow.info("流式流程结束", summary="流式回答完成",
-                      result=f"answer_len={len(final_state.get('final_answer', ''))}")
+            flow.info(
+                "流式流程结束",
+                summary="流式回答完成",
+                result=f"answer_len={len(final_state.get('final_answer', ''))}",
+            )
         except Exception as e:
             flow.error("流式流程异常", detail=str(e))
             yield sse_event("error", str(e))
@@ -359,9 +370,7 @@ async def feedback(request: FeedbackRequest):
     from lawApp_LangGraph.db import record_feedback
 
     try:
-        await record_feedback(
-            request.session_id, request.rating, request.comment
-        )
+        await record_feedback(request.session_id, request.rating, request.comment)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"反馈写入失败: {e}")
     return {"status": "success", "message": "感谢您的反馈"}
@@ -372,7 +381,9 @@ async def list_tools():
     """返回 Agent 可用的全部工具列表及描述."""
     from lawApp_LangGraph.tools import ALL_TOOLS
 
-    tools = [ToolInfo(name=t.name, description=t.description or "") for t in ALL_TOOLS()]
+    tools = [
+        ToolInfo(name=t.name, description=t.description or "") for t in ALL_TOOLS()
+    ]
     system.info("工具列表查询", result=f"共 {len(tools)} 个工具可用")
     return tools
 
