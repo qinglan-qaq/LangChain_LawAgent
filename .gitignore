@@ -35,6 +35,8 @@ lawApp_LangGraph/mcp_server_stdio.py
 # .cursor/mcp.json 是对外交付的 MCP server 挂载配置,保留入库;忽略其余 cursor 本地文件
 .cursor/*
 !.cursor/mcp.json
+# .cursor/rules/ 是随仓库分发的 AI 协作规则,与 AGENTS.md 等一并入库
+!.cursor/rules/
 
 # PyCharm 相关
 .idea/
