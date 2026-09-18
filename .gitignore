@@ -27,7 +27,7 @@ pdf_outputs/
 
 # tests/test_mcp.py 运行期生成的 stdio 入口,正常路径下测试会自行删除,
 # 进程被强杀时会残留,故不入库
-lawApp_LangGraph/mcp_server_stdio.py
+lawApp_LangGraph/mcp/mcp_server_stdio.py
 
 # 工具链本地配置
 .claude/

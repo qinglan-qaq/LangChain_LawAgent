@@ -31,7 +31,7 @@ PY = sys.executable  # 与 pytest 同解释器,保证依赖可见
 
 
 def test_mcp_server_registers_three_tools():
-    from lawApp_LangGraph.mcp_server import mcp
+    from lawApp_LangGraph.mcp.mcp_server import mcp
 
     tools = mcp._tool_manager.list_tools()
     names = {t.name for t in tools}
@@ -67,7 +67,7 @@ def _stdio_config() -> dict:
         "law-search-test": {
             "transport": "stdio",
             "command": PY,
-            "args": ["-m", "lawApp_LangGraph.mcp_server_stdio"],
+            "args": ["-m", "lawApp_LangGraph.mcp.mcp_server_stdio"],
             # 子进程按包名导入, 工作目录必须是仓库根
             "cwd": str(ROOT),
             "env": env,
@@ -82,9 +82,9 @@ def test_stdio_end_to_end(monkeypatch):
     """
     # mcp_server 的 main() 走 http;测试用 stdio 入口直接 run(transport="stdio")
     # —— 写一个只在测试期存在的子模块入口
-    entry = ROOT / "lawApp_LangGraph" / "mcp_server_stdio.py"
+    entry = ROOT / "lawApp_LangGraph" / "mcp" / "mcp_server_stdio.py"
     entry.write_text(
-        'from lawApp_LangGraph.mcp_server import mcp\n\n'
+        'from lawApp_LangGraph.mcp.mcp_server import mcp\n\n'
         'if __name__ == "__main__":\n'
         '    mcp.run(transport="stdio")\n',
         encoding="utf-8",
@@ -169,7 +169,7 @@ def test_register_mcp_tools_dedup():
 
 
 def test_mcp_client_degrades_when_server_down(monkeypatch):
-    import lawApp_LangGraph.mcp_client as mc
+    import lawApp_LangGraph.mcp.mcp_client as mc
 
     # settings.mcp_server_url 指向无人监听端口 → get_mcp_tools 返回空列表
     monkeypatch.setattr(mc.settings, "mcp_server_url", "http://127.0.0.1:59999/mcp")
@@ -196,7 +196,7 @@ def test_mcp_client_env_switch(monkeypatch):
     monkeypatch.setenv("MCP_TOOLS_ENABLED", "0")
     assert Settings(_env_file=None).mcp_tools_enabled == "0"
 
-    import lawApp_LangGraph.mcp_client as mc
+    import lawApp_LangGraph.mcp.mcp_client as mc
 
     monkeypatch.setattr(mc.settings, "mcp_tools_enabled", "0")
     monkeypatch.setattr(mc, "_loaded", False)

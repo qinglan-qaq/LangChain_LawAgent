@@ -35,7 +35,7 @@ async def setup_runtime() -> None:
     global graph, checkpoint_backend
 
     import lawApp_LangGraph.LangGraph_lawApp as app
-    from lawApp_LangGraph.mcp_client import get_mcp_tools
+    from lawApp_LangGraph.mcp.mcp_client import get_mcp_tools
     from lawApp_LangGraph.tools import register_mcp_tools
 
     if graph is not None:
@@ -140,7 +140,7 @@ async def teardown_runtime() -> None:
             logger.warning("连接池关闭异常: %s", e)
     _pg_resources = []
 
-    from lawApp_LangGraph.mcp_client import close_mcp
+    from lawApp_LangGraph.mcp.mcp_client import close_mcp
 
     await close_mcp()
     logger.info("运行时已清理 | backend=%s", checkpoint_backend)

@@ -15,8 +15,8 @@ MCP Server — law-search (自建法律检索服务, A2)
 - 工具参数收敛为 query/top_k 简单标量,MCP client 无需了解内部 schema
 
 运行:
-    python -m lawApp_LangGraph.mcp_server
-    # 或指定端口: MCP_PORT=9382 python -m lawApp_LangGraph.mcp_server
+    python -m lawApp_LangGraph.mcp.mcp_server
+    # 或指定端口: MCP_PORT=9382 python -m lawApp_LangGraph.mcp.mcp_server
 
 Cursor 挂载见 .cursor/mcp.json
 """
