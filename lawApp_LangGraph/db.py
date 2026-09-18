@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -21,6 +23,12 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from lawApp_LangGraph.config import settings
+
+# psycopg_async 需要 SelectorEventLoop; Windows 默认 Proactor 会让连接池全部失败
+# → 模块导入时切换 policy(仅对"导入后才创建循环"的入口生效; uvicorn 需配
+#    --loop lawApp_LangGraph.FastAPI.loop:selector_loop_factory)
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logger = logging.getLogger("lawApp.db")
 

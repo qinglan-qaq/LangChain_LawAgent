@@ -66,6 +66,29 @@ async def embed_query(text: str) -> list[float]:
     return await asyncio.to_thread(embed_query_sync, text)
 
 
+def embed_documents_sync(texts: list[str]) -> list[list[float]]:
+    """批量嵌入多条文本(归一化),入库脚本用。
+
+    Args:
+        texts: 待嵌入文本列表。
+
+    Returns:
+        与输入等长的向量列表(每条 1024 维,已归一化)。
+    """
+    return (
+        get_embedder()
+        .encode(texts, normalize_embeddings=True, batch_size=32)
+        .tolist()
+    )
+
+
+async def embed_documents(texts: list[str]) -> list[list[float]]:
+    """embed_documents_sync 的异步包装(线程池执行避免阻塞事件循环)。"""
+    import asyncio
+
+    return await asyncio.to_thread(embed_documents_sync, texts)
+
+
 async def rerank(query: str, docs: list[dict], text_key: str = "chunk_text") -> Optional[list[float]]:
     """对 docs 打重排序分；禁用或失败时返回 None（调用方退回原排序）。"""
     reranker = get_reranker()
