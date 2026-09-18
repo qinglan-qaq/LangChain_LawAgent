@@ -305,6 +305,8 @@ class AgentState(BaseModel):
 
     # 当前请求
     query: str = ""
+    mode: str = "attorney"  # attorney=代理律师咨询 / assistant=律师助理文书起草
+    doc_type: str = ""  # assistant 模式: complaint=起诉状 / defense=答辩状
 
     # 对话历史（多轮，跨请求保留）
     messages: Annotated[List[Any], add_messages] = Field(default_factory=list)

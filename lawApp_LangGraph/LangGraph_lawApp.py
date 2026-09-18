@@ -58,6 +58,8 @@ from lawApp_LangGraph.FastAPI.logging import debug
 from lawApp_LangGraph.state import (
     RESET,
     AgentState,
+    CaseElement,
+    CaseElements,
     ClarifyExchange,
     ElementQuestion,
     EvaluationResult,
@@ -218,10 +220,28 @@ PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema, MidClarifySc
 # Node 0: Ingest — 每轮请求入口,重置累积字段
 
 
+def _build_elements(mode: str) -> CaseElements:
+    """按模式构建要素集: attorney=婚姻家事要素(现状不动), assistant=文书要素。"""
+    from lawApp_LangGraph.prompts import DOC_ELEMENT_DEFS
+
+    if mode == "assistant":
+        return CaseElements(
+            elements=[
+                CaseElement(key=k, label=l, critical=c)
+                for k, l, c in DOC_ELEMENT_DEFS
+            ]
+        )
+    return default_case_elements()
+
+
 def ingest_node(state: AgentState) -> dict:
     """重置上一轮遗留的计划/结果/累积字段（messages 保留，支撑多轮对话）。"""
     debug.debug("→ 进入 Ingest 节点", detail=f"query={state.query[:60]}")
+    mode = state.mode or "attorney"
     return {
+        # 模式标识(子项目C: attorney=代理律师咨询 / assistant=律师助理文书起草)
+        "mode": mode,
+        "doc_type": state.doc_type or "",
         # 覆盖语义字段
         "plan": [],
         "current_step_index": 0,
@@ -238,7 +258,7 @@ def ingest_node(state: AgentState) -> dict:
         "pdf_confirmed": False,
         "hitl_event": None,
         # 子项目A: 要素清单重建 + 澄清/故障计数归零 + 一次性标记复位
-        "case_elements": default_case_elements(),
+        "case_elements": _build_elements(mode),
         "clarify_rounds": 0,
         "error_streak": 0,
         "mid_clarify_used": False,
