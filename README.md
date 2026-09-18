@@ -200,8 +200,16 @@ START → planner ──[plan 为空]──→ finalize → END
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
-| `/ask` | POST | 同步问答，返回完整 JSON（含推理链、工具调用、援引来源） |
-| `/ask/stream` | POST | SSE 流式问答，实时推送推理 token / 工具调用 / 最终答案 |
+| `/attorney/ask` | POST | 代理律师模式同步问答（query 1-5000 字 + session_id） |
+| `/attorney/ask/stream` | GET | 代理律师模式 SSE 流式问答（推理 token / CoT 思考流 / 工具调用 / interrupt） |
+| `/assistant/ask` | POST | 律师助理模式同步问答（case_details ≥20 字 + doc_type: complaint/defense，仅婚姻家事文书） |
+| `/assistant/ask/stream` | GET | 律师助理模式 SSE 流式问答 |
+| `/sessions` | GET | 最近 50 条会话列表（session_id / meta / last_active_at） |
+| `/sessions/{session_id}` | GET | 会话详情（图状态快照 + 当前 interrupt） |
+| `/disclaimer` | GET | 免责声明文本 |
+| `/ask/resume` | POST | HITL 恢复：interrupt 回复经 `normalize_resume` 归一后续跑图 |
+| `/ask` | POST | 同步问答（**deprecated** — 请改用 `/attorney/ask`，二期移除） |
+| `/ask/stream` | GET | SSE 流式问答（**deprecated** — 请改用 `/attorney/ask/stream`，二期移除） |
 | `/ask/pdf` | POST | 生成 PDF 法律报告并返回文件下载 |
 | `/tools` | GET | 列出所有可用工具及参数描述 |
 | `/home` | GET | 健康检查 + 服务信息 |
@@ -317,6 +325,26 @@ uvicorn lawApp_LangGraph.FastAPI.api:app --host 0.0.0.0 --port 8000 --reload
 
 服务启动后访问 `http://localhost:8000/home` 验证健康状态。
 
+> **Windows + PostgreSQL 注意**：psycopg_async 需要 Selector 事件循环，而 uvicorn 0.46 在
+> win32 默认 Proactor 循环。使用 PG（checkpointer / 审计 / 检索）时须加 `--loop` 指定循环工厂
+> （详见 `lawApp_LangGraph/FastAPI/loop.py`）：
+>
+> ```bash
+> uvicorn lawApp_LangGraph.FastAPI.api:app --host 127.0.0.1 --port 8000 \
+>   --loop lawApp_LangGraph.FastAPI.loop:selector_loop_factory
+> ```
+
+### 前端 (frontend/)
+
+Vue 3 + Vite + Tailwind v4 单界面应用（双模式：代理律师咨询 / 律师助理文书起草）：
+
+```bash
+cd frontend
+npm install
+npm run dev      # http://localhost:5173（/api 前缀由 vite proxy 转发到 127.0.0.1:8000）
+npm run build    # 产物 dist/，可由任意静态服务托管（/api 需网关承担同样转发）
+```
+
 ---
 
 ## 项目结构
@@ -336,8 +364,9 @@ LangChain_LawAgent-main/
 │   ├── prompts.py               # 提示词集中定义
 │   ├── runtime.py               # 运行时装配（工具 / 图 / 客户端）
 │   ├── db.py                    # PostgreSQL + pgvector 连接层
-│   ├── mcp_client.py            # MCP 客户端挂载，连接失败时优雅降级
-│   ├── mcp_server.py            # MCP server（http / stdio 两种传输）
+│   ├── mcp/                     # MCP 子包（law-search server + 客户端挂载）
+│   │   ├── mcp_client.py        # MCP 客户端挂载，连接失败时优雅降级
+│   │   └── mcp_server.py        # MCP server（http / stdio 两种传输）
 │   ├── .env.example             # 环境变量模板
 │   │
 │   ├── FastAPI/                 # Web 服务层
@@ -380,7 +409,17 @@ LangChain_LawAgent-main/
 │   └── test_mcp.py              # MCP 挂载与 stdio 端到端
 │
 ├── scripts/
-│   └── run_nb.py                # 批量执行 notebook
+│   ├── run_nb.py                # 批量执行 notebook
+│   └── ingest_cases_pgvector.py # 案例语料切块 + BGE 嵌入 + pgvector 入库
+│
+├── frontend/                    # Vue 3 + Vite + Tailwind v4 单界面（双模式聊天）
+│   ├── src/
+│   │   ├── App.vue              # 单界面组装（模式切换 / SSE 分发 / HITL 面板）
+│   │   ├── api.js               # axios REST 封装
+│   │   ├── sse.js               # fetch 流式 SSE 帧解析
+│   │   ├── store.js             # reactive 全局状态 + 打字机 composable
+│   │   └── components/          # 10 业务组件 + inspira/ 5 动效组件
+│   └── vite.config.js           # /api proxy → 127.0.0.1:8000
 │
 └── docs/
     ├── PROJECT_OVERVIEW.md      # 设计文档 (§1-§15)
@@ -402,6 +441,7 @@ LangChain_LawAgent-main/
 | 向量检索 | Pinecone Serverless | 密集 + 稀疏混合查询 |
 | 嵌入 & 重排 | BGE-large-zh-v1.5 / BGE-reranker-large | HuggingFace + sentence-transformers |
 | 稀疏编码 | pinecone-text BM25Encoder | 关键词匹配 |
+| 前端 | Vue 3 + Vite + Tailwind v4 | 单界面双模式（代理律师 / 律师助理），axios + fetch SSE |
 | 长期记忆 | PostgreSQL 15 + pgvector | 语义记忆存取 |
 | 联网搜索 | SerpAPI | Google 搜索结果结构化 |
 | PDF 生成 | markdown + pdfkit (wkhtmltopdf) | Markdown → HTML → PDF |

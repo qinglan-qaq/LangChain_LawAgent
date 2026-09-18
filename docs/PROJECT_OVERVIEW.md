@@ -247,9 +247,16 @@ C. 顶层 AgentState
 
 | 端点 | 方法 | 功能 |
 |------|------|------|
-| `/ask` | POST | 同步问答，返回完整 JSON 响应 |
+| `/attorney/ask` | POST | 代理律师模式同步问答（query 1-5000 字 + session_id），走要素澄清 interrupt 链 |
+| `/attorney/ask/stream` | GET | 代理律师模式 SSE 流式问答：token / progress / tool_call / tool_result / elements / **reasoning（CoT 思考流）** / interrupt / answer / session_id / done |
+| `/assistant/ask` | POST | 律师助理模式同步问答（case_details ≥20 字 + doc_type: complaint/defense），finalize 节点按文书模板起草 |
+| `/assistant/ask/stream` | GET | 律师助理模式 SSE 流式问答（事件协议同上） |
+| `/sessions` | GET | 最近 50 条会话列表（session_id / meta / last_active_at） |
+| `/sessions/{session_id}` | GET | 会话详情：图状态快照 build_response + 当前 interrupt（不存在返回 404） |
+| `/disclaimer` | GET | 免责声明文本（前端非阻塞弹窗消费） |
 | `/ask/resume` | POST | HITL 恢复：用户对 interrupt 的回复经 `normalize_resume` 类型感知归一后以 `Command(resume=...)` 续跑图 |
-| `/ask/stream` | GET | SSE 流式问答，实时推送规划进度/工具调用/要素面板(elements)/interrupt/最终回答 |
+| `/ask` | POST | 同步问答（**deprecated** — 前端已改用 `/attorney/ask`，二期移除） |
+| `/ask/stream` | GET | SSE 流式问答（**deprecated** — 前端已改用 `/attorney/ask/stream`，二期移除） |
 | `/ask/pdf` | POST | 生成 PDF 法律报告并返回文件下载 |
 | `/feedback` | POST | 记录用户对回答的评分反馈（1-5 星 + 评论） |
 | `/tools` | GET | 列出所有可用工具及描述 |
@@ -257,6 +264,8 @@ C. 顶层 AgentState
 
 ### 7.2 请求/响应模型 (model.py)
 - `QueryRequest`：query (1-5000字符) + session_id (可选，支持多轮对话)
+- `AttorneyAskRequest`：query (1-5000字符) + session_id (可选) — `/attorney/ask` 专用
+- `AssistantAskRequest`：case_details (20-20000字符) + doc_type (Literal["complaint","defense"]，仅婚姻家事文书) + session_id (可选) — `/assistant/ask` 专用
 - `ResumeRequest`：session_id + answer (用户对 interrupt 的回复，≤3000 字符)
 - `QueryResponse`：query + session_id + final_answer + sources + tool_calls + reasoning + interrupt (等待用户回复的 HITL 载荷，通用 dict) + elements (案件要素面板数据，子项目A 新增)
 
@@ -468,8 +477,9 @@ LangChain_LawAgent-main/
 │   ├── config.py                # 运行时配置中心 (pydantic-settings, env 同名覆盖)
 │   ├── prompts.py               # 提示词集中模块 (v2)：Kim 人设/要素评估/检索反馈追问/interrupt 文案
 │   ├── db.py                    # PostgreSQL 访问 (反馈/审计记录)
-│   ├── mcp_client.py            # MCP 客户端：动态挂载外部 MCP 工具
-│   ├── mcp_server.py            # MCP 服务端：law-search 工具对外暴露
+│   ├── mcp/                     # MCP 子包
+│   │   ├── mcp_client.py        # MCP 客户端：动态挂载外部 MCP 工具
+│   │   └── mcp_server.py        # MCP 服务端：law-search 工具对外暴露
 │   ├── runtime.py               # 运行时装配 (持久化 checkpointer/store 注入)
 │   │
 │   ├── FastAPI/                 # Web 服务层
@@ -512,7 +522,10 @@ LangChain_LawAgent-main/
 │   └── test_mcp.py              # MCP 挂载与 stdio 端到端
 │
 ├── scripts/
-│   └── run_nb.py                # 批量执行 notebook
+│   ├── run_nb.py                # 批量执行 notebook
+│   └── ingest_cases_pgvector.py # 案例语料切块 + BGE 嵌入 + pgvector 入库
+│
+├── frontend/                    # Vue 3 + Vite + Tailwind v4 单界面（双模式：代理律师 / 律师助理）
 │
 └── docs/
     ├── PROJECT_OVERVIEW.md      # 本文档
