@@ -260,6 +260,34 @@ async def disclaimer():
     return {"disclaimer": DISCLAIMER_TEXT}
 
 
+@app.get("/sessions")
+async def list_sessions():
+    """会话列表(sessions 表, 双模式端点的 _safe_upsert_session 数据源)。"""
+    from lawApp_LangGraph.db import get_pool
+
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT session_id, meta, last_active_at FROM sessions "
+            "ORDER BY last_active_at DESC LIMIT 50"
+        )
+        rows = await cur.fetchall()
+    return [
+        {"session_id": r[0], "meta": r[1], "last_active_at": str(r[2])} for r in rows
+    ]
+
+
+@app.get("/sessions/{sid}")
+async def get_session(sid: str):
+    """单会话详情: 最新快照 + interrupt 状态(等待回复时返回待回答问题)。"""
+    graph = get_graph()
+    snap = await graph.aget_state(graph_config(sid))
+    if not snap or not snap.values:
+        raise HTTPException(status_code=404, detail=f"会话 {sid} 不存在")
+    response = build_response(snap.values, sid)
+    return {**response.model_dump(), "interrupt": extract_interrupt(snap)}
+
+
 @app.post("/ask/resume", response_model=QueryResponse)
 async def ask_resume(request: ResumeRequest):
     """HITL 继续: 用户对 interrupt 的回复经 Command(resume=...) 回传,图从暂停点恢复."""
