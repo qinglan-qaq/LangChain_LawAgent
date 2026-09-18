@@ -135,6 +135,22 @@ def get_executor_llm():
     return _llm_executor
 
 
+def _structured(schema):
+    """Flash LLM 结构化输出链: 真实 ChatOpenAI 走 method="json_mode"
+    (默认 json_schema 被 DeepSeek API 拒, HTTP 400); 冒烟测试替身的
+    with_structured_output 只收位置参数, 按替身原签名调用。
+    """
+    llm = get_executor_llm()
+    try:
+        from langchain_openai import ChatOpenAI
+
+        if isinstance(llm, ChatOpenAI):
+            return llm.with_structured_output(schema, method="json_mode")
+    except ImportError:
+        pass
+    return llm.with_structured_output(schema)
+
+
 TOOL_BY_NAME: Dict[str, Any] = {t.name: t for t in ALL_TOOLS()}
 
 # 工具返回 dict 中与 AgentState 同名的 key 将被 merge 节点合并
@@ -327,7 +343,7 @@ async def risk_gate_node(state: AgentState) -> dict:
     try:
         chain = (
             PromptTemplate.from_template(RISK_GATE_PROMPT)
-            | get_executor_llm().with_structured_output(RiskSchema, method="json_mode")
+            | _structured(RiskSchema)
         )
         verdict = await chain.ainvoke({"query": query[:2000]})
         high_risk = bool(verdict.high_risk)
@@ -401,7 +417,7 @@ async def element_assess_node(state: AgentState) -> dict:
     try:
         chain = (
             PromptTemplate.from_template(ELEMENT_ASSESS_PROMPT)
-            | get_executor_llm().with_structured_output(ElementAssessmentSchema, method="json_mode")
+            | _structured(ElementAssessmentSchema)
         )
         v = await chain.ainvoke(
             {
@@ -589,6 +605,19 @@ async def _stream_plan(
         ValueError: content 无法解析为 JSON 或不符合 PlanSchema 时直接抛出。
     """
     import openai
+
+    llm = get_planner_llm()
+    try:
+        from langchain_openai import ChatOpenAI
+
+        real_llm = isinstance(llm, ChatOpenAI)
+    except ImportError:
+        real_llm = False
+    if not real_llm:
+        # 冒烟测试替身: 无 openai 裸客户端可流, 走替身 with_structured_output
+        # 原签名, 不推 CoT 总线(reasoning 由替身 verdict 携带)
+        verdict = await llm.with_structured_output(PlanSchema).ainvoke(prompt_text)
+        return verdict, list(verdict.reasoning or [])
 
     thread_id = (config.get("configurable") or {}).get("thread_id", "")
     q = _REASONING_BUS.get(thread_id)
@@ -990,7 +1019,7 @@ async def replan_check_node(state: AgentState) -> dict:
     try:
         chain = PromptTemplate.from_template(
             REPLAN_CHECK_PROMPT
-        ) | get_executor_llm().with_structured_output(ReplanCheckSchema, method="json_mode")
+        ) | _structured(ReplanCheckSchema)
         result = await chain.ainvoke(
             {
                 "user_query": state.query[:1000],
@@ -1080,7 +1109,7 @@ async def mid_clarify_node(state: AgentState) -> dict:
     try:
         chain = (
             PromptTemplate.from_template(MID_CLARIFY_PROMPT)
-            | get_executor_llm().with_structured_output(MidClarifySchema, method="json_mode")
+            | _structured(MidClarifySchema)
         )
         v = await chain.ainvoke(
             {

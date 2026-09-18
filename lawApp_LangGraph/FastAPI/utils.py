@@ -157,6 +157,8 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
 
 
 def sse_event(event: str, data) -> str:
-    if not isinstance(data, str):
-        data = json.dumps(data, ensure_ascii=False)
+    """SSE 帧: data: {"event": E, "data": D}\n\n — D 保持原类型
+    (str 原样, dict/list 结构化)。前端 sse.js 与 07 册按此契约解析
+    e["data"] 直接取对象(如 reasoning 帧的 {"source","delta"})。
+    """
     return f"data: {json.dumps({'event': event, 'data': data}, ensure_ascii=False)}\n\n"
