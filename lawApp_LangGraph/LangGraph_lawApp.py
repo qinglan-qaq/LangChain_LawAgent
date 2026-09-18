@@ -1181,6 +1181,43 @@ async def finalize_node(state: AgentState) -> dict:
         )
         return {}
 
+    if (state.mode or "attorney") == "assistant":
+        from lawApp_LangGraph.prompts import (
+            FINALIZE_COMPLAINT_PROMPT,
+            FINALIZE_DEFENSE_PROMPT,
+        )
+
+        template = (
+            FINALIZE_DEFENSE_PROMPT
+            if state.doc_type == "defense"
+            else FINALIZE_COMPLAINT_PROMPT
+        )
+        laws_digest = "\n".join(
+            f"{l.law_title} {l.article_number}: {l.content[:80]}"
+            for l in (state.law_results or [])[:5]
+        ) or "无"
+        cases_digest = "\n".join(
+            d.chunk_text[:100] for d in (state.rag_documents or [])[:3]
+        ) or "无"
+        chain = PromptTemplate.from_template(template) | get_executor_llm()
+        parts = []
+        async for chunk in chain.astream(
+            {
+                "elements_digest": state.case_elements.digest(),
+                "query": state.query[:3000],
+                "laws_digest": laws_digest,
+                "cases_digest": cases_digest,
+            }
+        ):
+            parts.append(chunk.content or "")
+        answer = "".join(parts)
+        debug.info(
+            "← Finalize 完成 (文书起草)",
+            detail=f"doc_type={state.doc_type or 'complaint'}, answer_len={len(answer)}",
+            result=f"elapsed={time.time() - t0:.2f}s",
+        )
+        return {"final_answer": answer}
+
     if state.rag_documents:
         docs = "\n".join(f"- {d.chunk_text[:300]}" for d in state.rag_documents[:3])
         chain = FINALIZE_CASE_PROMPT | get_executor_llm()

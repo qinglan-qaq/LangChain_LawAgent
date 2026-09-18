@@ -33,6 +33,8 @@ from lawApp_LangGraph.FastAPI.logging import (
     system,
 )
 from lawApp_LangGraph.FastAPI.model import (
+    AssistantAskRequest,
+    AttorneyAskRequest,
     FeedbackRequest,
     QueryRequest,
     QueryResponse,
@@ -144,12 +146,23 @@ async def _safe_audit(session_id: str, event_type: str, payload: dict) -> None:
         pass  # 审计失败不影响主流程(db 层已捕获,双保险)
 
 
+async def _safe_upsert_session(sid: str) -> None:
+    """会话登记(sessions 表);失败仅记日志, 不阻断咨询主流程。"""
+    try:
+        from lawApp_LangGraph.db import upsert_session
+
+        await upsert_session(sid)
+    except Exception as e:  # pragma: no cover
+        system.warning("sessions 登记失败", detail=str(e)[:100])
+
+
 # ── 端点 ──
 
 
 @app.post("/ask", response_model=QueryResponse)
 async def ask(request: QueryRequest):
-    """同步问答: 等待完整结果后返回 JSON;遇到 interrupt 返回 interrupt 字段."""
+    """(deprecated — 请改用 /attorney/ask|/assistant/ask, 二期移除)
+    同步问答: 等待完整结果后返回 JSON;遇到 interrupt 返回 interrupt 字段."""
     sid = ensure_session(request.session_id)
     set_session(sid)
     query_preview = request.query[:80].replace("\n", " ")
@@ -173,6 +186,78 @@ async def ask(request: QueryRequest):
         result=f"总耗时={elapsed:.2f}s | 工具: {', '.join(response.tool_calls) or '无'}",
     )
     return response
+
+
+@app.post("/attorney/ask", response_model=QueryResponse)
+async def attorney_ask(request: AttorneyAskRequest):
+    """代理律师模式: 多轮追问案情 → 完整法律咨询答复(阻塞式)。"""
+    sid = ensure_session(request.session_id)
+    set_session(sid)
+    await _safe_upsert_session(sid)
+    flow.info("流程开始", summary="代理律师模式提问", detail=f"query={request.query[:80]}")
+    graph = get_graph()
+    t0 = time.time()
+    try:
+        state = await graph.ainvoke(
+            {"query": request.query, "mode": "attorney"}, config=graph_config(sid)
+        )
+    except Exception as e:
+        flow.error("流程异常", summary="Graph 执行失败", detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Graph 执行失败: {e}")
+
+    elapsed = time.time() - t0
+    response = await _finalize_or_interrupt(sid, state)
+    flow.info(
+        "流程结束",
+        summary="回答生成完毕" if not response.interrupt else "等待用户回复(HITL)",
+        detail=f"answer_len={len(response.final_answer)}, tool_calls={len(response.tool_calls)}",
+        result=f"总耗时={elapsed:.2f}s | 工具: {', '.join(response.tool_calls) or '无'}",
+    )
+    return response
+
+
+@app.post("/assistant/ask", response_model=QueryResponse)
+async def assistant_ask(request: AssistantAskRequest):
+    """律师助理模式: 完整案情 + 文书类型 → 起诉状/答辩状草稿(阻塞式)。"""
+    sid = ensure_session(request.session_id)
+    set_session(sid)
+    await _safe_upsert_session(sid)
+    doc_label = "起诉状" if request.doc_type == "complaint" else "答辩状"
+    flow.info(
+        "流程开始", summary=f"律师助理模式起草{doc_label}", detail=f"案情={request.case_details[:80]}"
+    )
+    graph = get_graph()
+    t0 = time.time()
+    try:
+        state = await graph.ainvoke(
+            {
+                "query": request.case_details,
+                "mode": "assistant",
+                "doc_type": request.doc_type,
+            },
+            config=graph_config(sid),
+        )
+    except Exception as e:
+        flow.error("流程异常", summary="Graph 执行失败", detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Graph 执行失败: {e}")
+
+    elapsed = time.time() - t0
+    response = await _finalize_or_interrupt(sid, state)
+    flow.info(
+        "流程结束",
+        summary="文书起草完毕" if not response.interrupt else "等待用户回复(HITL)",
+        detail=f"answer_len={len(response.final_answer)}, tool_calls={len(response.tool_calls)}",
+        result=f"总耗时={elapsed:.2f}s | 工具: {', '.join(response.tool_calls) or '无'}",
+    )
+    return response
+
+
+@app.get("/disclaimer")
+async def disclaimer():
+    """代理律师模式免责声明文本(前端小弹窗内容源, 非阻塞提示)。"""
+    from lawApp_LangGraph.prompts import DISCLAIMER_TEXT
+
+    return {"disclaimer": DISCLAIMER_TEXT}
 
 
 @app.post("/ask/resume", response_model=QueryResponse)
@@ -209,7 +294,8 @@ async def ask_resume(request: ResumeRequest):
 
 @app.get("/ask/stream")
 async def ask_stream(query: str = "", session_id: str | None = None):
-    """SSE 流式问答: updates 驱动进度,messages 驱动 token 打字机,values 收尾."""
+    """(deprecated — 请改用 /attorney/ask/stream|/assistant/ask/stream, 二期移除)
+    SSE 流式问答: updates 驱动进度,messages 驱动 token 打字机,values 收尾."""
     if not query.strip():
         raise HTTPException(status_code=422, detail="query 不能为空")
 

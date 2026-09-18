@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +12,23 @@ class QueryRequest(BaseModel):
     session_id: Optional[str] = Field(
         default=None, description="会话 ID,传入可持续多轮对话;不传则新建"
     )
+
+
+class AttorneyAskRequest(BaseModel):
+    """代理律师模式咨询请求。"""
+
+    query: str = Field(..., min_length=1, max_length=5000, description="用户法律问题")
+    session_id: Optional[str] = Field(default=None, description="续聊会话 ID")
+
+
+class AssistantAskRequest(BaseModel):
+    """律师助理模式文书起草请求(婚姻家事类)。"""
+
+    case_details: str = Field(..., min_length=20, max_length=20000, description="完整案件详情")
+    doc_type: Literal["complaint", "defense"] = Field(
+        ..., description="complaint=起诉状, defense=答辩状"
+    )
+    session_id: Optional[str] = Field(default=None, description="续聊会话 ID")
 
 
 class ResumeRequest(BaseModel):
