@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+/* 引用来源专用衬线体(用户决策: 字体区别于正文) */
+.font-citation {
+  font-family: "Noto Serif SC", "Songti SC", SimSun, serif;
+}
