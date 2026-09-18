@@ -21,7 +21,7 @@
 
 ## 技术栈
 
-**前端:** Vue 3.5 + Vite 8 + **Tailwind CSS v4** + **Inspira UI**（unovue/inspira-ui，MIT，shadcn-vue 式复制安装）+ motion-v + lucide-vue-next + reka-ui。不引 router/Pinia（轻量 reactive store 模块）。
+**前端:** Vue 3.5 + Vite 8 + **Tailwind CSS v4** + **Inspira UI**（unovue/inspira-ui，MIT，shadcn-vue 式复制安装）+ motion-v + lucide-vue-next + reka-ui + **axios**（REST 请求层，用户决策）。不引 router/Pinia（轻量 reactive store 模块）。SSE 流式读取因 axios（XHR）不支持 ReadableStream，仍用 fetch（见 P1.4）。
 **后端:** 现有 FastAPI/LangGraph 1.0.1/DeepSeek 双模型（planner=reasoner, executor=chat），图结构零改动。
 
 ## 架构与依赖链
@@ -50,8 +50,7 @@ Phase 0 地基修复 ──→ Phase 1 后端(双模式接口 + CoT SSE + sessio
 代理律师模式(B):
   POST /attorney/ask          完整咨询(阻塞式, QueryResponse)
   GET  /attorney/ask/stream   SSE 流式咨询(token/tool_call/tool_result/reasoning/interrupt/answer/session_id/done/error)
-  免责硬校验: AttorneyAskRequest.disclaimer_ack 非 true → 403 + {disclaimer: 声明文本};
-              true → 放行 + 写 audit(事件类型 disclaimer_ack)
+  免责: 非强校验(用户决策) —— 后端不做 403 拦截; 前端首次进入 B 模式弹 Inspira 小弹窗提示(非阻塞, 无需确认)
 
 律师助理模式(A):
   POST /assistant/ask         文书起草(阻塞式)
@@ -62,11 +61,12 @@ Phase 0 地基修复 ──→ Phase 1 后端(双模式接口 + CoT SSE + sessio
   POST /ask/resume            六类 HITL 恢复(两模式共用)
   GET /sessions               会话列表(时间/标题/轮次, 从 checkpointer 读)
   GET /sessions/{sid}         会话详情(各轮答复/interrupt 记录/要素终态)
+  GET /disclaimer            返回免责声明文本(前端小弹窗的内容源, 单一来源)
   保留不动: /tools /home /feedback /ask/pdf
   旧 /ask、/ask/stream 保留一期标 deprecated(存量测试与体检册 06 依赖), 二期移除
 ```
 
-- `QueryRequest` 拆为 `AttorneyAskRequest`（query + disclaimer_ack + session_id）与 `AssistantAskRequest`；**mode 由端点决定，不作为请求字段**。
+- `QueryRequest` 拆为 `AttorneyAskRequest`（query + session_id）与 `AssistantAskRequest`（case_details + doc_type + session_id）；**mode 由端点决定，不作为请求字段**。
 - `AgentState` 增 `mode: str = "attorney"` 字段，`ingest` 节点按端点注入；planner/finalize 按 mode 选提示词变体（P1.3）。图结构、路由函数、六处 interrupt 零改动。
 - 模式 A 文书要素提取复用 `case_elements` 机制但换文书要素集（原被告信息/诉讼请求/事实与理由/证据清单）；要素缺失同样走 `ask_element` 反问 HITL——两模式共用 `/ask/resume` 的依据。
 
@@ -75,14 +75,14 @@ Phase 0 地基修复 ──→ Phase 1 后端(双模式接口 + CoT SSE + sessio
 `:532` planner 与 `:1077` replanner 弃用 `with_structured_output`，改手工流式调用：
 - 逐 delta 转发 `reasoning_content` 为新 SSE 事件 `{"event": "reasoning", "source": "planner"|"replanner", "delta": "..."}`；
 - 同时累积 `content`，流结束后手动 JSON 解析 + PlanSchema Pydantic 校验；
-- 解析/校验失败 → 落回既有硬编码兜底计划（保底行为与现状一致，06 册断言的降级检查不受影响——正常路径无 fallback 字样）。
+- 解析/校验失败 → **直接报错**（SSE `error` 事件携带错误信息终止本轮），不做静默兜底（用户决策：有错误直接报错，便于暴露问题）。旧 `/ask` 路径的存量兜底行为不在本期改造范围。
 - 其余四处节点（risk/assess/replan_check/mid_clarify）保持 P0.1 的 json_mode 非流式。
 
 ### P1.3 提示词体系（prompts.py 新增）
 
 - `PLANNER_PROMPT_ATTORNEY`（多轮追问案情导向）/ `PLANNER_PROMPT_ASSISTANT`（要素提取→检索→文书结构化起草导向）。
 - `FINALIZE_COMPLAINT_PROMPT` / `FINALIZE_DEFENSE_PROMPT`：婚姻家事类（离婚纠纷/抚养权/财产分割）起诉状/答辩状模板，固定段落结构（当事人→诉讼请求→事实与理由→证据清单），文末固定「AI 生成，需律师复核」标注。
-- `DISCLAIMER_TEXT` 常量：代理律师模式免责声明（AI 非执业律师、不构成法律意见、紧急情况热线），供 403 响应与前端弹窗共用同一来源。
+- `DISCLAIMER_TEXT` 常量：代理律师模式免责声明（AI 非执业律师、不构成法律意见、紧急情况热线），由 `GET /disclaimer` 暴露给前端小弹窗（单一来源）。
 
 ### P1.4 SSE 传输
 
@@ -93,20 +93,20 @@ Phase 0 地基修复 ──→ Phase 1 后端(双模式接口 + CoT SSE + sessio
 ```
 frontend/
 ├── src/
-│   ├── App.vue              # 布局: 模式切换 + 左历史栏 + 右工作区
+│   ├── App.vue              # 单一界面(用户决策): 左历史栏 + 右聊天区; 顶部按钮切换两模式, 界面复用
 │   ├── store.js             # reactive: messages/tools/elements/interrupt/session/mode
-│   ├── sse.js               # fetch 流式读 + 事件分发(token/reasoning/tool_*/interrupt/answer/done/error)
-│   ├── api.js               # /attorney/ask /assistant/ask /ask/resume /sessions
+│   ├── api.js               # axios: /attorney/ask /assistant/ask /ask/resume /sessions /disclaimer
+│   ├── sse.js               # fetch ReadableStream 流式读 + 事件分发(token/reasoning/tool_*/interrupt/answer/done/error)
 │   └── components/
-│       ├── ModeSwitch.vue       # 律师助理 / 代理律师
-│       ├── DisclaimerModal.vue  # B 模式进入免责声明(确认→disclaimer_ack=true)
-│       ├── ChatView.vue         # 消息流 + token 渐进渲染
-│       ├── ThinkingPanel.vue    # CoT 折叠面板, reasoning 逐字流入
+│       ├── ModeSwitch.vue       # 模式切换按钮; 仅切换输入区配置(B=提问框, A=案情粘贴+doc_type 选择), 不换页面
+│       ├── DisclaimerToast.vue # B 模式首次进入的小弹窗提示(Inspira 组件, 非阻塞, 无需确认)
+│       ├── ChatView.vue         # 消息流: SSE token 以打字机效果渲染(用户决策); 用户长提问可折叠
+│       ├── ThinkingPanel.vue    # CoT 折叠面板, reasoning 逐字流入(打字机)
 │       ├── ToolTimeline.vue     # 工具调用时间线
 │       ├── ElementPanel.vue     # 案件/文书要素面板
-│       ├── CitationList.vue     # 引用来源(法条+案例)
-│       ├── InterruptPanel.vue   # 六类分型: 是/否钮(risk_confirm/pdf_confirm)·文本输入(clarify/mid_clarify)·选项钮(degrade_confirm/budget_confirm) → 统一 POST /ask/resume
-│       ├── DocDraft.vue         # A 模式: 案情大文本输入 + doc_type 选择 + 文书预览/复制
+│       ├── CitationList.vue     # 引用来源(法条+案例), 字体区别于正文(衬线体, 用户决策)
+│       ├── InterruptPanel.vue   # 六类分型(是/否钮·文本输入·选项钮), 各类均附「自助输入」自由文本框(用户决策) → 统一 POST /ask/resume
+│       ├── DocComposer.vue      # A 模式输入区: 案情大文本粘贴(可折叠预览) + doc_type 选择(起诉状/答辩状)
 │       └── HistorySidebar.vue   # 会话列表 + 回看
 ```
 
@@ -114,40 +114,40 @@ frontend/
 
 | 页面块 | 组件 |
 |---|---|
-| 消息流 | Chat Group / Chat Bubble |
-| CoT 面板 | Fade-In + Typing Animation |
+| 消息流 / token 打字机 | Chat Group / Chat Bubble + Typing Animation |
+| CoT 面板逐字流 | Fade-In + Typing Animation |
 | 工具时间线 | Timeline |
-| 要素面板/引用 | Bento Grid / Magic Card |
+| 要素面板/引用卡片 | Bento Grid / Magic Card |
 | 活动 interrupt 高亮 | Border Beam |
-| 免责弹窗 | reka-ui Dialog 基座 |
+| 免责小弹窗(非阻塞) | Inspira toast/dialog 轻量变体 |
 | 背景/发送按钮 | Dot Pattern / Shimmer Button |
 
-**交互闭环:** B 模式: 免责弹窗确认 → 提问 → SSE（reasoning 思考流 + 工具时间线 + 要素面板实时更新）→ interrupt 弹面板 → resume → 续答 → done；session_id 存 localStorage 续聊。A 模式: 粘贴案情 + 选文书类型 → SSE（CoT + 检索过程）→ 文书预览/复制 →（要素缺失时同样 interrupt 反问）。
+**交互闭环:** B 模式: 首次进入小弹窗免责提示（非阻塞）→ 提问 → SSE（reasoning 思考流打字机 + 工具时间线 + 要素面板实时更新 + token 打字机渲染）→ interrupt 弹面板（预设选项或自助输入）→ resume → 续答 → done；session_id 存 localStorage 续聊。A 模式: 粘贴案情 + 选文书类型 → SSE（CoT + 检索过程）→ 文书预览/复制 →（要素缺失时同样 interrupt 反问）。两模式共用同一聊天界面，仅输入区随模式切换。
 
 **工程:** `lawApp_LangGraph/law_agent_Vue/` 整体迁至仓库根 `frontend/`（当前嵌在 Python 包内，52MB 含 node_modules/dist，打包 Python 时会被带走）；vite proxy `/api → 127.0.0.1:8000` 不变。
 
-## 错误处理
+## 错误处理（用户决策：不做兜底，有错误直接报错）
 
-- 后端所有新端点异常路径返回结构化错误（复用 `build_response` 风格），SSE 以 `error` 事件收尾，不裸抛堆栈。
-- CoT 流中断/JSON 解析失败 → 兜底计划 + SSE `reasoning_done` 事件标注降级，前端思考面板标灰提示。
-- PG 不可用时 sessions 端点返回明确降级文案（InMemory 下历史为空），不 500。
+- 新端点/新路径异常一律显式暴露：阻塞式接口返回 4xx/5xx + 明确 message；SSE 以 `error` 事件携带原始错误信息终止；不静默降级、不兜底文案。
+- CoT 流中断/JSON 解析失败 → 直接报错终止；前端思考面板保留已收到的 reasoning 片段并标红，供用户重试。
+- PG 不可用时 sessions 端点直接报错（不返回空列表降级文案）。
 - 前端 fetch 流 abort 后显式断开提示，Session 状态不残留「进行中」。
 
 ## 测试与验证
 
-- **后端:** pytest 新增（复用 `tests/test_smoke.py` 的 no_llm/_FakeLLM 替身，不联网不调真 LLM）：双端点路由、403 免责校验、audit 留痕、SSE reasoning 事件存在性、PlanSchema 手动解析成功/失败两分支、sessions 端点（InMemory 降级分支）。
-- **前端:** `npm run build` 零错；人工走两模式全流程（含至少一次 interrupt 与 resume）。
+- **后端（用户决策：ipynb 形式、不用 FakeLLM）:** tests_ipynb 新增体检册直连真实后端验证——07 册双模式接口（路由/请求体/SSE 事件序列含 reasoning/sessions 端点/免责文本端点）、文书生成结构（真实 LLM 调用，直连真实服务）；存量 pytest 套件保持不动、不新增替身用例。
+- **前端:** `npm run build` 零错；人工走两模式全流程（含至少一次 interrupt 预设选项 + 一次自助输入 resume）。
 - **回归:** tests_ipynb 06 册端到端（旧 /ask 路径）不回归；02 册 json_mode 断言全绿。
 
 ## 明确不做（第一期）
 
-合同审查/律师函/证据清单类文书、登录鉴权、POST 流式端点、UI 主题深加工、前后端部署合并（分跑 + vite proxy）、非婚姻家事类模板、多用户并发治理。
+合同审查/律师函/证据清单类文书、登录鉴权、POST 流式端点、UI 主题深加工、前后端部署合并（分跑 + vite proxy）、非婚姻家事类模板、多用户并发治理、错误兜底/降级文案（本期一律直接报错——用户决策，便于暴露问题）。
 
 ## 风险与对策
 
 | 风险 | 对策 |
 |---|---|
-| reasoner 流式下 content 偶发不完整/非法 JSON | 手动解析 + Pydantic 校验，失败落既有兜底计划（P1.2），行为保底 |
+| reasoner 流式下 content 偶发不完整/非法 JSON | 手动解析 + Pydantic 校验；失败直接报错终止（用户决策不做兜底），前端保留已收 reasoning 片段供重试 |
 | Inspira UI 组件与业务场景不完全匹配 | 复制安装哲学即允许改造；缺失组件 Tailwind v4 手写补 |
 | 前端提前搭壳与后端接口演进不同步 | sse.js/api.js 单独成层, 后端字段变更只动这两处 |
 | GET + query 长案情文本超 URL 限制 | 414 语义明确报错 + A 模式引导分段粘贴; POST 流式二期根治 |
