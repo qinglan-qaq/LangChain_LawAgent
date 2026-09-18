@@ -30,6 +30,8 @@
 
 | 项 | 行号 | 上游 | 下游 |
 |---|---|---|---|
+| `get_executor_llm()` | 120 | 所有执行/门控节点 | ChatOpenAI(flash) 单例 |
+| `_structured(schema)` | ~138 (新增) | risk_gate/element_assess/replan_check/mid_clarify 四节点 | 真实 ChatOpenAI → `with_structured_output(schema, method="json_mode")`; 冒烟替身(只收位置参数) → 按替身原签名调用 |
 | `_REASONING_BUS: dict[str, asyncio.Queue]` | 222 | — (模块级单例) | planner_node / replanner_node 推帧; api._mode_stream 读取 |
 | `open_reasoning_channel(thread_id)` | 225 | api._mode_stream (每次 SSE 请求开流) | 返回绑定 thread_id 的 Queue |
 | `close_reasoning_channel(thread_id)` | 241 | api._mode_stream finally | 防泄漏清理 |
@@ -39,7 +41,7 @@
 | `element_assess_node(state)` | 375 | 图边 risk_gate→element_assess | `ElementAssessmentSchema` json_mode; interrupt(clarify); 更新 case_elements |
 | `ask_element_node(state)` | 461 | 图边 element_assess→ask_element | interrupt(clarify); 更新 ClarifyExchange |
 | `_parse_plan_json(raw)` | 561 | _stream_plan 内部 | `PlanSchema.model_validate`; 失败直接 raise (无兜底, 用户约束) |
-| `_stream_plan(prompt_text, source, config)` | 572 | planner_node(572-618) / replanner_node | **raw `openai.AsyncOpenAI` 流式**; 逐 chunk 取 `delta.reasoning_content` → `_REASONING_BUS[thread_id]`; content 拼接 → `_parse_plan_json` |
+| `_stream_plan(prompt_text, source, config)` | ~584 | planner_node / replanner_node | **开头有替身 seam**: 非 ChatOpenAI(冒烟替身) 走 `with_structured_output(PlanSchema)` 原签名并直接返回 verdict; 真实路径 **raw `openai.AsyncOpenAI` 流式**, 逐 chunk 取 `delta.reasoning_content` → `_REASONING_BUS[thread_id]`, content 拼接 → `_parse_plan_json` |
 | `planner_node(state, config: RunnableConfig)` | 620 | 图边 element_assess/ask_element→planner | assistant 模式追加 `PLANNER_ASSISTANT_SUFFIX`; `_stream_plan(prompt, "planner", config)`; **无默认计划兜底** |
 | `executor_node(state)` | 710 | 图边 planner→executor | 工具调用 (ALL_TOOLS) |
 | `merge_node(state)` | 856 | 图边 executor→merge | 合并工具结果 |
@@ -153,7 +155,7 @@ python -m uvicorn lawApp_LangGraph.FastAPI.api:app --host 127.0.0.1 --port 8000 
 | `extract_interrupt(snapshot)` | 34 | /sessions/{sid} 与 /attorney/ask 的 interrupt 载荷 |
 | `normalize_resume(interrupt_type, answer)` | 51 | 六类 interrupt 归一; **类型字符串精确不可改** |
 | `build_response(state, session_id)` | 132 | 所有 ask 端点共用响应组装 |
-| `sse_event(event, data)` | 159 | SSE 帧格式 `data: {"event":E,"data":D}\n\n` — 前端 sse.js 的解析契约 |
+| `sse_event(event, data)` | 159 | SSE 帧格式 `data: {"event":E,"data":D}\n\n` — 前端 sse.js 的解析契约。**已修双重编码**: data 保持原类型(str 原样, dict/list 结构化直传), reasoning 帧 `e.data.delta` 才能成立 |
 
 ### 3.3 `api.py`
 
