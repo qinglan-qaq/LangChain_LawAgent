@@ -281,7 +281,7 @@ async def risk_gate_node(state: AgentState) -> dict:
     try:
         chain = (
             PromptTemplate.from_template(RISK_GATE_PROMPT)
-            | get_executor_llm().with_structured_output(RiskSchema)
+            | get_executor_llm().with_structured_output(RiskSchema, method="json_mode")
         )
         verdict = await chain.ainvoke({"query": query[:2000]})
         high_risk = bool(verdict.high_risk)
@@ -355,7 +355,7 @@ async def element_assess_node(state: AgentState) -> dict:
     try:
         chain = (
             PromptTemplate.from_template(ELEMENT_ASSESS_PROMPT)
-            | get_executor_llm().with_structured_output(ElementAssessmentSchema)
+            | get_executor_llm().with_structured_output(ElementAssessmentSchema, method="json_mode")
         )
         v = await chain.ainvoke(
             {
@@ -908,7 +908,7 @@ async def replan_check_node(state: AgentState) -> dict:
     try:
         chain = PromptTemplate.from_template(
             REPLAN_CHECK_PROMPT
-        ) | get_executor_llm().with_structured_output(ReplanCheckSchema)
+        ) | get_executor_llm().with_structured_output(ReplanCheckSchema, method="json_mode")
         result = await chain.ainvoke(
             {
                 "user_query": state.query[:1000],
@@ -998,7 +998,7 @@ async def mid_clarify_node(state: AgentState) -> dict:
     try:
         chain = (
             PromptTemplate.from_template(MID_CLARIFY_PROMPT)
-            | get_executor_llm().with_structured_output(MidClarifySchema)
+            | get_executor_llm().with_structured_output(MidClarifySchema, method="json_mode")
         )
         v = await chain.ainvoke(
             {

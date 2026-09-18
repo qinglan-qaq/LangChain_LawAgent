@@ -41,7 +41,8 @@ RISK_GATE_PROMPT = """你是法律AI系统的接诊助理.判断用户咨询是�
 ## 用户问题
 {query}
 
-按给定 JSON Schema 输出判断."""
+只输出一个 JSON 对象,字段名必须与下面完全一致(不要输出任何其他文本):
+{{"high_risk": true 或 false, "reason": "命中的标准,不超过30字"}}"""
 
 
 #  要素评估 (v2 新增 — 澄清循环核心)
@@ -78,7 +79,8 @@ ELEMENT_ASSESS_PROMPT = KIM_PERSONA_BLOCK + """
 ## 当前轮次
 第 {round} 轮 / 上限 {max_rounds} 轮
 
-按给定 JSON Schema 输出。"""
+只输出一个 JSON 对象,字段名必须与下面完全一致(不要输出任何其他文本):
+{{"applicable": true 或 false, "element_updates": [{{"key": "要素key", "value": "要素摘要", "status": "known" 或 "na"}}], "na_keys": ["不涉及的要素key"], "promote_keys": ["升关键的要素key"], "questions": [{{"key": "要素key", "question": "一句话反问"}}], "done": true 或 false}}"""
 
 
 #  检索反馈追问 (v2 新增 — 检索不足且原因笼统时,先问人后搜网)
@@ -100,7 +102,8 @@ MID_CLARIFY_PROMPT = KIM_PERSONA_BLOCK + """
 2. 律师问诊语气,一句话
 3. element_key 填该追问对应的要素 key
 
-按给定 JSON Schema 输出。"""
+只输出一个 JSON 对象,字段名必须与下面完全一致(不要输出任何其他文本):
+{{"question": "一个聚焦追问,律师问诊语气,一句话", "element_key": "追问对应的要素key"}}"""
 
 
 #  质量门控 (v2: 增加 insufficient_reason 诊断)
@@ -127,7 +130,10 @@ REPLAN_CHECK_PROMPT = """你是法律AI系统的质量审核员。检查已执�
    (此时应先追问用户细化问题,而非联网)
 4. 执行中出现了无法恢复的错误 → 需要重规划,原因 error
 5. 已有 final_answer 或 analyze_legal_issue 已成功执行 → 不需要重规划 (insufficient_reason=none)
-6. 已有足够案例且进行了法律分析 → 不需要重规划 (insufficient_reason=none)"""
+6. 已有足够案例且进行了法律分析 → 不需要重规划 (insufficient_reason=none)
+
+只输出一个 JSON 对象,字段名必须与下面完全一致:
+{{"needs_replan": true 或 false, "reason": "不超过50字的依据", "insufficient_reason": "vague|not_found|error|none 四选一"}}"""
 
 
 #  规划 (v2: 注入已知案件要素段)
