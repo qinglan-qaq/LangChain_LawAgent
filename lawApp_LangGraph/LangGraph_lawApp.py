@@ -574,6 +574,9 @@ async def _stream_plan(
 ) -> tuple["PlanSchema", list[str]]:
     """手工流式调用 reasoner: reasoning_content 逐字推 CoT 总线,累积 content 手动解析。
 
+    直接走 openai SDK 裸流: langchain_openai 的流式解析会丢弃 DeepSeek reasoner 的
+    非标准 delta.reasoning_content 字段, 必须自取。
+
     Args:
         prompt_text: 已 format 好的完整提示词。
         source: 事件来源标记, "planner" 或 "replanner"。
@@ -585,18 +588,32 @@ async def _stream_plan(
     Raises:
         ValueError: content 无法解析为 JSON 或不符合 PlanSchema 时直接抛出。
     """
+    import openai
+
     thread_id = (config.get("configurable") or {}).get("thread_id", "")
     q = _REASONING_BUS.get(thread_id)
     reasoning: list[str] = []
     content: list[str] = []
-    async for chunk in get_planner_llm().astream(prompt_text):
-        rc = chunk.additional_kwargs.get("reasoning_content", "")
+    client = openai.AsyncOpenAI(
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url or None,
+    )
+    stream = await client.chat.completions.create(
+        model=settings.deepseek_pro_model,
+        messages=[{"role": "user", "content": prompt_text}],
+        stream=True,
+    )
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        rc = getattr(delta, "reasoning_content", None) or ""
         if rc:
             reasoning.append(rc)
             if q is not None:
                 await q.put({"source": source, "delta": rc})
-        if chunk.content:
-            content.append(chunk.content)
+        if delta.content:
+            content.append(delta.content)
     return _parse_plan_json("".join(content)), reasoning
 
 

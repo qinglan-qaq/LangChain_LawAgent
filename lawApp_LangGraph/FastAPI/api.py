@@ -408,7 +408,192 @@ async def ask_stream(query: str = "", session_id: str | None = None):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/ask/pdf")
+def _validate_stream_text(text: str, limit: int = 4000) -> None:
+    """GET 流式端点的 URL 长度防护(用户决策: 直接报错不截断)。"""
+    if len(text) > limit:
+        raise HTTPException(
+            status_code=413, detail=f"文本过长({len(text)} > {limit} 字), 请分批发送"
+        )
+
+
+async def _mode_stream(
+    mode: str, query: str, doc_type: str, session_id: str | None
+) -> StreamingResponse:
+    """双模式 SSE 流式工厂: 旧 /ask/stream 全事件协议 + reasoning CoT 流。
+
+    Args:
+        mode: "attorney" 或 "assistant"。
+        query: 提问/案情文本。
+        doc_type: assistant 模式的文书类型(attorney 传空)。
+        session_id: 续聊会话 ID。
+
+    Returns:
+        StreamingResponse(text/event-stream)。
+    """
+    if not query.strip():
+        raise HTTPException(status_code=422, detail="query 不能为空")
+    _validate_stream_text(query)
+    sid = ensure_session(session_id)
+    set_session(sid)
+    await _safe_upsert_session(sid)
+    config = graph_config(sid)
+    graph = get_graph()
+    from lawApp_LangGraph.LangGraph_lawApp import (
+        close_reasoning_channel,
+        open_reasoning_channel,
+    )
+
+    inputs = {"query": query, "mode": mode}
+    if mode == "assistant":
+        inputs["doc_type"] = doc_type
+
+    async def event_stream():
+        import asyncio
+
+        out_q: asyncio.Queue = asyncio.Queue()
+        reasoning_q = open_reasoning_channel(sid)
+
+        async def pump():
+            """把 CoT 总线增量搬进统一输出队列;排空后发 done 终止帧。"""
+            while True:
+                item = await reasoning_q.get()
+                if item is None:
+                    break
+                await out_q.put(("reasoning", item))
+            await out_q.put(("done", ""))
+            await out_q.put(None)
+
+        async def run():
+            """消费 graph.astream, 事件形态与既有 /ask/stream 完全一致。"""
+            final_state: dict = {}
+            seen_steps: set[str] = set()
+            try:
+                async for stream_mode, chunk in graph.astream(
+                    inputs,
+                    config=config,
+                    stream_mode=["updates", "messages", "values"],
+                ):
+                    if stream_mode == "messages":
+                        msg, meta = chunk
+                        content = getattr(msg, "content", "")
+                        if (
+                            isinstance(content, str)
+                            and content.strip()
+                            and not getattr(msg, "tool_calls", None)
+                        ):
+                            await out_q.put(("token", content))
+                    elif stream_mode == "updates":
+                        for node_name, updates in (chunk or {}).items():
+                            if not isinstance(updates, dict):
+                                continue
+                            if node_name in ("planner", "replanner") and "plan" in updates:
+                                for s in updates.get("plan") or []:
+                                    key = f"{s.step_id}:{s.tool_name}"
+                                    if key not in seen_steps:
+                                        seen_steps.add(key)
+                                        await out_q.put(
+                                            (
+                                                "progress",
+                                                f"[{s.step_id}/{len(updates['plan'])}] {s.description}",
+                                            )
+                                        )
+                            if node_name == "executor" and "plan" in updates:
+                                plan = updates.get("plan") or []
+                                idx = updates.get("current_step_index")
+                                if idx is not None and idx < len(plan):
+                                    step = plan[idx]
+                                    await out_q.put(("tool_call", step.tool_name or "无"))
+                            if node_name == "merge":
+                                for k in (
+                                    "rag_documents",
+                                    "web_search_results",
+                                    "law_results",
+                                    "evaluation",
+                                ):
+                                    if k in updates and updates[k]:
+                                        n = (
+                                            len(updates[k])
+                                            if isinstance(updates[k], list)
+                                            else 1
+                                        )
+                                        await out_q.put(("tool_result", f"{k}: {n}"))
+                            if node_name == "element_assess" and "case_elements" in updates:
+                                ce = updates.get("case_elements")
+                                elems = getattr(ce, "elements", None) or []
+                                await out_q.put(
+                                    (
+                                        "elements",
+                                        [
+                                            {"key": e.key, "label": e.label, "status": e.status}
+                                            for e in elems
+                                        ],
+                                    )
+                                )
+                    elif stream_mode == "values":
+                        final_state = chunk or final_state
+
+                snapshot = await graph.aget_state(config)
+                interrupt_req = extract_interrupt(snapshot)
+                if interrupt_req:
+                    await out_q.put(("interrupt", interrupt_req))
+                    await _safe_audit(sid, "hitl_interrupt", interrupt_req)
+                else:
+                    answer = (final_state.get("final_answer") or "").strip()
+                    if answer:
+                        await out_q.put(("answer", answer))
+                    await out_q.put(("session_id", sid))
+
+                    pr = final_state.get("prompts_record")
+                    if pr is not None:
+                        record_data = (
+                            pr.model_dump(mode="json")
+                            if hasattr(pr, "model_dump")
+                            else (pr if isinstance(pr, dict) else {})
+                        )
+                        await out_q.put(("prompts_record", record_data))
+                    if final_state.get("final_prompts"):
+                        await out_q.put(("final_prompts", final_state["final_prompts"]))
+                    await _safe_audit(
+                        sid,
+                        "citations",
+                        {"tool_calls": final_state.get("tool_calls", [])},
+                    )
+            except Exception as e:
+                flow.error("流式流程异常", detail=str(e))
+                await out_q.put(("error", str(e)))
+            finally:
+                # 唤醒 pump 排空残余 CoT 增量, done 由 pump 统一发出
+                await reasoning_q.put(None)
+
+        tasks = [asyncio.create_task(run()), asyncio.create_task(pump())]
+        try:
+            while True:
+                item = await out_q.get()
+                if item is None:
+                    break
+                yield sse_event(item[0], item[1])
+        finally:
+            for t in tasks:
+                t.cancel()
+            close_reasoning_channel(sid)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/attorney/ask/stream")
+async def attorney_ask_stream(query: str = "", session_id: str | None = None):
+    """代理律师模式 SSE 流式: token/tool/reasoning(CoT)/interrupt/answer/done。"""
+    return await _mode_stream("attorney", query, "", session_id)
+
+
+@app.get("/assistant/ask/stream")
+async def assistant_ask_stream(
+    case_details: str = "", doc_type: str = "complaint", session_id: str | None = None
+):
+    """律师助理模式 SSE 流式: CoT + 法条/案例检索过程 + 文书 token 流。"""
+    if doc_type not in ("complaint", "defense"):
+        raise HTTPException(status_code=422, detail="doc_type 必须为 complaint|defense")
+    return await _mode_stream("assistant", case_details, doc_type, session_id)
 async def ask_pdf(request: QueryRequest):
     """生成 PDF 报告并返回文件下载."""
     from lawApp_LangGraph.tools.tools import markdown_to_pdf
