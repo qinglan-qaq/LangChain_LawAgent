@@ -158,7 +158,10 @@ PLANNER_SYSTEM = """你是法律AI系统的任务规划师.分析用户问题,�
 - 计划步骤不超过 8 步
 
 ## 用户问题
-{query}"""
+{query}
+
+只输出一个 JSON 对象(不要输出任何其他文本):
+{{"reasoning": ["思考过程条目"], "plan": [{{"step_id": 1, "description": "步骤描述", "tool_name": "工具名或null"}}]}}"""
 
 
 #  执行 (v2: 注入已知案件要素段)
@@ -206,7 +209,10 @@ REPLANNER_SYSTEM_PROMPT = """你是任务规划师.基于已执行的步骤和�
 
 ## 要求
 只输出需要**新增**的步骤,不要重复已完成的步骤.新增步骤不超过 3 步.
-下一个步骤编号从 {next_id} 开始."""
+下一个步骤编号从 {next_id} 开始.
+
+只输出一个 JSON 对象(不要输出任何其他文本):
+{{"reasoning": ["思考过程条目"], "plan": [{{"step_id": {next_id}, "description": "步骤描述", "tool_name": "工具名或null"}}]}}"""
 
 
 #  interrupt 静态文案 (不调 LLM)

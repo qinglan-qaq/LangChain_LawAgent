@@ -26,7 +26,7 @@ v2 变更 (upgrade-v1):
 - 全节点 async（replan_check / replanner 由同步 .invoke 改为 await ainvoke）
 - 删除 _TOOL_FALLBACK_ARGS 字典（structured 单次重试取代）
 - 新增 ingest 节点：每轮请求重置累积字段（reducer + RESET 标记），
-  多轮对话不再泄漏上一轮的检索/调用记录
+多轮对话不再泄漏上一轮的检索/调用记录
 - HITL 六处 interrupt() + Command(resume=...)：
     ① risk_gate: 高风险话题确认(拒绝 → 热线文案中止)
     ② ask_element: 关键要素缺失反问(要素循环, 最多 settings.max_clarify_rounds 轮)
@@ -36,7 +36,7 @@ v2 变更 (upgrade-v1):
     ⑥ hitl_budget: 重规划预算耗尽询问(补充/收尾)
 - LLM 懒加载单例，模块导入不再要求 API Key（可安全冒烟测试）
 - 持久化: checkpointer(PostgresSaver/MemorySaver) + store(PostgresStore/InMemoryStore)
-  由 FastAPI lifespan 注入；记忆工具经 langgraph.config.get_store() 访问
+由 FastAPI lifespan 注入；记忆工具经 langgraph.config.get_store() 访问
 """
 
 from __future__ import annotations
@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Literal, Optional
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt
@@ -215,6 +216,31 @@ def _schema_models():
 PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema, MidClarifySchema = (
     _schema_models()
 )
+
+
+# CoT 总线: thread_id → Queue; SSE 端点开道, planner/replanner 推 reasoning 增量
+_REASONING_BUS: dict[str, "asyncio.Queue"] = {}
+
+
+def open_reasoning_channel(thread_id: str) -> "asyncio.Queue":
+    """为会话开启 reasoning 通道;SSE 端点在 graph.astream 之前调用。
+
+    Args:
+        thread_id: 会话 ID(与 graph_config 的 configurable.thread_id 一致)。
+
+    Returns:
+        新建的 Queue; planner/replanner 推 {"source","delta"}, 结束推 None 哨兵。
+    """
+    import asyncio
+
+    q: asyncio.Queue = asyncio.Queue()
+    _REASONING_BUS[thread_id] = q
+    return q
+
+
+def close_reasoning_channel(thread_id: str) -> None:
+    """关闭并移除 reasoning 通道(幂等)。"""
+    _REASONING_BUS.pop(thread_id, None)
 
 
 # Node 0: Ingest — 每轮请求入口,重置累积字段
@@ -532,8 +558,50 @@ def _normalize_plan(schema) -> list[PlanStep]:
     return steps
 
 
-async def planner_node(state: AgentState) -> dict:
-    """Pro LLM: 分析问题 → structured 计划 + 思考链；失败降级为默认检索计划."""
+def _parse_plan_json(raw: str) -> "PlanSchema":
+    """解析 reasoner 流式累积的 content 为 PlanSchema;失败直接抛错(不做兜底)。"""
+    import json
+    import re
+
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        raise ValueError(f"Planner 输出中未找到 JSON 对象: {raw[:200]!r}")
+    return PlanSchema.model_validate(json.loads(m.group(0)))
+
+
+async def _stream_plan(
+    prompt_text: str, source: str, config: RunnableConfig
+) -> tuple["PlanSchema", list[str]]:
+    """手工流式调用 reasoner: reasoning_content 逐字推 CoT 总线,累积 content 手动解析。
+
+    Args:
+        prompt_text: 已 format 好的完整提示词。
+        source: 事件来源标记, "planner" 或 "replanner"。
+        config: 节点 config, 取 configurable.thread_id 定位总线。
+
+    Returns:
+        (解析成功的 PlanSchema, reasoning 增量列表)。
+
+    Raises:
+        ValueError: content 无法解析为 JSON 或不符合 PlanSchema 时直接抛出。
+    """
+    thread_id = (config.get("configurable") or {}).get("thread_id", "")
+    q = _REASONING_BUS.get(thread_id)
+    reasoning: list[str] = []
+    content: list[str] = []
+    async for chunk in get_planner_llm().astream(prompt_text):
+        rc = chunk.additional_kwargs.get("reasoning_content", "")
+        if rc:
+            reasoning.append(rc)
+            if q is not None:
+                await q.put({"source": source, "delta": rc})
+        if chunk.content:
+            content.append(chunk.content)
+    return _parse_plan_json("".join(content)), reasoning
+
+
+async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
+    """Pro reasoner 流式: 生成计划 + reasoning_content 推 CoT 总线;解析失败直接报错。"""
     t0 = time.time()
     query = state.query.strip()
     debug.debug("→ 进入 Planner 节点", detail=f"query={query[:80]}")
@@ -546,44 +614,21 @@ async def planner_node(state: AgentState) -> dict:
             "final_answer": "抱一丝,你能再说一遍吗?",
         }
 
-    try:
-        chain = PromptTemplate.from_template(
-            PLANNER_SYSTEM
-        ) | get_planner_llm().with_structured_output(PlanSchema)
-        result = await chain.ainvoke(
-            {
-                "query": query[:3000],
-                "available_tools": _tools_desc(),
-                "elements_digest": state.case_elements.digest(),
-            }
+    template = PLANNER_SYSTEM
+    if (state.mode or "attorney") == "assistant":
+        from lawApp_LangGraph.prompts import PLANNER_ASSISTANT_SUFFIX
+
+        template = PLANNER_SYSTEM + PLANNER_ASSISTANT_SUFFIX.format(
+            doc_type_label="起诉状" if state.doc_type != "defense" else "答辩状"
         )
-        plan = _normalize_plan(result)
-        reasoning = list(result.reasoning or [])
-    except Exception as e:
-        debug.warning(
-            "Planner structured output 失败,使用默认法律检索计划", detail=str(e)[:100]
-        )
-        return {
-            "reasoning": [f"Planner 输出解析失败,使用默认法律检索计划: {str(e)[:80]}"],
-            "plan": [
-                PlanStep(
-                    step_id=1,
-                    description="检索相关法律案例",
-                    tool_name="retrieve_legal_knowledge",
-                ),
-                PlanStep(
-                    step_id=2,
-                    description="评估检索质量",
-                    tool_name="evaluate_case_relevance",
-                ),
-                PlanStep(step_id=3, description="检索法律条文", tool_name="fetch_laws"),
-                PlanStep(
-                    step_id=4,
-                    description="综合信息生成法律分析",
-                    tool_name="analyze_legal_issue",
-                ),
-            ],
-        }
+    prompt = PromptTemplate.from_template(template).format(
+        query=query[:3000],
+        available_tools=_tools_desc(),
+        elements_digest=state.case_elements.digest(),
+    )
+    result, _cot = await _stream_plan(prompt, "planner", config)
+    plan = _normalize_plan(result)
+    reasoning = list(result.reasoning or [])
 
     elapsed = time.time() - t0
     step_names = [f"{s.step_id}.{s.tool_name or '闲聊'}" for s in plan]
@@ -1066,8 +1111,8 @@ async def mid_clarify_node(state: AgentState) -> dict:
 # Node 6: The Replanner — Pro LLM 补充计划
 
 
-async def replanner_node(state: AgentState) -> dict:
-    """Pro LLM: 生成补充计划 → 返回 Executor；解析失败降级为默认补充两步。"""
+async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
+    """Pro reasoner 流式: 生成补充计划 + reasoning_content 推 CoT 总线;解析失败直接报错。"""
     t0 = time.time()
     reason = state.replan_reason or "质量不足"
     debug.debug(
@@ -1093,35 +1138,16 @@ async def replanner_node(state: AgentState) -> dict:
         next_id=len(state.plan) + 1,
     )
 
-    try:
-        chain = get_planner_llm().with_structured_output(PlanSchema)
-        result = await chain.ainvoke(prompt)
-        additional = [
-            PlanStep(
-                step_id=len(state.plan) + i + 1,
-                description=p.description,
-                tool_name=(p.tool_name if p.tool_name in TOOL_BY_NAME else None),
-            )
-            for i, p in enumerate(result.plan)
-        ][:3]
-        new_reasoning = [f"[Replan] {reason}"] + list(result.reasoning or [])
-    except Exception as e:
-        debug.warning(
-            "Replanner structured output 失败,使用默认补充步骤", detail=str(e)[:100]
+    result, _cot = await _stream_plan(prompt, "replanner", config)
+    additional = [
+        PlanStep(
+            step_id=len(state.plan) + i + 1,
+            description=p.description,
+            tool_name=(p.tool_name if p.tool_name in TOOL_BY_NAME else None),
         )
-        additional = [
-            PlanStep(
-                step_id=len(state.plan) + 1,
-                description="联网搜索补充",
-                tool_name="get_google_search",
-            ),
-            PlanStep(
-                step_id=len(state.plan) + 2,
-                description="综合信息生成分析",
-                tool_name="analyze_legal_issue",
-            ),
-        ]
-        new_reasoning = [f"[Replan 降级] {reason} → 插入默认补充步骤"]
+        for i, p in enumerate(result.plan)
+    ][:3]
+    new_reasoning = [f"[Replan] {reason}"] + list(result.reasoning or [])
 
     elapsed = time.time() - t0
     new_names = [f"{s.step_id}.{s.tool_name}" for s in additional]
