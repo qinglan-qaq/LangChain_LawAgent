@@ -41,11 +41,24 @@ class _FakeVerdict:
     Plan / ReplanCheck / MidClarify 各 Schema 的属性形状
     (图内各节点按需读取各自属性)。"""
 
-    def __init__(self, *, plan=(), reasoning=(), need_clarification=False,
-                 question="", high_risk=False, needs_replan=False, reason="",
-                 applicable=True, element_updates=(), na_keys=(),
-                 promote_keys=(), questions=(), done=False,
-                 insufficient_reason="none"):
+    def __init__(
+        self,
+        *,
+        plan=(),
+        reasoning=(),
+        need_clarification=False,
+        question="",
+        high_risk=False,
+        needs_replan=False,
+        reason="",
+        applicable=True,
+        element_updates=(),
+        na_keys=(),
+        promote_keys=(),
+        questions=(),
+        done=False,
+        insufficient_reason="none",
+    ):
         self.plan = list(plan)
         self.reasoning = list(reasoning)
         self.need_clarification = need_clarification
@@ -126,13 +139,13 @@ def no_llm(monkeypatch):
 
 
 def test_imports():
+    import lawApp_LangGraph.db  # noqa: F401
+    import lawApp_LangGraph.FastAPI.api  # noqa: F401
+    import lawApp_LangGraph.LangGraph_lawApp  # noqa: F401
+    import lawApp_LangGraph.RAG_service.base  # noqa: F401
+    import lawApp_LangGraph.runtime  # noqa: F401
     import lawApp_LangGraph.state  # noqa: F401
     import lawApp_LangGraph.tools  # noqa: F401
-    import lawApp_LangGraph.db  # noqa: F401
-    import lawApp_LangGraph.runtime  # noqa: F401
-    import lawApp_LangGraph.LangGraph_lawApp  # noqa: F401
-    import lawApp_LangGraph.FastAPI.api  # noqa: F401
-    import lawApp_LangGraph.RAG_service.base  # noqa: F401
 
 
 def test_state_reducers():
@@ -146,24 +159,33 @@ def test_state_reducers():
 
 
 def test_case_elements_model():
-    from lawApp_LangGraph.state import CaseElements, default_case_elements
     from lawApp_LangGraph.config import settings
+    from lawApp_LangGraph.state import default_case_elements
 
     ce = default_case_elements()
     # 默认 7 要素，关键 3 个
     keys = [e.key for e in ce.elements]
     assert keys == [
-        "marriage_status", "demand", "property",
-        "children", "timeline", "evidence", "opposing_stance",
+        "marriage_status",
+        "demand",
+        "property",
+        "children",
+        "timeline",
+        "evidence",
+        "opposing_stance",
     ]
-    assert [e.label for e in ce.elements if e.critical] == ["婚姻现状", "核心诉求", "主要财产与归属"]
+    assert [e.label for e in ce.elements if e.critical] == [
+        "婚姻现状",
+        "核心诉求",
+        "主要财产与归属",
+    ]
     assert len(ce.critical_missing()) == 3
 
     # mark_na / promote / update
     ce.mark_na(["evidence"])
     ce.promote(["timeline"])
-    assert ce.elements[4].critical is True          # timeline 升关键
-    assert ce.elements[5].status == "na"            # evidence 不适用
+    assert ce.elements[4].critical is True  # timeline 升关键
+    assert ce.elements[5].status == "na"  # evidence 不适用
     ce.update("marriage_status", "在婚,分居中", by="assess")
     assert ce.elements[0].status == "known"
     assert ce.elements[0].value == "在婚,分居中"
@@ -186,9 +208,16 @@ def test_agent_state_new_fields():
     from lawApp_LangGraph.state import AgentState
 
     s = AgentState(query="我想离婚")
-    for f in ("case_elements", "clarify_history", "pending_questions",
-              "clarify_rounds", "error_streak", "mid_clarify_used",
-              "budget_hitl_used", "degrade_used"):
+    for f in (
+        "case_elements",
+        "clarify_history",
+        "pending_questions",
+        "clarify_rounds",
+        "error_streak",
+        "mid_clarify_used",
+        "budget_hitl_used",
+        "degrade_used",
+    ):
         assert hasattr(s, f), f"缺少新字段 {f}"
     assert s.clarify_rounds == 0 and s.error_streak == 0
     assert not (s.mid_clarify_used or s.budget_hitl_used or s.degrade_used)
@@ -203,9 +232,14 @@ def test_tools_registry():
     MCP_TOOLS.clear()  # MCP 测试可能注册过外部工具,隔离验证本地注册表
     names = {t.name for t in ALL_TOOLS()}
     assert {
-        "search_memory", "save_to_memory", "fetch_laws", "get_google_search",
-        "markdown_to_pdf", "retrieve_legal_knowledge",
-        "evaluate_case_relevance", "analyze_legal_issue",
+        "search_memory",
+        "save_to_memory",
+        "fetch_laws",
+        "get_google_search",
+        "markdown_to_pdf",
+        "retrieve_legal_knowledge",
+        "evaluate_case_relevance",
+        "analyze_legal_issue",
     } == names
 
 
@@ -216,15 +250,22 @@ def test_spelling_fixed():
     from lawApp_LangGraph import state as st
 
     code = "\n".join(
-        line for line in inspect.getsource(st).splitlines()
+        line
+        for line in inspect.getsource(st).splitlines()
         if not line.lstrip().startswith(("#", "*"))
     )
     assert "evaluate_retrieved_documents" in code
 
     out = subprocess.run(
-        ["grep", "-rl", "evluate_retrieved_documents", str(ROOT / "lawApp_LangGraph"),
-         "--include=*.py"],
-        capture_output=True, text=True,
+        [
+            "grep",
+            "-rl",
+            "evluate_retrieved_documents",
+            str(ROOT / "lawApp_LangGraph"),
+            "--include=*.py",
+        ],
+        capture_output=True,
+        text=True,
     )
     assert not out.stdout.strip(), f"旧拼写残留: {out.stdout}"
 
@@ -238,9 +279,20 @@ def test_graph_topology():
     g = app.build_graph()
     nodes = set(g.get_graph().nodes.keys())
     expected = {
-        "ingest", "risk_gate", "element_assess", "ask_element",
-        "planner", "executor", "tools", "merge", "replan_check",
-        "mid_clarify", "hitl_degrade", "hitl_budget", "replanner", "finalize",
+        "ingest",
+        "risk_gate",
+        "element_assess",
+        "ask_element",
+        "planner",
+        "executor",
+        "tools",
+        "merge",
+        "replan_check",
+        "mid_clarify",
+        "hitl_degrade",
+        "hitl_budget",
+        "replanner",
+        "finalize",
     }
     assert expected <= nodes, f"missing: {expected - nodes}"
 
@@ -281,17 +333,21 @@ def test_chitchat_short_circuit(no_llm):
 
 def test_interrupt_resume(no_llm):
     """要素循环: assess 判定缺关键要素 → ask interrupt → resume 补充 → 要素齐 → planner."""
-    import lawApp_LangGraph.LangGraph_lawApp as lg
-    from lawApp_LangGraph.state import ElementQuestion
     from langgraph.checkpoint.memory import MemorySaver
     from langgraph.types import Command
 
+    import lawApp_LangGraph.LangGraph_lawApp as lg
+    from lawApp_LangGraph.state import ElementQuestion
+
     # ① 首轮: 缺 marriage_status, 生成反问
     no_llm["plan_result"] = _FakeVerdict(
-        need_clarification=True, question="请问结婚多少年了?",
-        applicable=True, done=False,
-        questions=[ElementQuestion(key="marriage_status",
-                                   question="请问结婚多少年了?")],
+        need_clarification=True,
+        question="请问结婚多少年了?",
+        applicable=True,
+        done=False,
+        questions=[
+            ElementQuestion(key="marriage_status", question="请问结婚多少年了?")
+        ],
         plan=[],
     )
 
@@ -309,9 +365,7 @@ def test_interrupt_resume(no_llm):
 
         # ② resume 补充 → assess 二轮(无新反问) → planner(空计划) → finalize
         no_llm["plan_result"] = _FakeVerdict(reasoning=["要素齐"], plan=[])
-        result2 = await g.ainvoke(
-            Command(resume="结婚5年,有个3岁孩子"), config=cfg
-        )
+        result2 = await g.ainvoke(Command(resume="结婚5年,有个3岁孩子"), config=cfg)
         assert result2.get("final_answer") == "测试回答"
         assert "[用户补充信息]" in result2["query"]
         assert result2["clarify_history"], "应记录澄清历史"
@@ -324,8 +378,9 @@ def test_interrupt_resume(no_llm):
 
 
 def test_restart_same_thread(no_llm):
-    import lawApp_LangGraph.LangGraph_lawApp as lg
     from langgraph.checkpoint.memory import MemorySaver
+
+    import lawApp_LangGraph.LangGraph_lawApp as lg
 
     no_llm["plan_result"] = _FakeVerdict(plan=[])
 
