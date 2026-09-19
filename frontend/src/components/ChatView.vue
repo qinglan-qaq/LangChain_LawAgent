@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { Motion } from 'motion-v'
 import { state, useTypewriter } from '../store'
-import FadeIn from './inspira/FadeIn.vue'
 
 // 流式目标: 最后一条 assistant 消息(打字机只对它生效)
 const lastAssistant = computed(
@@ -22,7 +22,14 @@ watch(lastAssistant, () => {
 
 <template>
   <div class="space-y-3">
-    <FadeIn v-for="(m, i) in state.messages" :key="i" :delay="0">
+    <!-- 官方 Inspira 无 FadeIn 组件, 消息入场按官方动画底座 motion-v 直写 -->
+    <Motion
+      v-for="(m, i) in state.messages"
+      :key="i"
+      as="div"
+      :initial="{ opacity: 0, y: 4 }"
+      :animate="{ opacity: 1, y: 0 }"
+    >
       <div :class="m.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
         <div
           class="max-w-[80%] rounded-2xl px-4 py-2 text-sm leading-6"
@@ -50,6 +57,6 @@ watch(lastAssistant, () => {
           </template>
         </div>
       </div>
-    </FadeIn>
+    </Motion>
   </div>
 </template>

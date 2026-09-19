@@ -13,8 +13,8 @@ import ElementPanel from './components/ElementPanel.vue'
 import CitationList from './components/CitationList.vue'
 import InterruptPanel from './components/InterruptPanel.vue'
 import DocComposer from './components/DocComposer.vue'
-import DotPattern from './components/inspira/DotPattern.vue'
-import TypingAnimation from './components/inspira/TypingAnimation.vue'
+import { PatternBackground } from './components/inspira/pattern-background'
+import TypewriterText from './components/inspira/TypewriterText.vue'
 
 onMounted(() => {
   /* HistorySidebar 数据拉取由其自身 onMounted 负责 */
@@ -80,7 +80,10 @@ function onResumed(r) {
 
 <template>
   <div class="relative flex h-screen bg-slate-100">
-    <DotPattern class="opacity-60" />
+    <!-- 官方组件根节点自带 relative(cva 基底, class 数组不合并), 定位类由外层 wrapper 承载避免冲突 -->
+    <div class="pointer-events-none absolute inset-0 z-0 opacity-60">
+      <PatternBackground variant="dot" class="h-full" />
+    </div>
     <HistorySidebar class="w-64 shrink-0 border-r bg-white/80 backdrop-blur z-10" />
     <div class="flex-1 flex flex-col z-10">
       <header class="flex items-center gap-3 p-3 border-b bg-white/80">
@@ -90,8 +93,8 @@ function onResumed(r) {
       <DisclaimerToast />
       <main class="flex-1 overflow-y-auto p-4">
         <div v-if="!state.messages.length" class="text-slate-500 text-sm mt-8 text-center">
-          <TypingAnimation
-            :texts="['代理律师模式: 提问婚姻家事问题, 我来分析', '律师助理模式: 粘贴案情, 我来起草起诉状 / 答辩状']"
+          <TypewriterText
+            :text="['代理律师模式: 提问婚姻家事问题, 我来分析', '律师助理模式: 粘贴案情, 我来起草起诉状 / 答辩状']"
           />
         </div>
         <p
