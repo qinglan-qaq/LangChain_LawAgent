@@ -1213,7 +1213,11 @@ git commit -m "C: P1 验证记录 — 真实 E2E trace 落库/工具命中/token
 
 ## 执行记录(任务执行时追加)
 
-- Task 3 checkpoint 自愈检查结果: (待填)
+- Task 3 checkpoint 自愈检查结果(2026-09-21 实测, 方式以 `docker stop/start postgres-vector` 替代整停 Docker Desktop, 等效且干扰更小):
+  - 基线: 后端 `checkpoint_backend=postgres` 启动, 咨询全流程 102 个 SSE 事件收尾正常
+  - 断连(docker stop): SSE 发 `error` 事件("consuming input failed: ... connection abort")后正常发 `done`, 不挂起不崩连接层; `/sessions` 返回 `[]`(Task 2 降级同场实测生效)
+  - 恢复(docker start 后): 第一次请求仍失败一次(psycopg 池丢弃死连接的代价), **第二次请求完全自愈**(107 事件 + answer, 无 error) — 无需重启后端进程
+  - 结论: 断连自愈行为符合规格故事 22 预期, 零代码改动; 已知边界 = PG 恢复后首请求可能失败一次
 - Task 8 真实 E2E 结果: (待填)
 
 ## Spec Coverage / Self-Review(计划自审)
