@@ -43,6 +43,7 @@ from lawApp_LangGraph.FastAPI.model import (
 )
 from lawApp_LangGraph.FastAPI.utils import (
     build_response,
+    build_tool_usage,
     ensure_session,
     extract_interrupt,
     get_graph,
@@ -302,11 +303,14 @@ async def ask_resume(request: ResumeRequest):
     graph = get_graph()
     config = graph_config(sid)
 
-    # 先读快照取 interrupt 类型,再类型感知归一
+    # 先读快照取 interrupt 类型,再类型感知归一(v4: 确认类自由文本走 LLM 语义判断)
     snapshot = await graph.aget_state(config)
     interrupt_req = extract_interrupt(snapshot)
     itype = (interrupt_req or {}).get("type", "")
-    resume_value = normalize_resume(itype, request.answer)
+    request_text = (interrupt_req or {}).get("message") or (interrupt_req or {}).get(
+        "question"
+    ) or ""
+    resume_value = await normalize_resume(itype, request.answer, request_text)
 
     t0 = time.time()
     try:
@@ -322,6 +326,33 @@ async def ask_resume(request: ResumeRequest):
         result=f"总耗时={time.time() - t0:.2f}s",
     )
     return response
+
+
+@app.post("/ask/resume/stream")
+async def ask_resume_stream(request: ResumeRequest):
+    """HITL 继续(SSE 流式): 与 POST /ask/resume 同参, 但 resume 后的全过程
+    (planner CoT / 节点状态 / 工具调用 / interrupt / answer / tool_usage)
+    实时下发事件 —— 正常咨询的主干(planner→executor→finalize)发生在 resume 阶段,
+    纯 REST 版看不到任何过程。"""
+    sid = ensure_session(request.session_id, "attorney")
+    set_session(sid)
+    flow.info("HITL 恢复", summary="用户回传(流式)", detail=f"answer={request.answer[:60]}")
+
+    graph = get_graph()
+    config = graph_config(sid)
+
+    # 先读快照取 interrupt 类型,再类型感知归一(确认类自由文本走 LLM 语义判断)
+    snapshot = await graph.aget_state(config)
+    interrupt_req = extract_interrupt(snapshot)
+    itype = (interrupt_req or {}).get("type", "")
+    request_text = (
+        (interrupt_req or {}).get("message")
+        or (interrupt_req or {}).get("question")
+        or ""
+    )
+    resume_value = await normalize_resume(itype, request.answer, request_text)
+
+    return _run_sse(sid, Command(resume=resume_value))
 
 
 @app.get("/ask/stream")
@@ -448,36 +479,19 @@ def _validate_stream_text(text: str, limit: int = 4000) -> None:
         )
 
 
-async def _mode_stream(
-    mode: str, query: str, doc_type: str, session_id: str | None
-) -> StreamingResponse:
-    """双模式 SSE 流式工厂: 旧 /ask/stream 全事件协议 + reasoning CoT 流。
+def _run_sse(sid: str, astream_input) -> StreamingResponse:
+    """SSE 流式工厂: astream_input(新提问 dict 或 Command(resume=...)) 驱动图。
 
-    Args:
-        mode: "attorney" 或 "assistant"。
-        query: 提问/案情文本。
-        doc_type: assistant 模式的文书类型(attorney 传空)。
-        session_id: 续聊会话 ID。
-
-    Returns:
-        StreamingResponse(text/event-stream)。
+    ask 与 resume 两种流共用: 事件协议与 /ask/stream 一致
+    (token/progress/tool_call/tool_result/elements/reasoning[CoT/状态/计划]/
+    session_id/interrupt/answer/prompts_record/tool_usage/done)。
     """
-    if not query.strip():
-        raise HTTPException(status_code=422, detail="query 不能为空")
-    _validate_stream_text(query)
-    sid = ensure_session(session_id, mode)
-    set_session(sid)
-    await _safe_upsert_session(sid)
-    config = graph_config(sid)
     graph = get_graph()
+    config = graph_config(sid)
     from lawApp_LangGraph.LangGraph_lawApp import (
         close_reasoning_channel,
         open_reasoning_channel,
     )
-
-    inputs = {"query": query, "mode": mode}
-    if mode == "assistant":
-        inputs["doc_type"] = doc_type
 
     async def event_stream():
         import asyncio
@@ -501,7 +515,7 @@ async def _mode_stream(
             seen_steps: set[str] = set()
             try:
                 async for stream_mode, chunk in graph.astream(
-                    inputs,
+                    astream_input,
                     config=config,
                     stream_mode=["updates", "messages", "values"],
                 ):
@@ -579,6 +593,9 @@ async def _mode_stream(
                 snapshot = await graph.aget_state(config)
                 interrupt_req = extract_interrupt(snapshot)
                 if interrupt_req:
+                    # interrupt 分支也必须下发 session_id, 否则前端 resume 时
+                    # 带空 id → 生成新线程 → 图从头执行(query 为空被误判闲聊)
+                    await out_q.put(("session_id", sid))
                     await out_q.put(("interrupt", interrupt_req))
                     await _safe_audit(sid, "hitl_interrupt", interrupt_req)
                 else:
@@ -597,6 +614,10 @@ async def _mode_stream(
                         await out_q.put(("prompts_record", record_data))
                     if final_state.get("final_prompts"):
                         await out_q.put(("final_prompts", final_state["final_prompts"]))
+                    # 工具使用 JSON 记录: {tool_name: [结果摘要, ...]}(用户决策 v4)
+                    tool_usage = build_tool_usage(final_state)
+                    if tool_usage:
+                        await out_q.put(("tool_usage", tool_usage))
                     await _safe_audit(
                         sid,
                         "citations",
@@ -622,6 +643,34 @@ async def _mode_stream(
             close_reasoning_channel(sid)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+async def _mode_stream(
+    mode: str, query: str, doc_type: str, session_id: str | None
+) -> StreamingResponse:
+    """双模式 SSE 流式问答: 旧 /ask/stream 全事件协议 + reasoning CoT 流。
+
+    Args:
+        mode: "attorney" 或 "assistant"。
+        query: 提问/案情文本。
+        doc_type: assistant 模式的文书类型(attorney 传空)。
+        session_id: 续聊会话 ID。
+
+    Returns:
+        StreamingResponse(text/event-stream)。
+    """
+    if not query.strip():
+        raise HTTPException(status_code=422, detail="query 不能为空")
+    _validate_stream_text(query)
+    sid = ensure_session(session_id, mode)
+    set_session(sid)
+    await _safe_upsert_session(sid)
+
+    inputs = {"query": query, "mode": mode}
+    if mode == "assistant":
+        inputs["doc_type"] = doc_type
+
+    return _run_sse(sid, inputs)
 
 
 @app.get("/attorney/ask/stream")

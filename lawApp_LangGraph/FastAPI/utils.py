@@ -67,22 +67,25 @@ def extract_interrupt(snapshot) -> Optional[dict]:
     return None
 
 
-_YES = ("y", "yes", "是", "确认", "好", "继续")
-_NO = ("n", "no", "否", "跳过", "不要")
+_YES = ("y", "yes", "是", "确认", "好", "继续", "生成", "确认生成", "没问题")
+_NO = ("n", "no", "否", "跳过", "不要", "中止", "算了", "先不要")
 
 
-def normalize_resume(interrupt_type: str, answer: str) -> object:
-    """按 interrupt 类型归一用户回复(spec §7.2).
+async def normalize_resume(
+    interrupt_type: str, answer: str, request_text: str = ""
+) -> object:
+    """按 interrupt 类型归一用户回复(spec §7.2; v4: 确认类自由文本改 LLM 语义判断).
 
     Args:
         interrupt_type: interrupt 载荷的 type 标签,取值为
             risk_confirm / pdf_confirm / degrade_confirm /
             budget_confirm / clarify / mid_clarify。
         answer: 用户的原始回复文本(可能为空)。
+        request_text: interrupt 载荷的确认文案/问题文本,语义判断的上下文。
 
     Returns:
-        risk_confirm / pdf_confirm: bool,确认词 True / 拒绝词 False,
-            未识别默认拒绝(保守);
+        risk_confirm / pdf_confirm: bool。显式确认词/拒绝词直接映射;
+            其他自由文本交 semantic_confirm(LLM 语义判断);
         degrade_confirm: "retry" / "skip" / "abort" 之一,默认 skip;
         budget_confirm: 空回复或含收尾指令(收尾/结束/finish)返回
             "finish",否则补充原文透传;
@@ -96,7 +99,10 @@ def normalize_resume(interrupt_type: str, answer: str) -> object:
             return True
         if lowered in _NO:
             return False
-        return bool(lowered in _YES)  # 未识别默认拒绝(保守)
+        # 自由文本 → LLM 语义判断(用户决策: 不按关键词硬匹配)
+        from lawApp_LangGraph.LangGraph_lawApp import semantic_confirm
+
+        return await semantic_confirm(request_text or "确认请求", ans)
 
     if interrupt_type == "degrade_confirm":
         if "重试" in ans or "retry" in lowered:
@@ -152,6 +158,45 @@ def build_tool_calls(state: dict) -> list[str]:
     ]
 
 
+# 工具结果摘要(JSON 记录用): 列表记条数, pydantic 摘要化, 其余截断保可读
+def _summarize_output(output) -> Any:
+    if output is None:
+        return "无输出"
+    if isinstance(output, dict):
+        return {
+            k: (
+                f"{len(v)} 条"
+                if isinstance(v, list)
+                else _summarize_output(v)
+            )
+            for k, v in output.items()
+            if k != "prompts_record"
+        }
+    if isinstance(output, list):
+        return f"{len(output)} 条"
+    if hasattr(output, "model_dump"):
+        return _summarize_output(output.model_dump())
+    return str(output)[:120]
+
+
+def build_tool_usage(state: dict) -> dict:
+    """按 {tool_name: [结果摘要, ...]} 汇总工具使用记录(用户决策 v4).
+
+    Args:
+        state (dict): 图状态 values 快照,读取 tool_calls(ToolCallRecord).
+
+    Returns:
+        dict: 工具名 → 该工具历次调用结果摘要列表。
+    """
+    usage: dict[str, list] = {}
+    for tc in state.get("tool_calls", []) or []:
+        name = _field(tc, "tool_name", "")
+        if not name:
+            continue
+        usage.setdefault(name, []).append(_summarize_output(_field(tc, "output", None)))
+    return usage
+
+
 def build_response(state: dict, session_id: str) -> QueryResponse:
     pr = state.get("prompts_record")
     prompts_record = (
@@ -176,6 +221,7 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
         reasoning=state.get("reasoning", []) or [],
         prompts_record=prompts_record,
         elements=elements,
+        tool_usage=build_tool_usage(state),
     )
 
 

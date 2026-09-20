@@ -218,11 +218,33 @@ EXECUTOR_PROMPT = """你是执行器,只做一件事:调用指定的工具.
 4. 必须发起一次工具调用"""
 
 
-#  重规划 (v1 原样迁移)
+#  语义确认 (v4 新增 — HITL resume 自由文本不再按关键词硬匹配, 由 LLM 判断语义)
+# 输出 Schema: ConfirmSchema(见 LangGraph_lawApp._schema_models)
+SEMANTIC_CONFIRM_PROMPT = """判断用户对一次"确认请求"的回复语义是同意继续还是拒绝/跳过.
+
+## 确认请求内容
+{request}
+
+## 用户回复
+{answer}
+
+## 规则
+1. 用户表达同意/继续/确认(如 是/好的/可以/继续/生成吧/没问题) → proceed=true
+2. 用户表达拒绝/跳过/中止/改主意(如 不用了/算了/先不要/跳过/否) → proceed=false
+3. 用户回复与确认无关(补充提问/闲聊) → 视为未确认, proceed=false
+
+只输出一个 JSON 对象,字段名必须与下面完全一致(不要输出任何其他文本):
+{{"proceed": true 或 false}}"""
+
+
+#  重规划 (v1 原样迁移; v4: 注入已执行工具及结果摘要)
 REPLANNER_SYSTEM_PROMPT = """你是任务规划师.基于已执行的步骤和当前结果,生成**补充步骤**.
 
 ## 已执行步骤
 {executed_steps}
+
+## 已执行工具及结果
+{tool_calls_digest}
 
 ## 当前状态
 - 案例数量: {doc_count}
@@ -260,7 +282,7 @@ FINALIZE_CASE_PROMPT = PromptTemplate.from_template(
     + """
 
 ## 任务
-基于以下案例,简要回答用户问题.引用关键裁判思路,末尾附一行:「以上内容由 AI 生成,仅供参考,不构成正式法律意见。」
+基于以下案例,简要回答用户问题.引用关键裁判思路,末尾附一行:「以上内容由 AI 生成,仅供参考」
 
 ## 案例
 {docs}

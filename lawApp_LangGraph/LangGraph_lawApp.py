@@ -90,6 +90,7 @@ from lawApp_LangGraph.prompts import (
     REPLAN_CHECK_PROMPT,
     REPLANNER_SYSTEM_PROMPT,
     RISK_GATE_PROMPT,
+    SEMANTIC_CONFIRM_PROMPT,
 )
 from lawApp_LangGraph.tools.rag_tools import analyze_legal_issue  # noqa — 已有,确认不缺
 
@@ -225,16 +226,20 @@ def _schema_models():
         question: str = Field(description="一个聚焦追问,律师问诊语气,一句话")
         element_key: str = Field(default="", description="追问对应的要素 key")
 
+    class ConfirmSchema(BaseModel):
+        proceed: bool = Field(description="用户回复语义是否为同意继续")
+
     return (
         PlanSchema,
         ReplanCheckSchema,
         RiskSchema,
         ElementAssessmentSchema,
         MidClarifySchema,
+        ConfirmSchema,
     )
 
 
-PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema, MidClarifySchema = (
+PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema, MidClarifySchema, ConfirmSchema = (
     _schema_models()
 )
 
@@ -262,6 +267,55 @@ def open_reasoning_channel(thread_id: str) -> "asyncio.Queue":
 def close_reasoning_channel(thread_id: str) -> None:
     """关闭并移除 reasoning 通道(幂等)。"""
     _REASONING_BUS.pop(thread_id, None)
+
+
+#  工作状态上报 — 复用 reasoning 总线, source="status" 区分; SSE 端 pump 原样转发
+_NODE_LABELS = {
+    "element_assess": "评估案件要素",
+    "chitchat": "生成闲聊回应",
+    "planner": "规划检索策略",
+    "replanner": "重规划补充步骤",
+    "replan_check": "质量门控检查",
+    "finalize": "组装最终回答",
+    "merge": "合并工具结果",
+    "mid_clarify": "生成聚焦追问",
+}
+
+
+async def _publish_status(config, text: str) -> None:
+    """向会话的 SSE 通道推一条工作状态(前端"正在执行"指示)。
+
+    节点入口/工具调用前调用;通道未开(非流式调用/测试)时静默跳过。
+    """
+    cfg = (config or {}).get("configurable") or {}
+    q = _REASONING_BUS.get(cfg.get("thread_id", ""))
+    if q is not None:
+        await q.put({"source": "status", "delta": text})
+
+
+async def _publish_node_status(config, node: str) -> None:
+    """按节点名推标准化的"正在执行 X"状态。"""
+    await _publish_status(config, f"正在{_NODE_LABELS.get(node, node)}")
+
+
+#  HITL 语义确认 — 自由文本不再按关键词硬匹配, 由 Flash LLM 判断
+async def semantic_confirm(request_text: str, answer: str) -> bool:
+    """LLM 判断用户对确认请求的回复语义(同意继续/拒绝跳过)。
+
+    Args:
+        request_text: interrupt 载荷的确认文案。
+        answer: 用户自由文本回复。
+
+    Returns:
+        bool: 语义为同意继续时 True;LLM 失败直接抛错(不做兜底)。
+    """
+    chain = PromptTemplate.from_template(SEMANTIC_CONFIRM_PROMPT) | _structured(
+        ConfirmSchema
+    )
+    v = await chain.ainvoke(
+        {"request": request_text[:500], "answer": (answer or "")[:500]}
+    )
+    return bool(getattr(v, "proceed", False))
 
 
 # Node 0: Ingest — 每轮请求入口,重置累积字段
@@ -361,7 +415,11 @@ async def risk_gate_node(state: AgentState) -> dict:
     confirmed = interrupt(
         {
             "type": "risk_confirm",
-            "message": "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险,请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗？",
+            "message": "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险,请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗?",
+            "options": [
+                {"value": "确认", "label": "继续咨询"},
+                {"value": "跳过", "label": "中止并查看求助热线"},
+            ],
         }
     )
     if not confirmed:
@@ -391,12 +449,13 @@ async def risk_gate_node(state: AgentState) -> dict:
 # Node 0.5b: Element Assess — LLM 评估要素缺口 + 解读上轮回答
 
 
-async def element_assess_node(state: AgentState) -> dict:
+async def element_assess_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """评估案件要素:1,应用用户上轮回答的要素映射 2,生成下一轮反问.
 
     Args:
         state (AgentState): 图状态,读取 query / case_elements /
             clarify_history / clarify_rounds.
+        config (RunnableConfig): 节点配置,取 thread_id 定位状态总线.
 
     Returns:
         dict: 状态更新,键语义——case_elements: 深拷贝后应用要素更新
@@ -406,6 +465,7 @@ async def element_assess_node(state: AgentState) -> dict:
             LLM 失败 → pending_questions 置空,软放行不阻塞.
     """
     t0 = time.time()
+    await _publish_node_status(config, "element_assess")
     debug.debug(
         "→ 进入 Element Assess 节点",
         detail=f"round={state.clarify_rounds}/{settings.max_clarify_rounds}",
@@ -576,7 +636,7 @@ def ask_element_node(state: AgentState) -> dict:
 # Node 0.5d: Chitchat — 闲聊轻量应答(question_category=chitchat 专用)
 
 
-async def chitchat_node(state: AgentState) -> dict:
+async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """闲聊应答节点 — Flash LLM 流式生成 1~2 句友好回应并引导法律提问.
 
     由 route_after_assess 在 question_category=chitchat 时路由进入,
@@ -585,11 +645,13 @@ async def chitchat_node(state: AgentState) -> dict:
 
     Args:
         state (AgentState): 图状态,读取 query.
+        config (RunnableConfig): 节点配置,取 thread_id 定位状态总线.
 
     Returns:
         dict: 状态更新,final_answer 为闲聊回应文本.
     """
     t0 = time.time()
+    await _publish_node_status(config, "chitchat")
     debug.debug("→ 进入 Chitchat 节点", detail=f"query={state.query[:60]}")
 
     chain = PromptTemplate.from_template(CHITCHAT_PROMPT) | get_executor_llm()
@@ -703,6 +765,9 @@ async def _stream_plan(
                 await q.put({"source": source, "delta": rc})
         if delta.content:
             content.append(delta.content)
+            # 计划内容实时流(先思考后计划): source 加 _plan 后缀区分, 前端路由到计划面板
+            if q is not None:
+                await q.put({"source": f"{source}_plan", "delta": delta.content})
     return _parse_plan_json("".join(content)), reasoning
 
 
@@ -710,6 +775,7 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
     """Pro reasoner 流式: 生成计划 + reasoning_content 推 CoT 总线;解析失败直接报错。"""
     t0 = time.time()
     query = state.query.strip()
+    await _publish_node_status(config, "planner")
     debug.debug("→ 进入 Planner 节点", detail=f"query={query[:80]}")
 
     if not query:
@@ -802,12 +868,17 @@ def _step_summaries(state: AgentState) -> dict[str, str]:
     }
 
 
-async def executor_node(state: AgentState) -> dict:
+async def executor_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """Flash LLM 为当前步骤生成工具调用(AIMessage + tool_calls）。
 
     - 无工具步骤 → 直接标记完成并推进
-    - markdown_to_pdf 且未确认 → interrupt 请求用户确认(HITL-3）
+    - markdown_to_pdf 且未确认 → interrupt 请求用户确认(HITL-3,
+      前端单选+确认/跳过按钮; 自由文本由 normalize_resume 的 LLM 语义判断)
     - LLM 未发起调用 → 严格重试一次；再失败则标记步骤 failed 并推进
+
+    Args:
+        state (AgentState): 图状态。
+        config (RunnableConfig): 节点配置,取 thread_id 定位状态总线。
     """
     t0 = time.time()
     idx = state.current_step_index
@@ -818,6 +889,11 @@ async def executor_node(state: AgentState) -> dict:
 
     step = plan[idx]
     total_steps = len(plan)
+    await _publish_status(
+        config,
+        f"正在执行步骤 {idx + 1}/{total_steps}: {step.description[:40]}"
+        + (f"(工具 {step.tool_name})" if step.tool_name else ""),
+    )
     debug.debug(
         f"→ 进入 Executor 节点 [{idx + 1}/{total_steps}]",
         detail=f"tool_name={step.tool_name or '无'} | desc={step.description[:60]}",
@@ -831,15 +907,19 @@ async def executor_node(state: AgentState) -> dict:
         ]
         return {"plan": done, "current_step_index": idx + 1}
 
-    # HITL-3: PDF 生成前确认(resume 后 confirmed 为真则继续）
+    # HITL-3: PDF 生成前确认(前端单选+确认/跳过; 自由文本由 LLM 语义判断归一为 bool)
     if step.tool_name == "markdown_to_pdf" and not state.pdf_confirmed:
         confirmed = interrupt(
             {
                 "type": "pdf_confirm",
-                "message": f"即将生成 PDF 报告(步骤: {step.description}）。确认生成吗？回复 y/是 确认,其他内容跳过该步骤。",
+                "message": f"即将生成 PDF 报告(步骤: {step.description})。确认生成吗?",
+                "options": [
+                    {"value": "确认", "label": "确认生成 PDF"},
+                    {"value": "跳过", "label": "跳过该步骤"},
+                ],
             }
         )
-        if not confirmed or str(confirmed).strip().lower() in ("n", "no", "否", "跳过"):
+        if not confirmed:
             done = [
                 s.model_copy(update={"status": "done"}) if i == idx else s
                 for i, s in enumerate(plan)
@@ -932,10 +1012,20 @@ async def executor_node(state: AgentState) -> dict:
 
 
 # Node 3: Tools — prebuilt ToolNode 执行工具(构建时读取此刻 ALL_TOOLS() 快照,含 MCP 工具)
+# 外包一层异步节点: 工具执行前向 SSE 通道推工作状态(用户决策 v4)
 
 
 def _build_tools_node():
-    return ToolNode(ALL_TOOLS(), handle_tool_errors=True)
+    inner = ToolNode(ALL_TOOLS(), handle_tool_errors=True)
+
+    async def tools_node(state: AgentState, config: RunnableConfig = None) -> dict:
+        idx = state.current_step_index
+        step = state.plan[idx] if idx < len(state.plan) else None
+        if step is not None and step.tool_name:
+            await _publish_status(config, f"工具 {step.tool_name} 执行中...")
+        return await inner.ainvoke(state, config)
+
+    return tools_node
 
 
 # Node 4: Merge — 合并工具结果到 AgentState,推进步骤索引
@@ -949,10 +1039,11 @@ def _field(item, key: str, default: str = ""):
     return getattr(item, key, default)
 
 
-async def merge_node(state: AgentState) -> dict:
+async def merge_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """解析 ToolMessage(dict 经 json.dumps 序列化)→ 合并到 state 字段,
     记录 ToolCallRecord,推进 current_step_index。"""
     t0 = time.time()
+    await _publish_node_status(config, "merge")
     idx = state.current_step_index
     plan = state.plan
     step = plan[idx]
@@ -1063,9 +1154,10 @@ async def merge_node(state: AgentState) -> dict:
 # Node 5: Replan Check — Flash LLM 质量门控
 
 
-async def replan_check_node(state: AgentState) -> dict:
+async def replan_check_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """Flash LLM 语义判断是否需要重规划；失败降级为规则判断。"""
     t0 = time.time()
+    await _publish_node_status(config, "replan_check")
     debug.debug("→ 进入 Replan Check 节点", detail="LLM 语义判断执行质量...")
 
     steps_desc = []
@@ -1155,11 +1247,12 @@ def _fallback_replan_check(state: AgentState) -> tuple[bool, str, str]:
 # Node 5.5: Mid Clarify — HITL-5 检索反馈追问(先问人后搜网)
 
 
-async def mid_clarify_node(state: AgentState) -> dict:
+async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """基于检索结果的共同情形生成聚焦追问,先问人后搜网.
 
     Args:
         state (AgentState): 图状态,读取 query / rag_documents / case_elements.
+        config (RunnableConfig): 节点配置,取 thread_id 定位状态总线.
 
     Returns:
         dict: 状态更新,分支语义——LLM 生成追问失败或用户未补充 →
@@ -1169,6 +1262,7 @@ async def mid_clarify_node(state: AgentState) -> dict:
             附 hitl_event(type=mid_clarify, question=追问文本).
     """
     t0 = time.time()
+    await _publish_node_status(config, "mid_clarify")
     top_docs = (
         "\n".join(
             f"- [{d.case_number}] {d.chunk_text[:120]}..."
@@ -1224,6 +1318,25 @@ async def mid_clarify_node(state: AgentState) -> dict:
     }
 
 
+# 已执行工具及结果摘要(replanner 提示词上下文, 用户决策 v4)
+def _tool_calls_digest(state: AgentState) -> str:
+    lines = []
+    for tc in state.tool_calls:
+        out = tc.output
+        if isinstance(out, dict):
+            parts = []
+            for k, v in out.items():
+                if isinstance(v, list):
+                    parts.append(f"{k}×{len(v)}")
+                else:
+                    parts.append(f"{k}: {str(v)[:60]}")
+            out_str = ", ".join(parts)
+        else:
+            out_str = str(out)[:80]
+        lines.append(f"- {tc.tool_name} → {out_str or '无输出'}")
+    return "\n".join(lines) or "尚未执行任何工具"
+
+
 # Node 6: The Replanner — Pro LLM 补充计划
 
 
@@ -1231,6 +1344,7 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
     """Pro reasoner 流式: 生成补充计划 + reasoning_content 推 CoT 总线;解析失败直接报错。"""
     t0 = time.time()
     reason = state.replan_reason or "质量不足"
+    await _publish_node_status(config, "replanner")
     debug.debug(
         "→ 进入 Replanner 节点", detail=f"原因: {reason} | 已完成{len(state.plan)}步"
     )
@@ -1243,6 +1357,7 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
 
     prompt = REPLANNER_SYSTEM_PROMPT.format(
         executed_steps=executed or "无",
+        tool_calls_digest=_tool_calls_digest(state),
         doc_count=len(state.rag_documents),
         quality=state.evaluation.quality_verdict if state.evaluation else "未评估",
         web_count=len(state.web_search_results),
@@ -1284,9 +1399,10 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
 # Node 7: Finalize — 组装最终回答
 
 
-async def finalize_node(state: AgentState) -> dict:
+async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """优先复用已有 final_answer；否则用案例兜底生成 / LLM 直接回答(流式）。"""
     t0 = time.time()
+    await _publish_node_status(config, "finalize")
     debug.debug("→ 进入 Finalize 节点", detail="组装最终回答...")
 
     if state.final_answer:
@@ -1393,7 +1509,11 @@ def hitl_degrade_node(state: AgentState) -> dict:
         {
             "type": "degrade_confirm",
             "failed_tool": failed_tool,
-            "options": ["重试", "跳过", "终止"],
+            "options": [
+                {"value": "重试", "label": "重新规划调用"},
+                {"value": "跳过", "label": "跳过并继续后续步骤"},
+                {"value": "终止", "label": "结束本次咨询"},
+            ],
             "message": DEGRADE_CONFIRM_MSG.format(failed_tool=failed_tool),
         }
     )
@@ -1475,7 +1595,10 @@ def hitl_budget_node(state: AgentState) -> dict:
         {
             "type": "budget_confirm",
             "missing": missing,
-            "options": ["补充", "收尾"],
+            "options": [
+                {"value": "补充", "label": "补充信息继续深入"},
+                {"value": "收尾", "label": "基于现有材料收尾"},
+            ],
             "message": BUDGET_CONFIRM_MSG.format(missing=missing),
         }
     )
