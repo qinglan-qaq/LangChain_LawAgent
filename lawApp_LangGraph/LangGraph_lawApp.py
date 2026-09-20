@@ -487,7 +487,11 @@ async def element_assess_node(state: AgentState) -> dict:
         f"/{len(ce.elements)} | critical_missing={len(ce.critical_missing())}",
         result=f"elapsed={time.time() - t0:.2f}s | {'继续反问' if questions else '放行'}",
     )
-    return {"case_elements": ce, "pending_questions": questions, "question_category": category}
+    return {
+        "case_elements": ce,
+        "pending_questions": questions,
+        "question_category": category,
+    }
 
 
 # Node 0.5c: Ask Element — HITL-2 要素反问(纯记账,resume 重跑幂等)
@@ -717,19 +721,24 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
         }
 
     template = PLANNER_SYSTEM
+    
     if (state.mode or "attorney") == "assistant":
         from lawApp_LangGraph.prompts import PLANNER_ASSISTANT_SUFFIX
 
         template = PLANNER_SYSTEM + PLANNER_ASSISTANT_SUFFIX.format(
             doc_type_label="起诉状" if state.doc_type != "defense" else "答辩状"
         )
+        
     prompt = PromptTemplate.from_template(template).format(
         query=query[:3000],
         available_tools=_tools_desc(),
         elements_digest=state.case_elements.digest(),
     )
+    
     result, _cot = await _stream_plan(prompt, "planner", config)
+    
     plan = _normalize_plan(result)
+    
     reasoning = list(result.reasoning or [])
 
     elapsed = time.time() - t0

@@ -170,8 +170,8 @@ REPLAN_CHECK_PROMPT = """你是法律AI系统的质量审核员。检查已执�
 
 
 #  规划 (v2: 注入已知案件要素段)
-PLANNER_SYSTEM = """你是法律AI系统的任务规划师.分析用户问题,制定可执行的步骤计划.
-
+PLANNER_SYSTEM = """
+你是法律AI系统的任务规划师.分析用户问题,制定可执行的步骤计划.
 ## 可用工具
 {available_tools}
 
