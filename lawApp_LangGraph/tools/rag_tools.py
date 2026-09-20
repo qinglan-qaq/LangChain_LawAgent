@@ -58,9 +58,7 @@ def _get_llm():
     return _llm
 
 
-# Tool 1: 法律案例检索（走抽象检索层）
-
-
+# Tool 1: 案例库混合检索(向量+BM25) + CrossEncoder 重排; 后端异常降级返回 status=error 不中断流程
 @tool
 async def retrieve_legal_knowledge(
     query: str,
@@ -133,9 +131,10 @@ async def retrieve_legal_knowledge(
     return {"status": "success", "count": len(results), "rag_documents": results}
 
 
-# Tool 2: 检索质量评估 (CRAG 三档)
+# CRAG 三档评估(correct≥0.5 / ambiguous≥0.2 / incorrect), 产出 quality_verdict 判定是否需联网补充
 
 
+# dict/对象统一转 simpleRetrievedDocument(评估与上下文拼装共用)
 def _to_simple_doc(doc: Any) -> simpleRetrievedDocument:
     """将 dict 或对象转换为 simpleRetrievedDocument."""
     if isinstance(doc, simpleRetrievedDocument):
@@ -234,10 +233,10 @@ def evaluate_case_relevance(
     }
 
 
-# Tool 3: 法律分析生成
-# 人设与分析角色提示词已迁至 lawApp_LangGraph.prompts(get_analysis_prompt)
+# Tool 3: 基于法条/案例/联网三源上下文流式生成法律分析(人设提示词在 prompts.get_analysis_prompt)
 
 
+# dict/PromptsRecord/None 统一转 PromptsRecord
 def _resolve_prompts_record(prompts_record: Any) -> PromptsRecord:
     """将 dict 或 PromptsRecord 统一转为 PromptsRecord,容错空值."""
     if prompts_record is None:
@@ -249,6 +248,7 @@ def _resolve_prompts_record(prompts_record: Any) -> PromptsRecord:
     return PromptsRecord()
 
 
+# 拼装 PromptsRecord 中 已知要素+法条+案例+联网 的分析上下文块
 def _build_analysis_context(pr: PromptsRecord) -> str:
     """从 PromptsRecord 的 web/law/case 字段拼装提示词上下文."""
     parts: list[str] = []
@@ -272,6 +272,7 @@ def _build_analysis_context(pr: PromptsRecord) -> str:
     return "\n\n---\n\n".join(parts) if parts else "暂无相关资料"
 
 
+# 三源上下文喂 flash LLM 流式生成终稿分析, token 经 astream(messages) 透出
 @tool
 async def analyze_legal_issue(
     query: str,

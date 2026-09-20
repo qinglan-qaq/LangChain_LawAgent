@@ -22,9 +22,7 @@ from langchain_core.tools import tool
 from lawApp_LangGraph.FastAPI.logging import tool as tool_log, system as sys_log
 from lawApp_LangGraph.state import LawsResult
 
-#  Store 访问 — 仅在图执行上下文中可用
-
-
+# _get_store — 取当前 LangGraph store(仅图执行上下文可用), 图外调用返回 None
 def _get_store():
     """获取当前 LangGraph store;不在图上下文中时返回 None。"""
     try:
@@ -39,9 +37,7 @@ MEM_NAMESPACE = ("law_agent", "memories")  # store 命名空间
 MAX_EMBED_LEN = 512  # 嵌入文本上限, 超出自动截断
 
 
-# Tool A: 搜索记忆
-
-
+# search_memory — BaseStore 语义搜索长期记忆; 无 store 上下文/异常降级返回空
 @tool
 async def search_memory(query: str, top_k: int = 3) -> dict:
     """搜索长期记忆库,召回与当前问题相关的历史信息。
@@ -107,9 +103,7 @@ async def search_memory(query: str, top_k: int = 3) -> dict:
     }
 
 
-# Tool B: 保存记忆
-
-
+# save_to_memory — 记忆写入 BaseStore: 原文存 item, summary 做嵌入(超 512 字截断)
 @tool
 async def save_to_memory(
     content: str,
@@ -201,9 +195,7 @@ async def save_to_memory(
     }
 
 
-# Tool C: 法律条文检索
-
-
+# fetch_laws — law_vector 表 pgvector 语义检索现行有效法条, 库不可用降级返回空
 @tool
 async def fetch_laws(query: str, top_k: int = 5) -> dict:
     """从法律条文数据库中语义检索相关法条.使用 PGVector 向量相似度搜索,

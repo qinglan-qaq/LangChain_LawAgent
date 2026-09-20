@@ -17,9 +17,7 @@ from langchain_core.tools import tool
 from lawApp_LangGraph.FastAPI.logging import tool as tool_log
 from lawApp_LangGraph.state import WebSearchResult
 
-# Tool 1: 谷歌搜索
-
-
+# get_google_search — SerpAPI 谷歌搜索, 返回标题/链接/摘要结构化结果(最多 8 条)
 @tool
 async def get_google_search(query: str) -> dict:
     """使用谷歌搜索API在线搜索法律相关信息.返回结构化结果,每项包含标题、链接、摘要.
@@ -89,14 +87,14 @@ async def get_google_search(query: str) -> dict:
     }
 
 
-# Tool 2: Markdown → PDF
-
-
+# PDF 导出辅助链: markdown_to_html 套样式 → _render_pdf 线程池渲染
+# markdown_to_html — Markdown → HTML(启用表格/代码高亮扩展)
 def markdown_to_html(markdown_text: str) -> str:
     """将Markdown文本转换为HTML字符串,并启用表格等扩展功能"""
     return markdown.markdown(markdown_text, extensions=["extra", "codehilite"])
 
 
+# _render_pdf — wkhtmltopdf 同步渲染 A4 PDF(供线程池调度, 不卡事件循环)
 def _render_pdf(styled_html: str, file_path: str) -> None:
     """同步渲染 PDF(wkhtmltopdf),由 asyncio.to_thread 调度。"""
     import pdfkit
@@ -113,6 +111,7 @@ def _render_pdf(styled_html: str, file_path: str) -> None:
     pdfkit.from_string(styled_html, file_path, options=options)
 
 
+# markdown_to_pdf — Markdown 套 A4 样式转 PDF, 阻塞渲染放线程池执行
 @tool
 async def markdown_to_pdf(markdown_text: str, filename: str = "") -> dict:
     """MarkDown文件转为pdf,当用户指定pdf文件输出时使用.
