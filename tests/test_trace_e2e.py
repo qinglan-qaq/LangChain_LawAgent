@@ -103,6 +103,20 @@ def test_sse_run_persists_trace(monkeypatch):
     if not _pg_ok():
         pytest.skip("PG 不可用, 显式跳过(不 mock)")
     _patch_llms(monkeypatch)
+    # 前序用例(TestClient)可能已装配 runtime.graph 单例: setup_runtime 幂等
+    # 直接复用, 而旧 graph 的 PG checkpointer/store 池绑定在已关闭的 loop 上
+    # (api.py lifespan 只关 db._pool, 不 teardown runtime) → 重置单例,
+    # 让本用例的 lifespan 在 TestClient 循环上重新装配
+    import lawApp_LangGraph.LangGraph_lawApp as _lawapp
+    import lawApp_LangGraph.runtime as _rt
+
+    _rt.graph = None
+    _rt._pg_resources = []
+    _lawapp.set_graph(None)
+    # 同理丢弃 db 模块全局死池, 由本用例的 TestClient 循环自建自闭
+    import lawApp_LangGraph.db as _db
+
+    _db._pool = None
     from fastapi.testclient import TestClient
     from lawApp_LangGraph.FastAPI.api import app
 
@@ -146,5 +160,7 @@ def test_sse_run_persists_trace(monkeypatch):
             # 清理
             await conn.execute("DELETE FROM trace_spans WHERE run_id=%s", (rid,))
             await conn.execute("DELETE FROM trace_runs WHERE run_id=%s", (rid,))
+        # 池在本循环上创建, 原位关闭, 不给后续用例留死池
+        await db.close_pool()
 
     asyncio.run(_verify())

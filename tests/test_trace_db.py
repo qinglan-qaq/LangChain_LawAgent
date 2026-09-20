@@ -13,12 +13,18 @@ if sys.platform == "win32":
 
 
 def _pg_ok() -> bool:
-    async def _probe():
-        from lawApp_LangGraph.db import get_pool
+    """独立连接探测 — 不碰全局连接池, 避免留下绑定已关闭 loop 的池污染后续用例。"""
 
-        pool = await get_pool()
-        async with pool.connection() as conn:
+    async def _probe():
+        from psycopg import AsyncConnection
+
+        from lawApp_LangGraph.db import build_dsn
+
+        conn = await AsyncConnection.connect(build_dsn(), autocommit=True)
+        try:
             await conn.execute("SELECT 1")
+        finally:
+            await conn.close()
 
     try:
         asyncio.run(_probe())
@@ -47,6 +53,10 @@ def test_ensure_tables_idempotent_with_trace_ddl():
             )
             (n,) = await cur.fetchone()
             assert n == 2
+        # 池在本用例自己的 loop 上创建, 结束前原位关闭(跨 loop close 必挂)
+        from lawApp_LangGraph.db import close_pool
+
+        await close_pool()
 
     asyncio.run(_run())
 
@@ -92,6 +102,9 @@ def test_insert_trace_run_and_spans_roundtrip():
             # 清理测试数据
             await conn.execute("DELETE FROM trace_spans WHERE run_id=%s", (rid,))
             await conn.execute("DELETE FROM trace_runs WHERE run_id=%s", (rid,))
+        from lawApp_LangGraph.db import close_pool
+
+        await close_pool()
 
     asyncio.run(_run())
 
@@ -124,5 +137,8 @@ def test_insert_trace_handles_non_json_native_values():
             (raw,) = await cur.fetchone()
             assert "对象引用" in raw
             await conn.execute("DELETE FROM trace_spans WHERE run_id=%s", (rid,))
+        from lawApp_LangGraph.db import close_pool
+
+        await close_pool()
 
     asyncio.run(_run())
