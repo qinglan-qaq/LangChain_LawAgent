@@ -3,10 +3,10 @@ Legal Consultation API v3.0.0 (upgrade-v1)
 
 变更:
 - 流式: /ask/stream 改由 graph.astream(stream_mode=["updates","messages","values"]) 驱动,
-  移除全局 stream_queue 单例
+    移除全局 stream_queue 单例
 - HITL: 新增 POST /ask/resume,interrupt 后用户回传 Command(resume=...)
 - 持久化: lifespan 经 runtime.setup_runtime() 装配 PostgresSaver/PostgresStore
-  (不可用时降级 InMemory),进程重启后同 thread_id 会话可续
+    (不可用时降级 InMemory),进程重启后同 thread_id 会话可续
 - 审计: 引用来源 / HITL 事件写 audit 表(db.record_audit)
 - 反馈: POST /feedback 记录用户评分
 """
@@ -163,7 +163,7 @@ async def _safe_upsert_session(sid: str) -> None:
 async def ask(request: QueryRequest):
     """(deprecated — 请改用 /attorney/ask|/assistant/ask, 二期移除)
     同步问答: 等待完整结果后返回 JSON;遇到 interrupt 返回 interrupt 字段."""
-    sid = ensure_session(request.session_id)
+    sid = ensure_session(request.session_id, "attorney")
     set_session(sid)
     query_preview = request.query[:80].replace("\n", " ")
     flow.info("流程开始", summary="用户提问", detail=f"query={query_preview}")
@@ -191,10 +191,12 @@ async def ask(request: QueryRequest):
 @app.post("/attorney/ask", response_model=QueryResponse)
 async def attorney_ask(request: AttorneyAskRequest):
     """代理律师模式: 多轮追问案情 → 完整法律咨询答复(阻塞式)。"""
-    sid = ensure_session(request.session_id)
+    sid = ensure_session(request.session_id, "attorney")
     set_session(sid)
     await _safe_upsert_session(sid)
-    flow.info("流程开始", summary="代理律师模式提问", detail=f"query={request.query[:80]}")
+    flow.info(
+        "流程开始", summary="代理律师模式提问", detail=f"query={request.query[:80]}"
+    )
     graph = get_graph()
     t0 = time.time()
     try:
@@ -219,12 +221,14 @@ async def attorney_ask(request: AttorneyAskRequest):
 @app.post("/assistant/ask", response_model=QueryResponse)
 async def assistant_ask(request: AssistantAskRequest):
     """律师助理模式: 完整案情 + 文书类型 → 起诉状/答辩状草稿(阻塞式)。"""
-    sid = ensure_session(request.session_id)
+    sid = ensure_session(request.session_id, "assistant")
     set_session(sid)
     await _safe_upsert_session(sid)
     doc_label = "起诉状" if request.doc_type == "complaint" else "答辩状"
     flow.info(
-        "流程开始", summary=f"律师助理模式起草{doc_label}", detail=f"案情={request.case_details[:80]}"
+        "流程开始",
+        summary=f"律师助理模式起草{doc_label}",
+        detail=f"案情={request.case_details[:80]}",
     )
     graph = get_graph()
     t0 = time.time()
@@ -291,7 +295,7 @@ async def get_session(sid: str):
 @app.post("/ask/resume", response_model=QueryResponse)
 async def ask_resume(request: ResumeRequest):
     """HITL 继续: 用户对 interrupt 的回复经 Command(resume=...) 回传,图从暂停点恢复."""
-    sid = ensure_session(request.session_id)
+    sid = ensure_session(request.session_id, "attorney")
     set_session(sid)
     flow.info("HITL 恢复", summary="用户回传", detail=f"answer={request.answer[:60]}")
 
@@ -327,7 +331,7 @@ async def ask_stream(query: str = "", session_id: str | None = None):
     if not query.strip():
         raise HTTPException(status_code=422, detail="query 不能为空")
 
-    sid = ensure_session(session_id)
+    sid = ensure_session(session_id, "attorney")
     set_session(sid)
     flow.info("流式流程开始", summary="用户提问", detail=f"query={query[:80]}")
     config = graph_config(sid)
@@ -461,7 +465,7 @@ async def _mode_stream(
     if not query.strip():
         raise HTTPException(status_code=422, detail="query 不能为空")
     _validate_stream_text(query)
-    sid = ensure_session(session_id)
+    sid = ensure_session(session_id, mode)
     set_session(sid)
     await _safe_upsert_session(sid)
     config = graph_config(sid)
@@ -514,7 +518,10 @@ async def _mode_stream(
                         for node_name, updates in (chunk or {}).items():
                             if not isinstance(updates, dict):
                                 continue
-                            if node_name in ("planner", "replanner") and "plan" in updates:
+                            if (
+                                node_name in ("planner", "replanner")
+                                and "plan" in updates
+                            ):
                                 for s in updates.get("plan") or []:
                                     key = f"{s.step_id}:{s.tool_name}"
                                     if key not in seen_steps:
@@ -530,7 +537,9 @@ async def _mode_stream(
                                 idx = updates.get("current_step_index")
                                 if idx is not None and idx < len(plan):
                                     step = plan[idx]
-                                    await out_q.put(("tool_call", step.tool_name or "无"))
+                                    await out_q.put(
+                                        ("tool_call", step.tool_name or "无")
+                                    )
                             if node_name == "merge":
                                 for k in (
                                     "rag_documents",
@@ -545,14 +554,21 @@ async def _mode_stream(
                                             else 1
                                         )
                                         await out_q.put(("tool_result", f"{k}: {n}"))
-                            if node_name == "element_assess" and "case_elements" in updates:
+                            if (
+                                node_name == "element_assess"
+                                and "case_elements" in updates
+                            ):
                                 ce = updates.get("case_elements")
                                 elems = getattr(ce, "elements", None) or []
                                 await out_q.put(
                                     (
                                         "elements",
                                         [
-                                            {"key": e.key, "label": e.label, "status": e.status}
+                                            {
+                                                "key": e.key,
+                                                "label": e.label,
+                                                "status": e.status,
+                                            }
                                             for e in elems
                                         ],
                                     )
@@ -622,11 +638,13 @@ async def assistant_ask_stream(
     if doc_type not in ("complaint", "defense"):
         raise HTTPException(status_code=422, detail="doc_type 必须为 complaint|defense")
     return await _mode_stream("assistant", case_details, doc_type, session_id)
+
+
 async def ask_pdf(request: QueryRequest):
     """生成 PDF 报告并返回文件下载."""
     from lawApp_LangGraph.tools.tools import markdown_to_pdf
 
-    sid = ensure_session(request.session_id)
+    sid = ensure_session(request.session_id, "attorney")
     set_session(sid)
     flow.info("PDF流程开始", summary="用户提问", detail=f"query={request.query[:80]}")
 

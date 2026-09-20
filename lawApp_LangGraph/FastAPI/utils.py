@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import json
-import uuid
+from datetime import datetime
 from typing import Optional
 
 from lawApp_LangGraph.FastAPI.model import QueryResponse, SourceInfo
@@ -11,9 +12,31 @@ from lawApp_LangGraph.config import settings
 #  工具函数
 
 
-def ensure_session(session_id: Optional[str]) -> str:
+#  会话 id 序号发生器 — 进程级单调递增, 配合时间戳保证同进程内唯一
+_SESSION_SEQ = itertools.count(1)
+
+#  模式 → 会话 id 前缀(模式-时间-编号格式)
+_SESSION_PREFIX = {"attorney": "AT", "assistant": "AS"}
+
+
+def new_session_id(mode: str = "attorney") -> str:
+    """生成「前缀-日期-时间-序号」格式的会话 id.
+
+    Args:
+        mode: 咨询模式("attorney"/"assistant"), 映射前缀 AT/AS.
+
+    Returns:
+        形如 "AT-20260918-143025-001" 的可读 id; 序号为进程级递增计数.
+    """
+    prefix = _SESSION_PREFIX.get(mode, "AT")
+    now = datetime.now()
+    return f"{prefix}-{now:%Y%m%d}-{now:%H%M%S}-{next(_SESSION_SEQ):03d}"
+
+
+def ensure_session(session_id: Optional[str], mode: str = "attorney") -> str:
+    """缺省时按模式生成新会话 id; 调用方显式传入(续聊/恢复)则原样透传."""
     if not session_id or not session_id.strip():
-        return uuid.uuid4().hex
+        return new_session_id(mode)
     return session_id
 
 
