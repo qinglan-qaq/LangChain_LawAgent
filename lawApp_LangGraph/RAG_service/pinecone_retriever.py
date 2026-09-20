@@ -47,17 +47,18 @@ class PineconeRetriever(BaseRetriever):
         top_k: int = 20,
         rerank_top_n: int = 5,
         alpha: float = 0.4,
-        namespace: str = "law_cases",
+        namespace: Optional[str] = None,
     ) -> list[dict]:
         import asyncio
 
+        ns = namespace or settings.pinecone_namespace
         service = _get_service()
         # RAG_service.search_withDenseSparse 为同步重计算（嵌入+重排），
         # 放线程池执行避免阻塞事件循环
         matches = await asyncio.to_thread(
             service.search_withDenseSparse,
             query=query,
-            namespace=namespace,
+            namespace=ns,
             top_k=top_k,
             rerank_top_n=rerank_top_n,
             alpha=alpha,

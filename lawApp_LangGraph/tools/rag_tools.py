@@ -65,7 +65,7 @@ async def retrieve_legal_knowledge(
     top_k: int = 20,
     rerank_top_n: int = 5,
     alpha: float = 0.4,
-    namespace: str = "law_cases",
+    namespace: Optional[str] = None,
 ) -> dict:
     """从法律案例库中检索相关判例.支持混合检索(语义向量 + BM25 关键词匹配)与
     CrossEncoder 重排序,返回最相关的案例内容及其相关性评分.
@@ -80,15 +80,16 @@ async def retrieve_legal_knowledge(
     top_k: 初始召回数量,最多不超过 50
     rerank_top_n: 重排序后返回数量,最多不超过 10 (从 top_k 中选出最相关的条目)
     alpha: 混合检索中的权重参数,默认 0.4 (越接近 1 越重视语义匹配;pgvector 后端忽略此项)
-    namespace: 检索的命名空间,默认 "law_cases"
+    namespace: 检索的命名空间,None 时用 settings.pinecone_namespace(env PINECONE_NAMESPACE)
     返回:
     结构化 dict,含 status / rag_documents 字段,
     每个文档为 RetrievedDocument 格式(case_number / case_cause / hybrid_score / chunk_text 等)
     """
     t0 = time.time()
+    ns = namespace or settings.pinecone_namespace
     tool_log.info(
         "→ 调用工具: retrieve_legal_knowledge",
-        detail=f"query={query[:60]} | top_k={top_k} | alpha={alpha} | ns={namespace}",
+        detail=f"query={query[:60]} | top_k={top_k} | alpha={alpha} | ns={ns}",
     )
 
     try:
@@ -100,7 +101,7 @@ async def retrieve_legal_knowledge(
             top_k=top_k,
             rerank_top_n=rerank_top_n,
             alpha=alpha,
-            namespace=namespace,
+            namespace=ns,
         )
     except Exception as e:
         # 检索后端不可用时优雅降级,不中断 Agent 流程

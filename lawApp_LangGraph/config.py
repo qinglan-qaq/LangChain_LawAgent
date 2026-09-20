@@ -63,6 +63,7 @@ class Settings(BaseSettings):
 
     # ============ 检索: Pinecone ============
     pinecone_index_name: str = "pinecone-test-lawapp"
+    pinecone_namespace: str = "law_cases"
     pinecone_api_key: Optional[str] = None
     pinecone_cloud: str = "aws"
     pinecone_region: str = "us-east-1"
