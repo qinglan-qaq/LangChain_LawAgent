@@ -1218,7 +1218,13 @@ git commit -m "C: P1 验证记录 — 真实 E2E trace 落库/工具命中/token
   - 断连(docker stop): SSE 发 `error` 事件("consuming input failed: ... connection abort")后正常发 `done`, 不挂起不崩连接层; `/sessions` 返回 `[]`(Task 2 降级同场实测生效)
   - 恢复(docker start 后): 第一次请求仍失败一次(psycopg 池丢弃死连接的代价), **第二次请求完全自愈**(107 事件 + answer, 无 error) — 无需重启后端进程
   - 结论: 断连自愈行为符合规格故事 22 预期, 零代码改动; 已知边界 = PG 恢复后首请求可能失败一次
-- Task 8 真实 E2E 结果: (待填)
+- Task 8 真实 E2E 结果(2026-09-21 实测, 后端 uvicorn 从仓库根启动, 真实 DeepSeek LLM + 真实 PG):
+  - 真实咨询(interrupt 腿): `GET /attorney/ask/stream?query=我想离婚,婚内买的房子怎么分` → element_assess 判定缺要素 → clarify interrupt(六类中断字符串原样); trace_runs 落 `live_ask/interrupted`, metrics node_count=4/llm_count=2/clarify_rounds=1/token_prompt=760/token_completion=185; trace_spans 7 条: ingest/risk_gate/element_assess/ask_element(interrupted 状态, GraphInterrupt 透传)+2×llm(token_usage {"prompt":167,"completion":21} 等, output 为模型全文)+1×hitl(clarify); node span state 全部非空(values 流回填生效)
+  - HITL resume 腿: `POST /ask/resume/stream`(回答"2018年用共同积蓄全款买的,对方同意离婚但要争房子") → 全流程 answer+tool_result+tool_usage 收尾; trace_runs 落 `live_resume/attorney/ok`, **session_id 与 interrupt 腿相同**(AT-20260921-015943-001), run_id 后缀时间戳区分双 run; metrics node_count=20/tool_count=5/llm_count=8/token_prompt=6594/token_completion=1700, final_answer 为真实房产分割结论
+  - span 瀑布完整性(resume run 33 条): node→llm→tool 层层交错; tool 层 5 个全覆盖 — retrieve_legal_knowledge(59.4s, **P0 Pinecone 检索同场回归命中**)/evaluate_case_relevance/fetch_laws/analyze_legal_issue/save_to_memory; 每个 executor 步骤的 llm span 均带 token 与全文
+  - 执行中发现的缺陷与修复(commit 2d77fae): llm span 首测 token 全空 — 根因是 langgraph `stream_mode=["messages"]` 的 token 回调使 langchain `_agenerate_with_cache` 内部改走 `_astream` 聚合(chat_models.py:2136), chunk 实为 ChatGenerationChunk 包装、usage 藏在 generation_info/response_metadata 且末块 content 为空; 单进程链路探针不复现、图内必现 → 以栈回溯探针定位。修复 = _astream 全文聚合 + _usage_from 三处兜底 + _gen_message 形状兼容 + span 记录整体观测旁路 try/except
+  - 测试侧勘误: 计划原稿 e2e 用例写 `POST /ask/stream` 为笔误(实际路由 GET /attorney/ask/stream, 旧 /ask/stream 系 GET 且 deprecated); _pg_ok 探测改独立短连接(asyncio.run 的循环 A 建全局池会绑死, TestClient 循环 B 关池时抛 Event loop is closed)
+  - 结论: P1 全链路观测(节点/工具/LLM 三层 + HITL + state 回填 + token)在真实环境验证通过, 观测旁路原则全程未阻塞业务
 
 ## Spec Coverage / Self-Review(计划自审)
 
