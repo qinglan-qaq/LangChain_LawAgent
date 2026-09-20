@@ -1225,6 +1225,13 @@ git commit -m "C: P1 验证记录 — 真实 E2E trace 落库/工具命中/token
   - 执行中发现的缺陷与修复(commit 2d77fae): llm span 首测 token 全空 — 根因是 langgraph `stream_mode=["messages"]` 的 token 回调使 langchain `_agenerate_with_cache` 内部改走 `_astream` 聚合(chat_models.py:2136), chunk 实为 ChatGenerationChunk 包装、usage 藏在 generation_info/response_metadata 且末块 content 为空; 单进程链路探针不复现、图内必现 → 以栈回溯探针定位。修复 = _astream 全文聚合 + _usage_from 三处兜底 + _gen_message 形状兼容 + span 记录整体观测旁路 try/except
   - 测试侧勘误: 计划原稿 e2e 用例写 `POST /ask/stream` 为笔误(实际路由 GET /attorney/ask/stream, 旧 /ask/stream 系 GET 且 deprecated); _pg_ok 探测改独立短连接(asyncio.run 的循环 A 建全局池会绑死, TestClient 循环 B 关池时抛 Event loop is closed)
   - 结论: P1 全链路观测(节点/工具/LLM 三层 + HITL + state 回填 + token)在真实环境验证通过, 观测旁路原则全程未阻塞业务
+- 全量回归阻塞 — test_mcp::test_stdio_end_to_end 挂死, 三层根因(c00aae5, 2026-09-21 实测定位):
+  - 第一层(事件循环): stdio 子进程的 anyio 循环由 `mcp.run()` 在导入后才创建, db.py 模块级 Selector policy 切换来得太晚 → Proactor 循环下 psycopg 池死等。修复 = mcp_server.py 导入期提前 `set_event_loop_policy(WindowsSelectorEventLoopPolicy)`
+  - 第二层(env): test_mcp 的 stdio 白名单 env 不含 USERNAME → torch dynamo 初始化走 `getpass.getuser()` 在 Windows 上 `import pwd`(Unix-only)报 ModuleNotFoundError。修复 = mcp_server.py `os.environ.setdefault("USERNAME", ...)`
+  - 第三层(关键死锁, faulthandler 三次快照栈帧零移动证实): stdio 传输下 MCP SDK 的工作线程阻塞在 stdin 的同步读(`os.read`/`BufferedReader.read`, 无 Python 帧的 C 调用), 此时任何线程 LoadLibrary 新 C 扩展(numpy/torch/psycopg 的 .pyd)与该阻塞读互锁 → 子进程首次工具调用永久挂死。最小复现: 子进程内 `threading.Thread(sys.stdin.buffer.read)` + `import numpy` 即死锁; 睡眠线程则无碍 — 排除线程存在本身。修复 = `_preload_native_deps()`: 在 `mcp.run()` 启动 stdin 读取线程**之前**导入 db/db_tools/rag_tools/tools 全工具链并预热 BGE 模型, 工具调用期不再有任何 DLL 加载。手工 JSON-RPC 会话 search_laws 返回真实法条(民法典 1066 条); pytest tests/test_mcp.py 5/5 passed
+  - 附注: 全量跑首测曾在 transformers 导入结构扫描时 OSError Errno 22 崩(连接关闭), 系 2.2GB 旧后端进程造成的内存压力, 释放后消失 — 与修复无关的偶发
+- 新增 trace 测试的用例间污染(d0eb314): 全量跑时前序异步用例各自独立 loop, 模块级单例跨用例存活 — (a) test_trace_db 旧 _pg_ok 经 get_pool 建全局池绑定已关闭 loop; (b) sessions_degrade 的 TestClient 已装配 runtime.graph(setup_runtime 幂等直接复用), 其 PG checkpointer/store 池随旧 loop 死亡 → e2e 请求报 "pool already closed"/TestClient 退出 close_pool 抛 Event loop is closed。修复(仅测试侧, 存量不动): test_trace_db _pg_ok 改独立短连接+各用例原位 close_pool; test_trace_e2e 开头重置 runtime.graph/_pg_resources/LangGraph_lawApp._graph/db._pool 四个单例再由本用例 lifespan 重新装配
+- 全量回归终态: `pytest tests/ -q` → **38 passed, 0 failed, 0 skipped**(98s, 真实 PG 在位), P0+P1 收官
 
 ## Spec Coverage / Self-Review(计划自审)
 
