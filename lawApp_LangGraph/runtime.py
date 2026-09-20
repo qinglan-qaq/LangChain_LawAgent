@@ -95,12 +95,15 @@ async def _setup_postgres():
     dsn = build_dsn()
 
     # ── checkpointer:AsyncPostgresSaver 直接受 AsyncConnectionPool ──
+    # autocommit 必须: saver.setup() 迁移含 CREATE INDEX CONCURRENTLY, 不能在事务内跑
+    # (langgraph 官方 from_conn_string 即 autocommit=True + prepare_threshold=0)
     saver_pool = AsyncConnectionPool(
         conninfo=dsn,
         min_size=1,
         max_size=5,
         open=False,
         timeout=5,  # PG 不可用时快速失败 → 降级 InMemory,而非长时间阻塞启动
+        kwargs={"autocommit": True, "prepare_threshold": 0},
     )
     await saver_pool.open()
     checkpointer = AsyncPostgresSaver(conn=saver_pool)
@@ -108,12 +111,15 @@ async def _setup_postgres():
     _pg_resources.append(saver_pool)
 
     # ── store:接受 conn(单连接或池) + index 配置 ──
+    # autocommit 必须: store.setup() 的 CREATE INDEX CONCURRENTLY 不能在事务内跑
+    # (langgraph 官方 from_conn_string 的池工厂同样默认 autocommit=True)
     store_pool = AsyncConnectionPool(
         conninfo=dsn,
         min_size=1,
         max_size=5,
         open=False,
         timeout=5,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
     )
     await store_pool.open()
     store = AsyncPostgresStore(
