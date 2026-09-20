@@ -290,8 +290,8 @@ Expected: 03 册 PG 认证 FAIL 转 PASS；04 册检索三项 SKIP 转 PASS（fe
 # 律师助理模式的规划差异: 只追加在 PLANNER_SYSTEM 之后, 变量名不变
 PLANNER_ASSISTANT_SUFFIX = """
 本次是【律师助理-文书起草】任务(婚姻家事类): 用户提交了完整案件详情, 目标是起草
-{doc_type_label}。规划时优先: ①从案件详情提取文书要素(当事人/诉求/事实/证据)
-②检索婚姻家事法条与类案 ③评估材料缺口(缺则反问) ④文书结构化起草。
+{doc_type_label}。规划时优先: (1)从案件详情提取文书要素(当事人/诉求/事实/证据)
+(2)检索婚姻家事法条与类案 (3)评估材料缺口(缺则反问) (4)文书结构化起草。
 """
 
 DISCLAIMER_TEXT = (
@@ -1527,7 +1527,7 @@ function onResumed(r) {
 cd frontend && npm run build   # Expected: 零错误
 npm run dev                    # 起前端 5173; 后端另起 uvicorn 8000
 ```
-手工走查清单（浏览器 http://localhost:5173）：①切到代理律师模式，首见免责小弹窗且可关 ②提问一条婚姻问题，看到 CoT 逐字 + token 打字机 + 工具时间线 ③（若出 interrupt）面板选预设或自助输入，续答 ④切律师助理模式，粘贴案情起草诉状，引用区为衬线字体 ⑤长提问默认折叠可展开 ⑥左侧历史可见本次会话。
+手工走查清单（浏览器 http://localhost:5173）：(1)切到代理律师模式，首见免责小弹窗且可关 (2)提问一条婚姻问题，看到 CoT 逐字 + token 打字机 + 工具时间线 (3)（若出 interrupt）面板选预设或自助输入，续答 (4)切律师助理模式，粘贴案情起草诉状，引用区为衬线字体 (5)长提问默认折叠可展开 (6)左侧历史可见本次会话。
 
 - [ ] **Step 6: commit** — `C: 前端主体 — 单界面双模式(按钮切换) + CoT/打字机/折叠/衬线引用/HITL 自助输入 + Inspira 组件`
 
@@ -1543,7 +1543,7 @@ Expected: 01-07 册无新增 FAIL；06 册两条降级检查 PASS。
 
 - [ ] **Step 2: 前端** — `cd frontend && npm run build` 零错。
 
-- [ ] **Step 3: 文档三处**：①README 增 `frontend/` 启动方式（npm i/dev/build + vite proxy 说明）②PROJECT_OVERVIEW 接口表增 `/attorney/*` `/assistant/*` `/sessions*` `/disclaimer`（旧的标 deprecated）③tests_ipynb/README 增 07 册行。
+- [ ] **Step 3: 文档三处**：(1)README 增 `frontend/` 启动方式（npm i/dev/build + vite proxy 说明）(2)PROJECT_OVERVIEW 接口表增 `/attorney/*` `/assistant/*` `/sessions*` `/disclaimer`（旧的标 deprecated）(3)tests_ipynb/README 增 07 册行。
 
 - [ ] **Step 4: commit** — `C: 收尾 — 全量回归 + README/PROJECT_OVERVIEW/tests_ipynb 文档同步`
 

@@ -12,7 +12,7 @@
 |---|---|
 | 前端仅 59 行骨架（一个 ping 按钮，无聊天/流式/HITL） | `lawApp_LangGraph/law_agent_Vue/src/App.vue` |
 | 后端已有完整咨询接口 + SSE 全协议 | `FastAPI/api.py:150-393`（/ask、/ask/resume、/ask/stream 含 token/tool_call/tool_result/interrupt/answer/session_id/done/error 事件） |
-| 六处 `with_structured_output` 默认 json_schema 被 DeepSeek 拒（HTTP 400），三处 HITL（①②⑤）死 | `LangGraph_lawApp.py:284/358/532/911/1001/1077`；02 册实测；`json_mode` 两模型实测可用 |
+| 六处 `with_structured_output` 默认 json_schema 被 DeepSeek 拒（HTTP 400），三处 HITL（(1)(2)(5)）死 | `LangGraph_lawApp.py:284/358/532/911/1001/1077`；02 册实测；`json_mode` 两模型实测可用 |
 | SSE 无 reasoning 事件 | api.py grep "reasoning" 为空 |
 | PG 认证失败（DB_PASSWORD 默认值）→ 检索/记忆/checkpointer 降级 InMemory | 03/04 册实测 |
 | 入库脚本缺失，law_cases 空表 | `RAG_service/pgvector_retriever.py:6` 引用不存在的 `scripts/ingest_cases_pgvector.py` |
@@ -36,7 +36,7 @@ Phase 0 地基修复 ──→ Phase 1 后端(双模式接口 + CoT SSE + sessio
 
 ## Phase 0 — 地基修复（前端动工前置，不做则产品是空壳）
 
-**P0.1 结构化输出改 json_mode：** 六处中四处（`LangGraph_lawApp.py:284` RiskSchema、`:358` ElementAssessmentSchema、`:911` ReplanCheckSchema、`:1001` MidClarifySchema）改为 `method="json_mode"` 且对应提示词显式声明字段名；返回值经 Pydantic 手动校验兜底（json_mode 不校验 schema）。复活 HITL①②⑤ 与要素反问。
+**P0.1 结构化输出改 json_mode：** 六处中四处（`LangGraph_lawApp.py:284` RiskSchema、`:358` ElementAssessmentSchema、`:911` ReplanCheckSchema、`:1001` MidClarifySchema）改为 `method="json_mode"` 且对应提示词显式声明字段名；返回值经 Pydantic 手动校验兜底（json_mode 不校验 schema）。复活 HITL-1(2)(5) 与要素反问。
 **P0.2 planner/replanner（`:532`/`:1077`）不在此改**——与 Phase 1 的 CoT 手工流式改造合并为一处（见 P1.2），避免改两遍。
 **P0.3 DB_PASSWORD 填真实值**（配置项，非代码）——会话历史界面依赖 PG checkpointer。
 **P0.4 新建 `scripts/ingest_cases_pgvector.py` + `embedder.embed_documents` 批量接口**——data/ 语料入库 law_cases，答复才有引用来源。

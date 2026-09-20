@@ -339,7 +339,7 @@ def test_interrupt_resume(no_llm):
     import lawApp_LangGraph.LangGraph_lawApp as lg
     from lawApp_LangGraph.state import ElementQuestion
 
-    # ① 首轮: 缺 marriage_status, 生成反问
+    # (1) 首轮: 缺 marriage_status, 生成反问
     no_llm["plan_result"] = _FakeVerdict(
         need_clarification=True,
         question="请问结婚多少年了?",
@@ -363,7 +363,7 @@ def test_interrupt_resume(no_llm):
         assert intr and intr.value["type"] == "clarify"
         assert "结婚多少年" in intr.value["question"]
 
-        # ② resume 补充 → assess 二轮(无新反问) → planner(空计划) → finalize
+        # (2) resume 补充 → assess 二轮(无新反问) → planner(空计划) → finalize
         no_llm["plan_result"] = _FakeVerdict(reasoning=["要素齐"], plan=[])
         result2 = await g.ainvoke(Command(resume="结婚5年,有个3岁孩子"), config=cfg)
         assert result2.get("final_answer") == "测试回答"

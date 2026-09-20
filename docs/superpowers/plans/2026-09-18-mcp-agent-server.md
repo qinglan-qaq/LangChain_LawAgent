@@ -44,7 +44,7 @@ MCP 工具是请求-响应语义，而图有 6 处 `interrupt()`。三条路径�
 MCP 调用无状态，故会话靠 `session_id` + checkpointer 显式传递。`session_id` 不传 => 服务端生成新 uuid 并**在返回文本首行回显**，client 后续带上即可多轮续聊。不需要服务端内存注册表：interrupt 载荷可由 `graph.aget_state` 重算；Postgres 后端下进程重启后 `consult_resume` 仍可用(InMemory 后端只在进程生命期内有效，需在文档中说明)。同 `session_id` 并发调用用模块级 `asyncio.Lock` 串行化，防 checkpointer 写冲突。
 
 ### D4. 超时与成本
-单次 consult 走 Pro 规划 + Flash 执行，实测数十秒到分钟级，MCP client 常有调用超时。三件事：①工具 docstring 明确写出「耗时数十秒、消耗 LLM 配额」，让调用方 LLM 有预期；②`asyncio.wait_for` 包住整个 resume 循环，`mcp_agent_budget_seconds`(默认 600) 到点返回「部分结果 + session_id」，client 可 `get_consultation` 或再次 resume 拿最终答复；③`ctx.report_progress` + `ctx.log` 报告节点级进度，支持进度的 client 不会静默挂死。
+单次 consult 走 Pro 规划 + Flash 执行，实测数十秒到分钟级，MCP client 常有调用超时。三件事：(1)工具 docstring 明确写出「耗时数十秒、消耗 LLM 配额」，让调用方 LLM 有预期；(2)`asyncio.wait_for` 包住整个 resume 循环，`mcp_agent_budget_seconds`(默认 600) 到点返回「部分结果 + session_id」，client 可 `get_consultation` 或再次 resume 拿最终答复；(3)`ctx.report_progress` + `ctx.log` 报告节点级进度，支持进度的 client 不会静默挂死。
 
 ### D5. stdio 传输的 stdout 洁净性(P0 必做)
 stdio 传输下 stdout 只允许 JSON-RPC 帧。`FastAPI/logging.py:173` 的 `setup_logging()` 把 `StreamHandler(sys.stdout)` 挂在所有 logger 上；Agent 节点内大量 `debug.*` 调用一旦经此路径输出到 stdout，协议帧即被污染、client 解析失败。故 `setup_logging` 增加 `console_stream` 参数(默认 `sys.stdout` 不变，向后兼容)，stdio 入口显式传 `sys.stderr`，且该入口**不调用** `logging.basicConfig`。
@@ -329,7 +329,7 @@ if __name__ == "__main__":
 }
 ```
 
-- [ ] **Step 2: 文档三件事**：①两 server 分工表(端口/成本/状态/依赖)；②`session_id` 多轮与 `consult_resume` 用法示例(含 `interactive` 语义)；③安全与成本边界——默认回环、非回环需 token、一次 consult 的 LLM 成本、记忆工具会**写入** store(任何已连接 client 都可写)。
+- [ ] **Step 2: 文档三件事**：(1)两 server 分工表(端口/成本/状态/依赖)；(2)`session_id` 多轮与 `consult_resume` 用法示例(含 `interactive` 语义)；(3)安全与成本边界——默认回环、非回环需 token、一次 consult 的 LLM 成本、记忆工具会**写入** store(任何已连接 client 都可写)。
 - [ ] **Step 3: commit** — `B: 文档 — law-consult 挂载方式/会话语义/安全与成本边界同步`
 
 ---

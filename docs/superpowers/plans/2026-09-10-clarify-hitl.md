@@ -439,8 +439,8 @@ RISK_GATE_PROMPT = """你是法律AI系统的接诊助理.判断用户咨询是�
 ELEMENT_ASSESS_PROMPT = KIM_PERSONA_BLOCK + """
 
 ## 任务
-你是接诊律师.①判断咨询是否属于婚姻家事类;②若用户刚回答了上一轮反问,
-把回答内容映射到对应要素;③评估还缺哪些**关键**要素,生成律师式反问.
+你是接诊律师.(1)判断咨询是否属于婚姻家事类;(2)若用户刚回答了上一轮反问,
+把回答内容映射到对应要素;(3)评估还缺哪些**关键**要素,生成律师式反问.
 
 ## 案件要素清单(当前状态)
 {elements_digest}
@@ -787,7 +787,7 @@ git commit -m "A3: 提示词集中化 — 新建 prompts.py,Kim 人设全链路�
 删除整个旧 `clarify_node` 与 `CLARIFY_PROMPT` 常量，写入：
 
 ```python
-# Node 0.5a: Risk Gate — 高风险话题确认 (HITL ①)
+# Node 0.5a: Risk Gate — 高风险话题确认 (HITL-1)
 
 async def risk_gate_node(state: AgentState) -> dict:
     """LLM 高风险判定;未确认的高风险 → interrupt 确认,拒绝则热线文案中止."""
@@ -842,7 +842,7 @@ async def risk_gate_node(state: AgentState) -> dict:
 # Node 0.5b: Element Assess — LLM 评估要素缺口 + 解读上轮回答
 
 async def element_assess_node(state: AgentState) -> dict:
-    """评估案件要素:①应用用户上轮回答的要素映射 ②生成下一轮反问.
+    """评估案件要素:(1)应用用户上轮回答的要素映射 (2)生成下一轮反问.
     LLM 失败 → done=True 软放行(不阻塞)."""
     t0 = time.time()
     debug.debug("→ 进入 Element Assess 节点",
@@ -871,14 +871,14 @@ async def element_assess_node(state: AgentState) -> dict:
         debug.warning("Element Assess LLM 失败,软放行进 planner", detail=str(e)[:100])
         return {"pending_questions": [], "case_elements": ce}
 
-    # ① 非婚姻家事类 → 全 na,直接放行
+    # (1) 非婚姻家事类 → 全 na,直接放行
     if not v.applicable:
         ce.mark_na([e.key for e in ce.elements])
         debug.info("← Element Assess: 非目标类咨询,全 na 直通",
                    result=f"elapsed={time.time() - t0:.2f}s")
         return {"pending_questions": [], "case_elements": ce}
 
-    # ② 应用要素更新(用户回答映射 + na + 关键级提升)
+    # (2) 应用要素更新(用户回答映射 + na + 关键级提升)
     valid_keys = {e.key for e in ce.elements}
     for u in v.element_updates:
         if u.key in valid_keys:
@@ -888,7 +888,7 @@ async def element_assess_node(state: AgentState) -> dict:
     if v.promote_keys:
         ce.promote([k for k in v.promote_keys if k in valid_keys])
 
-    # ③ 决定是否继续问
+    # (3) 决定是否继续问
     questions = []
     if not v.done and state.clarify_rounds < MAX_CLARIFY_ROUNDS:
         questions = [q for q in v.questions if q.key in valid_keys][:3]
@@ -908,7 +908,7 @@ async def element_assess_node(state: AgentState) -> dict:
 - [ ] **Step 5: 写 ask_element_node（LLM-free 纯记账）**
 
 ```python
-# Node 0.5c: Ask Element — HITL ② 要素反问(纯记账,resume 重跑幂等)
+# Node 0.5c: Ask Element — HITL-2 要素反问(纯记账,resume 重跑幂等)
 
 def ask_element_node(state: AgentState) -> dict:
     """发起要素反问 interrupt;resume 后记录 clarify_history、轮数自增.
@@ -966,7 +966,7 @@ Expected: 打印 ok 且含 `risk_gate_node/element_assess_node/ask_element_node`
 
 ```bash
 git add lawApp_LangGraph/LangGraph_lawApp.py
-git commit -m "A3: 入口三节点 — risk_gate 高风险判定 + element_assess 要素评估 + ask_element 反问(HITL①②)"
+git commit -m "A3: 入口三节点 — risk_gate 高风险判定 + element_assess 要素评估 + ask_element 反问(HITL-1(2))"
 ```
 
 ---
@@ -1000,7 +1000,7 @@ git commit -m "A3: 入口三节点 — risk_gate 高风险判定 + element_asses
 - [ ] **Step 2: mid_clarify_node**
 
 ```python
-# Node 5.5: Mid Clarify — HITL ⑤ 检索反馈追问(先问人后搜网)
+# Node 5.5: Mid Clarify — HITL-5 检索反馈追问(先问人后搜网)
 
 async def mid_clarify_node(state: AgentState) -> dict:
     """基于检索结果的共同情形生成聚焦追问. LLM 失败 → 静默走 replanner 联网兜底."""
@@ -1061,7 +1061,7 @@ async def mid_clarify_node(state: AgentState) -> dict:
 - [ ] **Step 3: hitl_degrade_node / hitl_budget_node（LLM-free）**
 
 ```python
-# Node 8.5: HITL Degrade — HITL ④ 工具连续失败降级询问
+# Node 8.5: HITL Degrade — HITL-4 工具连续失败降级询问
 
 def hitl_degrade_node(state: AgentState) -> dict:
     """interrupt: 重试/跳过/终止. resume 值由 API normalize_resume 归一为
@@ -1106,7 +1106,7 @@ def hitl_degrade_node(state: AgentState) -> dict:
     }
 
 
-# Node 8.6: HITL Budget — HITL ⑥ 重规划预算耗尽询问
+# Node 8.6: HITL Budget — HITL-6 重规划预算耗尽询问
 
 def hitl_budget_node(state: AgentState) -> dict:
     """interrupt: 补充(原文) / 收尾(finish). resume 值经 normalize_resume:
@@ -1441,7 +1441,7 @@ def test_interrupt_resume(no_llm):
     from langgraph.checkpoint.memory import MemorySaver
     from langgraph.types import Command
 
-    # ① 首轮: 缺 marriage_status, 生成反问
+    # (1) 首轮: 缺 marriage_status, 生成反问
     no_llm["plan_result"] = _FakeVerdict(
         need_clarification=True, question="请问结婚多少年了?",
         applicable=True, done=False,
@@ -1462,7 +1462,7 @@ def test_interrupt_resume(no_llm):
         assert intr and intr.value["type"] == "clarify"
         assert "结婚多少年" in intr.value["question"]
 
-        # ② resume 补充 → assess 二轮(done=True) → planner(空计划) → finalize
+        # (2) resume 补充 → assess 二轮(done=True) → planner(空计划) → finalize
         no_llm["plan_result"] = _FakeVerdict(reasoning=["要素齐"], plan=[])
         result2 = await g.ainvoke(
             Command(resume="结婚5年,有个3岁孩子"), config=cfg
@@ -1672,7 +1672,7 @@ git commit -m "A3: API适配 — normalize_resume 类型感知归一 + elements 
 
 **Interfaces:**
 - Consumes: Task 2/3/4/6 全部产物
-- Produces: 用例①–⑦（spec §8 表）通过的 notebook
+- Produces: 用例(1)–(7)（spec §8 表）通过的 notebook
 
 - [ ] **Step 1: 写 notebook（每个用例一个 markdown 标题 cell + code cell）**
 
@@ -1752,7 +1752,7 @@ _p_planner.start(); _p_executor.start(); _p_rag.start()
 print("setup ok")
 ```
 
-**Cell 2（用例① CaseElements 单元验证——`default_case_elements` 7 要素/关键3/na/提升/digest）：**
+**Cell 2（用例(1) CaseElements 单元验证——`default_case_elements` 7 要素/关键3/na/提升/digest）：**
 
 ```python
 from lawApp_LangGraph.state import (
@@ -1768,10 +1768,10 @@ ce.update("marriage_status", "在婚,分居中", by="ask")
 assert ce.digest() == "婚姻现状:在婚,分居中"
 ce.update("property", "一套房,双方名下", by="ask")
 assert ce.digest() == "婚姻现状:在婚,分居中 | 主要财产与归属:一套房,双方名下"
-print("① CaseElements model OK")
+print("(1) CaseElements model OK")
 ```
 
-**Cell 3（用例② 单轮澄清 → interrupt → resume → 要素齐 → planner 收到 digest）：**
+**Cell 3（用例(2) 单轮澄清 → interrupt → resume → 要素齐 → planner 收到 digest）：**
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
@@ -1802,12 +1802,12 @@ async def case2():
     assert r2["final_answer"] == "测试回答"
     assert r2["clarify_rounds"] == 1
     assert r2["clarify_history"][0].answer == "结婚5年,分居中"
-    print("② 单轮澄清 resume OK")
+    print("(2) 单轮澄清 resume OK")
 
 asyncio.run(case2())
 ```
 
-**Cell 4（用例③ 3 轮逐个补齐：assess 每轮吐一个反问，第 3 轮 done）：**
+**Cell 4（用例(3) 3 轮逐个补齐：assess 每轮吐一个反问，第 3 轮 done）：**
 
 ```python
 async def case3():
@@ -1832,12 +1832,12 @@ async def case3():
         assert r["clarify_rounds"] == expect_rounds
     assert r["final_answer"] == "测试回答"
     assert len(r["clarify_history"]) == 2
-    print("③ 3轮逐个补齐 OK")
+    print("(3) 3轮逐个补齐 OK")
 
 asyncio.run(case3())
 ```
 
-**Cell 5（用例④ 5 轮上限软退出：永远缺 → 第 5 轮放行，reasoning 不阻塞）：**
+**Cell 5（用例(4) 5 轮上限软退出：永远缺 → 第 5 轮放行，reasoning 不阻塞）：**
 
 ```python
 async def case4():
@@ -1854,12 +1854,12 @@ async def case4():
     # 第 5 轮后 route_after_ask 强制放行 → planner(空计划) → finalize
     assert r["clarify_rounds"] == 5
     assert r["final_answer"] == "测试回答"
-    print("④ 5轮上限软退出 OK")
+    print("(4) 5轮上限软退出 OK")
 
 asyncio.run(case4())
 ```
 
-**Cell 6（用例⑤ 空回答=跳过按原问题继续 + 用例⑥ 闲聊全 na 直通）：**
+**Cell 6（用例(5) 空回答=跳过按原问题继续 + 用例(6) 闲聊全 na 直通）：**
 
 ```python
 async def case5():
@@ -1874,7 +1874,7 @@ async def case5():
     assert r2["clarify_rounds"] == 5          # 置满 → 软放行
     assert "[用户补充信息]" not in r2["query"]  # 原问题未变
     assert r2["final_answer"] == "测试回答"
-    print("⑤ 空回答跳过 OK")
+    print("(5) 空回答跳过 OK")
 
 async def case6():
     g = app.build_graph(checkpointer=MemorySaver())
@@ -1885,12 +1885,12 @@ async def case6():
     assert all(e.status == "na" for e in r["case_elements"].elements)
     assert r["clarify_rounds"] == 0
     assert r["final_answer"] == "测试回答"
-    print("⑥ 闲聊全na直通 OK")
+    print("(6) 闲聊全na直通 OK")
 
 asyncio.run(case5()); asyncio.run(case6())
 ```
 
-**Cell 7（用例⑦ 高风险拒绝/确认两分支）：**
+**Cell 7（用例(7) 高风险拒绝/确认两分支）：**
 
 ```python
 async def case7():
@@ -1913,7 +1913,7 @@ async def case7():
     r2 = await g.ainvoke(Command(resume=True), config=cfg)
     assert r2["risk_confirmed"] is True
     assert r2["final_answer"] == "测试回答"
-    print("⑦ 高风险两分支 OK")
+    print("(7) 高风险两分支 OK")
 
 asyncio.run(case7())
 ```
@@ -1946,13 +1946,13 @@ git commit -m "A3: clarify_test.ipynb — 要素澄清循环全链路验证(7用
 
 **Interfaces:**
 - Consumes: Task 5/6 产物；Task 9 Cell 1 的 setup 代码（**完整复制进本 notebook Cell 1，不 import 跨 notebook**）
-- Produces: 用例⑧–⑬通过
+- Produces: 用例(8)–⑬通过
 
 - [ ] **Step 1: 写 notebook**
 
 Cell 1 = Task 9 Cell 1 原样复制。后续：
 
-**Cell 2（用例⑧ mid_clarify 全链路：评估不足+vague → interrupt → resume 增强 query → replanner）：**
+**Cell 2（用例(8) mid_clarify 全链路：评估不足+vague → interrupt → resume 增强 query → replanner）：**
 
 ```python
 async def case8():
@@ -1992,7 +1992,7 @@ async def case8():
     assert "[检索反馈追问]" in upd["query"]
     assert upd["mid_clarify_used"] is True
     assert upd["case_elements"].elements[2].status == "known"  # property
-    print("⑧ mid_clarify 节点级 OK(resume 增强)")
+    print("(8) mid_clarify 节点级 OK(resume 增强)")
 
 asyncio.run(case8())
 ```

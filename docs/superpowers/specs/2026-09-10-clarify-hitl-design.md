@@ -125,23 +125,23 @@ flowchart TD
     START([START]) --> ingest["ingest<br/>重置要素清单/轮数/故障计数"]
     ingest --> risk_gate
 
-    risk_gate{"risk_gate ⏸①<br/>LLM 高风险判定"}
+    risk_gate{"risk_gate ⏸(1)<br/>LLM 高风险判定"}
     risk_gate -->|"拒绝 → 热线文案"| finalize["finalize"]
     risk_gate -->|"无风险 / 已确认"| assess{"element_assess<br/>LLM 评估要素缺口<br/>+ 解读上轮回答"}
 
-    assess -->|"有关键缺口 & 轮数<5"| ask["ask_element ⏸②<br/>Kim 律师式要素反问"]
+    assess -->|"有关键缺口 & 轮数<5"| ask["ask_element ⏸(2)<br/>Kim 律师式要素反问"]
     ask -->|"resume → 更新要素/轮数"| assess
     ask -->|"空回答/轮数耗尽"| planner
     assess -->|"要素齐 / 全 na / 评估失败软放行"| planner["planner"]
 
     planner -->|"plan 空"| finalize
-    planner -->|"有步骤"| executor["executor<br/>⏸③ pdf_confirm（存量）"]
+    planner -->|"有步骤"| executor["executor<br/>⏸(3) pdf_confirm（存量）"]
     executor -->|"生成 tool_calls"| tools["tools (ToolNode)"]
     executor -->|"参数提取失败 streak≥2"| degrade
     executor -->|"无剩余步骤"| rcheck
     tools --> merge["merge<br/>合并/推进/故障计数"]
 
-    merge -->|"工具报错 streak≥2"| degrade{"hitl_degrade ⏸④<br/>重试 / 跳过 / 终止"}
+    merge -->|"工具报错 streak≥2"| degrade{"hitl_degrade ⏸(4)<br/>重试 / 跳过 / 终止"}
     merge -->|"streak<threshold 且有剩余"| executor
     merge -->|"全部完成"| rcheck{"replan_check<br/>质量判定 + 原因诊断"}
 
@@ -150,9 +150,9 @@ flowchart TD
     degrade -->|"终止"| finalize
 
     rcheck -->|"质量通过"| finalize
-    rcheck -->|"不足 · vague · 未用过"| mid["mid_clarify ⏸⑤<br/>检索反馈追问"]
+    rcheck -->|"不足 · vague · 未用过"| mid["mid_clarify ⏸(5)<br/>检索反馈追问"]
     rcheck -->|"不足 · not_found/error"| replanner
-    rcheck -->|"预算耗尽 · 未问过"| budget{"hitl_budget ⏸⑥<br/>补充 / 收尾"}
+    rcheck -->|"预算耗尽 · 未问过"| budget{"hitl_budget ⏸(6)<br/>补充 / 收尾"}
     rcheck -->|"预算耗尽 · 已问过"| finalize
 
     mid -->|"resume → 增强query"| replanner
@@ -162,23 +162,23 @@ flowchart TD
     finalize --> END([END])
 ```
 
-interrupt 编号（含存量 pdf_confirm 共 6 处）：⏸① risk_confirm、⏸② clarify（要素反问，多轮）、⏸③ pdf_confirm（存量不动）、⏸④ degrade_confirm、⏸⑤ mid_clarify、⏸⑥ budget_confirm。
+interrupt 编号（含存量 pdf_confirm 共 6 处）：⏸(1) risk_confirm、⏸(2) clarify（要素反问，多轮）、⏸(3) pdf_confirm（存量不动）、⏸(4) degrade_confirm、⏸(5) mid_clarify、⏸(6) budget_confirm。
 
 ### 5.1 节点职责表
 
 | 节点 | LLM | 职责 |
 |------|-----|------|
 | `ingest` | — | 存量重置 + 重建默认要素清单、`clarify_rounds/error_streak` 归零、一次性标记复位、`clarify_history` RESET |
-| `risk_gate` | Flash | `RiskSchema{high_risk, reason}` 判定；高风险未确认 → ⏸①；LLM 失败视为无风险放行 |
-| `element_assess` | Flash | 双职责：① 解读上一轮用户回答（`element_updates`）更新要素；② 评估剩余缺口生成 `pending_questions`；LLM 失败 → done=True 软放行 |
-| `ask_element` | — | 读 `pending_questions` 发 ⏸②；resume 后写 `clarify_history`、`clarify_rounds+1`；LLM-free |
+| `risk_gate` | Flash | `RiskSchema{high_risk, reason}` 判定；高风险未确认 → ⏸(1)；LLM 失败视为无风险放行 |
+| `element_assess` | Flash | 双职责：(1) 解读上一轮用户回答（`element_updates`）更新要素；(2) 评估剩余缺口生成 `pending_questions`；LLM 失败 → done=True 软放行 |
+| `ask_element` | — | 读 `pending_questions` 发 ⏸(2)；resume 后写 `clarify_history`、`clarify_rounds+1`；LLM-free |
 | `planner` | Pro | 存量 + 提示词注入"已知案件要素"段 |
-| `executor` | Flash | 存量 + ⏸③（不动）+ 参数提取失败时 `error_streak+1` |
+| `executor` | Flash | 存量 + ⏸(3)（不动）+ 参数提取失败时 `error_streak+1` |
 | `tools` / `merge` | — | merge 新增：工具报错 `error_streak+1`、成功清零；`PromptsRecord.known_elements` 填充 |
 | `replan_check` | Flash | 存量 + `insufficient_reason: vague/not_found/error/none` 诊断 |
-| `mid_clarify` | Flash | ⏸⑤ 检索反馈追问；LLM 失败静默走 replanner 联网兜底 |
-| `hitl_degrade` | — | ⏸④ 故障降级询问，LLM-free |
-| `hitl_budget` | — | ⏸⑥ 预算耗尽询问，LLM-free |
+| `mid_clarify` | Flash | ⏸(5) 检索反馈追问；LLM 失败静默走 replanner 联网兜底 |
+| `hitl_degrade` | — | ⏸(4) 故障降级询问，LLM-free |
+| `hitl_budget` | — | ⏸(6) 预算耗尽询问，LLM-free |
 | `replanner` / `finalize` | Pro / Flash | 存量（finalize 提示词换 Kim 人设） |
 
 ### 5.2 路由表
@@ -205,15 +205,15 @@ interrupt 编号（含存量 pdf_confirm 共 6 处）：⏸① risk_confirm、�
 
 ### 5.3 关键机制细节
 
-**澄清循环（⏸②）**：`element_assess` → `ask_element` → resume → 回 `element_assess`。评估与追问拆成两节点，避免 resume 重跑时白跑评估 LLM。每轮交互 = 一次 interrupt + 一次 resume；`clarify_rounds` 在 `ask_element` resume 处理后自增。
+**澄清循环（⏸(2)）**：`element_assess` → `ask_element` → resume → 回 `element_assess`。评估与追问拆成两节点，避免 resume 重跑时白跑评估 LLM。每轮交互 = 一次 interrupt + 一次 resume；`clarify_rounds` 在 `ask_element` resume 处理后自增。
 
 **空回答语义**：用户对反问回复空文本 → 视为跳过，`clarify_rounds` 直接置为上限，`route_after_ask` → planner，按原问题继续（与现状"用户未补充→按原问题继续"语义一致）。
 
-**检索反馈联动（⏸⑤）**：`replan_check` 诊断不足原因为 `vague` 且 `mid_clarify_used=False` → `mid_clarify` 节点用 Flash LLM 基于 `evaluation` + top 检索文档摘要生成一个聚焦追问（"检索到的案例集中在'婚后共同还贷'情形，你的房子是婚前买的还是婚后买的？"）→ interrupt → resume 非空则 query 增强为 `{query}\n[检索反馈追问] {answer}` 并更新对应要素，`mid_clarify_used=True` → replanner 以细化后 query 重新生成检索步骤；resume 空 → 直接 replanner 联网兜底。**先问人、后搜网**。
+**检索反馈联动（⏸(5)）**：`replan_check` 诊断不足原因为 `vague` 且 `mid_clarify_used=False` → `mid_clarify` 节点用 Flash LLM 基于 `evaluation` + top 检索文档摘要生成一个聚焦追问（"检索到的案例集中在'婚后共同还贷'情形，你的房子是婚前买的还是婚后买的？"）→ interrupt → resume 非空则 query 增强为 `{query}\n[检索反馈追问] {answer}` 并更新对应要素，`mid_clarify_used=True` → replanner 以细化后 query 重新生成检索步骤；resume 空 → 直接 replanner 联网兜底。**先问人、后搜网**。
 
-**故障降级（⏸④）**：`error_streak` 在 executor（参数提取两次失败）与 merge（ToolMessage status=error）两处累计、任一成功清零。`>= 2` 且 `degrade_used=False` → `hitl_degrade` interrupt `{type, failed_tool, options:[重试/跳过/终止]}`。resume 解析：重试 → 清零 streak、`replan_reason="用户要求重试失败的服务调用"` → replanner；跳过 → 清零 streak → replan_check；终止 → finalize。`degrade_used=True` 一次性（再失败由 replan_check 质量门控收口，避免 degrade↔replanner 死循环）。
+**故障降级（⏸(4)）**：`error_streak` 在 executor（参数提取两次失败）与 merge（ToolMessage status=error）两处累计、任一成功清零。`>= 2` 且 `degrade_used=False` → `hitl_degrade` interrupt `{type, failed_tool, options:[重试/跳过/终止]}`。resume 解析：重试 → 清零 streak、`replan_reason="用户要求重试失败的服务调用"` → replanner；跳过 → 清零 streak → replan_check；终止 → finalize。`degrade_used=True` 一次性（再失败由 replan_check 质量门控收口，避免 degrade↔replanner 死循环）。
 
-**预算兜底（⏸⑥）**：`route_after_replan_check` 第 2 分支触发。interrupt `{type, missing: 关键缺口摘要+质量结论, options:[补充/收尾]}`。补充文本 → query 增强 `[补充信息]`、`budget_hitl_used=True` → replanner 生成最后一批步骤（≤3 步，replanner 提示词已有上限）；收尾 → finalize 带现有材料兜底。只问一次。
+**预算兜底（⏸(6)）**：`route_after_replan_check` 第 2 分支触发。interrupt `{type, missing: 关键缺口摘要+质量结论, options:[补充/收尾]}`。补充文本 → query 增强 `[补充信息]`、`budget_hitl_used=True` → replanner 生成最后一批步骤（≤3 步，replanner 提示词已有上限）；收尾 → finalize 带现有材料兜底。只问一次。
 
 ## 6. 提示词设计（新建 `lawApp_LangGraph/prompts.py`）
 
@@ -290,8 +290,8 @@ Notebook 位于 `lawApp_LangGraph/`（与 `nodes_test.ipynb` 等现有惯例一�
 
 | Notebook | 用例 |
 |----------|------|
-| `clarify_test.ipynb` | ① CaseElements 单元验证（update/critical_missing/digest/mark_na/promote）② 单轮澄清→⏸②→resume→要素齐→planner 收到 digest ③ 3 轮逐个补齐 ④ 5 轮上限软退出（永远缺→第 5 轮放行，reasoning 记"要素不全"）⑤ 空回答=跳过按原问题继续 ⑥ 闲聊全 na 直通零反问 ⑦ 高风险拒绝/确认两分支 |
-| `hitl_test.ipynb` | ⑧ mid_clarify 全链路（不足+vague→⏸⑤→resume→query 增强+replanner 重检索）⑨ not_found→无 interrupt 直连 replanner ⑩ degrade：连错 ×2→⏸④→重试/跳过/终止三分支 ⑪ degrade 一次性（第二次失败直接 replan_check）⑫ budget：轮数耗尽→⏸⑥→补充/收尾两分支 ⑬ pdf_confirm 回归 |
+| `clarify_test.ipynb` | (1) CaseElements 单元验证（update/critical_missing/digest/mark_na/promote）(2) 单轮澄清→⏸(2)→resume→要素齐→planner 收到 digest (3) 3 轮逐个补齐 (4) 5 轮上限软退出（永远缺→第 5 轮放行，reasoning 记"要素不全"）(5) 空回答=跳过按原问题继续 (6) 闲聊全 na 直通零反问 (7) 高风险拒绝/确认两分支 |
+| `hitl_test.ipynb` | (8) mid_clarify 全链路（不足+vague→⏸(5)→resume→query 增强+replanner 重检索）⑨ not_found→无 interrupt 直连 replanner ⑩ degrade：连错 ×2→⏸(4)→重试/跳过/终止三分支 ⑪ degrade 一次性（第二次失败直接 replan_check）⑫ budget：轮数耗尽→⏸(6)→补充/收尾两分支 ⑬ pdf_confirm 回归 |
 | `prompts_test.ipynb` | ⑭ prompts.py 全部模板渲染无缺变量 ⑮ Kim 标记存在于反问/兜底提示词；Saul 切换仅影响分析角色 ⑯ digest 注入 planner/executor/分析上下文断言 |
 
 pytest 存量：`test_graph_topology`（节点集 9→14）与 `test_interrupt_resume`（旧 clarify 行为→新要素循环语义）就地最小更新，保持冒烟绿；不新增 pytest 用例。

@@ -253,8 +253,8 @@ InterruptPanel @resumed → App.onResumed(r)
 ## 6. 已知阻塞 (需要用户操作)
 
 1. **DB_PASSWORD 认证失败** — `lawApp_LangGraph/.env` 中密码被 127.0.0.1:5432 postgres 拒绝。
-   修复后需: ① `python scripts/ingest_cases_pgvector.py` (~19 分钟入库) ② 重跑 03/04 册
-   ③ 06 册 ④ 07 册 sessions 检查。当前 PG 全链路 (检索/审计/checkpoint) 降级运行。
+   修复后需: (1) `python scripts/ingest_cases_pgvector.py` (~19 分钟入库) (2) 重跑 03/04 册
+   (3) 06 册 (4) 07 册 sessions 检查。当前 PG 全链路 (检索/审计/checkpoint) 降级运行。
 2. **02 册 pro 行两条 FAIL** — 历史遗留判定, planner 已改 _stream_plan 后应自动翻转, 建议重跑确认。
 
 ## 7. 重点人工复核建议 (优先级序)
@@ -283,12 +283,12 @@ flowchart TD
     EX -->|"无 tool_calls 且还有步骤"| EX
     EX -->|"步骤走完"| RC["replan_check<br/>质量门控 (LLM + 规则兜底)"]
     TL --> MG["merge<br/>合并工具结果入 PromptsRecord"]
-    MG -->|"error_streak 达阈值 未降级过"| HD["hitl_degrade<br/>HITL④ degrade_confirm"]
+    MG -->|"error_streak 达阈值 未降级过"| HD["hitl_degrade<br/>HITL-4 degrade_confirm"]
     MG -->|"还有步骤"| EX
     MG -->|"步骤走完"| RC
     RC -->|"质量通过 (replan_needed=False)"| FZ["finalize<br/>流式生成终稿"]
-    RC -->|"预算耗尽 未问过"| HB["hitl_budget<br/>HITL⑥ budget_confirm"]
-    RC -->|"insufficient_reason=vague<br/>且未用过 mid_clarify"| MC["mid_clarify<br/>HITL⑤ 先问人后搜网"]
+    RC -->|"预算耗尽 未问过"| HB["hitl_budget<br/>HITL-6 budget_confirm"]
+    RC -->|"insufficient_reason=vague<br/>且未用过 mid_clarify"| MC["mid_clarify<br/>HITL-5 先问人后搜网"]
     RC -->|"not_found / error /<br/>已用过 mid_clarify"| RP["replanner<br/>重规划 (通常补 get_google_search)"]
     MC -->|"用户补充: query 织入<br/>[检索反馈追问]+[用户澄清]"| RP
     MC -->|"用户未补充 / LLM 追问生成失败<br/>(静默放行)"| RP

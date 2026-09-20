@@ -17,17 +17,17 @@
          ↓
     ┌─────────────────────────────────────────────────────────┐
     │ 入口问询环                                                │
-    │   ingest → risk_gate ⏸① → element_assess                  │
-    │             ⇅ ask_element ⏸② (要素驱动反问, ≤5 轮自适应环) │
+    │   ingest → risk_gate ⏸(1) → element_assess                  │
+    │             ⇅ ask_element ⏸(2) (要素驱动反问, ≤5 轮自适应环) │
     │ 执行环                                                    │
-    │   planner (Pro) → executor (Flash) ⏸③                    │
+    │   planner (Pro) → executor (Flash) ⏸(3)                    │
     │             ⇄ tools (ToolNode) → merge (推进/故障计数)     │
-    │             连续失败 ≥2 → hitl_degrade ⏸④ (重试/跳过/终止) │
+    │             连续失败 ≥2 → hitl_degrade ⏸(4) (重试/跳过/终止) │
     │ 质量门控                                                  │
     │   replan_check (Flash 判质量 + 诊断不足原因)                │
-    │     ├ 笼统 → mid_clarify ⏸⑤ → replanner (先问人后搜网)     │
+    │     ├ 笼统 → mid_clarify ⏸(5) → replanner (先问人后搜网)     │
     │     ├ 覆盖不到/出错 → replanner (Pro) → executor          │
-    │     └ 预算耗尽 → hitl_budget ⏸⑥ → replanner / finalize    │
+    │     └ 预算耗尽 → hitl_budget ⏸(6) → replanner / finalize    │
     │   finalize → END (组装最终回答)                            │
     └─────────────────────────────────────────────────────────┘
          ↓                ↓                ↓
@@ -56,24 +56,24 @@ flowchart TD
     START([START]) --> ingest["ingest<br/>重置要素清单/轮数/故障计数"]
     ingest --> risk_gate
 
-    risk_gate{"risk_gate ⏸①<br/>LLM 高风险判定"}
+    risk_gate{"risk_gate ⏸(1)<br/>LLM 高风险判定"}
     risk_gate -->|"拒绝 → 热线文案"| finalize["finalize"]
     risk_gate -->|"无风险 / 已确认"| assess{"element_assess<br/>LLM 评估要素缺口<br/>+ 解读上轮回答"}
 
-    assess -->|"有关键缺口 & 轮数<5"| ask["ask_element ⏸②<br/>Kim 律师式要素反问"]
+    assess -->|"有关键缺口 & 轮数<5"| ask["ask_element ⏸(2)<br/>Kim 律师式要素反问"]
     ask -->|"resume → 更新要素/轮数"| assess
     ask -->|"空回答/轮数耗尽"| planner
     assess -->|"要素齐 / 全 na / 评估失败软放行"| planner["planner"]
 
     planner -->|"plan 空"| finalize
-    planner -->|"有步骤"| executor["executor<br/>⏸③ pdf_confirm（存量）"]
+    planner -->|"有步骤"| executor["executor<br/>⏸(3) pdf_confirm（存量）"]
     executor -->|"生成 tool_calls"| tools["tools (ToolNode)"]
     executor -->|"参数提取失败 streak≥2"| degrade
     executor -->|"无剩余步骤"| rcheck
     executor -->|"参数提取失败 · 仍有剩余步骤"| executor
     tools --> merge["merge<br/>合并/推进/故障计数"]
 
-    merge -->|"工具报错 streak≥2"| degrade{"hitl_degrade ⏸④<br/>重试 / 跳过 / 终止"}
+    merge -->|"工具报错 streak≥2"| degrade{"hitl_degrade ⏸(4)<br/>重试 / 跳过 / 终止"}
     merge -->|"streak<threshold 且有剩余"| executor
     merge -->|"全部完成"| rcheck{"replan_check<br/>质量判定 + 原因诊断"}
 
@@ -82,9 +82,9 @@ flowchart TD
     degrade -->|"终止"| finalize
 
     rcheck -->|"质量通过"| finalize
-    rcheck -->|"不足 · vague · 未用过"| mid["mid_clarify ⏸⑤<br/>检索反馈追问"]
+    rcheck -->|"不足 · vague · 未用过"| mid["mid_clarify ⏸(5)<br/>检索反馈追问"]
     rcheck -->|"不足 · not_found/error"| replanner
-    rcheck -->|"预算耗尽 · 未问过"| budget{"hitl_budget ⏸⑥<br/>补充 / 收尾"}
+    rcheck -->|"预算耗尽 · 未问过"| budget{"hitl_budget ⏸(6)<br/>补充 / 收尾"}
     rcheck -->|"预算耗尽 · 已问过"| finalize
 
     mid -->|"resume → 增强query"| replanner
@@ -94,24 +94,24 @@ flowchart TD
     finalize --> END([END])
 ```
 
-六处 interrupt 标号：⏸① `risk_confirm`、⏸② `clarify`、⏸③ `pdf_confirm`（存量）、⏸④ `degrade_confirm`、⏸⑤ `mid_clarify`、⏸⑥ `budget_confirm`。
+六处 interrupt 标号：⏸(1) `risk_confirm`、⏸(2) `clarify`、⏸(3) `pdf_confirm`（存量）、⏸(4) `degrade_confirm`、⏸(5) `mid_clarify`、⏸(6) `budget_confirm`。
 
 ### 3.2 节点职责表（14 节点）
 
 | 节点 | LLM | 职责 |
 |------|-----|------|
 | `ingest` | — | 每轮请求入口：存量重置 + 重建默认要素清单（7 要素）、`clarify_rounds`/`error_streak` 归零、一次性标记复位、`clarify_history` RESET |
-| `risk_gate` | Flash | `RiskSchema{high_risk, reason}` 高风险判定（自伤自杀/正在发生家暴/扬言报复/刑事自首/未成年人受害）；高风险未确认 → ⏸①，拒绝 → 热线文案中止；LLM 失败视为无风险放行 |
-| `element_assess` | Flash | 双职责：① 解读上一轮用户回答（`element_updates`）映射到要素；② 评估剩余关键缺口生成 `pending_questions`（≤3 个律师式反问，按案由动态提升关键级）；非婚姻家事 → 全 na 直通；LLM 失败 → done=True 软放行 |
-| `ask_element` | — | 读 `pending_questions` 发 ⏸②（载荷含 `round: "n/5"` 与要素面板快照）；resume 后写 `clarify_history`、`clarify_rounds+1`、答案织入增强 query；LLM-free |
+| `risk_gate` | Flash | `RiskSchema{high_risk, reason}` 高风险判定（自伤自杀/正在发生家暴/扬言报复/刑事自首/未成年人受害）；高风险未确认 → ⏸(1)，拒绝 → 热线文案中止；LLM 失败视为无风险放行 |
+| `element_assess` | Flash | 双职责：(1) 解读上一轮用户回答（`element_updates`）映射到要素；(2) 评估剩余关键缺口生成 `pending_questions`（≤3 个律师式反问，按案由动态提升关键级）；非婚姻家事 → 全 na 直通；LLM 失败 → done=True 软放行 |
+| `ask_element` | — | 读 `pending_questions` 发 ⏸(2)（载荷含 `round: "n/5"` 与要素面板快照）；resume 后写 `clarify_history`、`clarify_rounds+1`、答案织入增强 query；LLM-free |
 | `planner` | Pro | `PlanSchema` 生成 JSON 计划 + 思考链（≤8 步）；失败兜底默认法律检索四步计划（检索案例→评估质量→检索法条→综合分析）；提示词注入「已知案件要素」段（`digest()`） |
-| `executor` | Flash | 为当前步骤生成 tool_calls（bind_tools 全量 ALL_TOOLS 含 MCP）；LLM 失败严格重试一次，再失败标记 failed 并 `error_streak+1`；`markdown_to_pdf` 步骤前 ⏸③ 确认（存量） |
+| `executor` | Flash | 为当前步骤生成 tool_calls（bind_tools 全量 ALL_TOOLS 含 MCP）；LLM 失败严格重试一次，再失败标记 failed 并 `error_streak+1`；`markdown_to_pdf` 步骤前 ⏸(3) 确认（存量） |
 | `tools` | — | prebuilt ToolNode 执行工具（构建时读取 `ALL_TOOLS()` 快照，`handle_tool_errors=True`） |
 | `merge` | — | 解析 ToolMessage 合并状态字段、记录 ToolCallRecord、推进步骤索引；新增：工具报错 `error_streak+1`、成功清零；重建 `PromptsRecord`（含 `known_elements` digest） |
 | `replan_check` | Flash | `ReplanCheckSchema` 质量门控 + 不足原因诊断 `insufficient_reason: vague/not_found/error/none`；LLM 失败回退 `_fallback_replan_check` 规则判断 |
-| `mid_clarify` | Flash | ⏸⑤ 检索反馈追问：基于评估结论 + top 检索文档摘要生成一个聚焦追问；resume 非空 → query 增强后转 replanner 重检索；LLM 失败静默走 replanner 联网兜底 |
-| `hitl_degrade` | — | ⏸④ 故障降级询问：`error_streak≥2` 且未用过时触发，选项 重试/跳过/终止；LLM-free 纯记账 |
-| `hitl_budget` | — | ⏸⑥ 预算耗尽询问：工具调用数达 `MAX_ROUNDS=10` 且未问过时触发，选项 补充/收尾；LLM-free |
+| `mid_clarify` | Flash | ⏸(5) 检索反馈追问：基于评估结论 + top 检索文档摘要生成一个聚焦追问；resume 非空 → query 增强后转 replanner 重检索；LLM 失败静默走 replanner 联网兜底 |
+| `hitl_degrade` | — | ⏸(4) 故障降级询问：`error_streak≥2` 且未用过时触发，选项 重试/跳过/终止；LLM-free 纯记账 |
+| `hitl_budget` | — | ⏸(6) 预算耗尽询问：工具调用数达 `MAX_ROUNDS=10` 且未问过时触发，选项 补充/收尾；LLM-free |
 | `replanner` | Pro | 基于已执行步骤生成**补充**步骤（不重复已完成，≤3 步）；失败兜底"联网搜索 + 法律分析"两步 |
 | `finalize` | Flash | 组装最终回答：已有 final_answer 直接用；有 RAG 文档 → `FINALIZE_CASE_PROMPT` 兜底；都没有 → `FINALIZE_DIRECT_PROMPT` 直答（v2 均为 Kim 人设） |
 
@@ -143,12 +143,12 @@ flowchart TD
 
 ### 3.4 关键机制
 
-- **澄清循环（⏸②）**：`element_assess` → `ask_element` → resume → 回 `element_assess`。评估与追问拆成两节点，避免 resume 重跑时白跑评估 LLM。每轮交互 = 一次 interrupt + 一次 resume；`clarify_rounds` 在 resume 处理后自增。
+- **澄清循环（⏸(2)）**：`element_assess` → `ask_element` → resume → 回 `element_assess`。评估与追问拆成两节点，避免 resume 重跑时白跑评估 LLM。每轮交互 = 一次 interrupt + 一次 resume；`clarify_rounds` 在 resume 处理后自增。
 - **空回答语义**：用户对反问回复空文本 → 视为跳过，`clarify_rounds` 直接置为上限，按原问题继续。
 - **非法律问题直通**：`element_assess` 判定非婚姻家事类咨询（闲聊/概念解释）→ 全要素置 na，零反问直通 planner。
-- **检索反馈联动（⏸⑤）**：`replan_check` 诊断不足原因为 `vague` 且 `mid_clarify_used=False` → `mid_clarify` 用 Flash LLM 基于 top 检索文档摘要生成一个聚焦追问 → resume 非空则 query 增强为 `{query}\n[检索反馈追问] {question}\n[用户澄清] {answer}` → replanner 以细化后 query 重新生成检索步骤；resume 空 → replanner 联网兜底。**先问人、后搜网**。
-- **故障降级（⏸④）**：`error_streak` 在 executor（参数提取两次失败）与 merge（ToolMessage status=error）两处累计、任一成功清零；`>=2` 且 `degrade_used=False` → interrupt `{type, failed_tool, options:[重试/跳过/终止]}`。重试 → 清零 streak、`replan_reason="用户要求重试失败的服务调用"` → replanner；跳过 → 清零 streak → replan_check；终止 → finalize。`degrade_used=True` 一次性，再失败由 replan_check 质量门控收口，避免 degrade↔replanner 死循环。
-- **预算兜底（⏸⑥）**：`route_after_replan_check` 第 2 分支触发。interrupt `{type, missing: 关键缺口摘要+质量结论, options:[补充/收尾]}`。补充文本 → query 增强 `[补充信息]`、`budget_hitl_used=True` → replanner 生成最后一批步骤（≤3 步）；收尾 → finalize 带现有材料兜底。只问一次。
+- **检索反馈联动（⏸(5)）**：`replan_check` 诊断不足原因为 `vague` 且 `mid_clarify_used=False` → `mid_clarify` 用 Flash LLM 基于 top 检索文档摘要生成一个聚焦追问 → resume 非空则 query 增强为 `{query}\n[检索反馈追问] {question}\n[用户澄清] {answer}` → replanner 以细化后 query 重新生成检索步骤；resume 空 → replanner 联网兜底。**先问人、后搜网**。
+- **故障降级（⏸(4)）**：`error_streak` 在 executor（参数提取两次失败）与 merge（ToolMessage status=error）两处累计、任一成功清零；`>=2` 且 `degrade_used=False` → interrupt `{type, failed_tool, options:[重试/跳过/终止]}`。重试 → 清零 streak、`replan_reason="用户要求重试失败的服务调用"` → replanner；跳过 → 清零 streak → replan_check；终止 → finalize。`degrade_used=True` 一次性，再失败由 replan_check 质量门控收口，避免 degrade↔replanner 死循环。
+- **预算兜底（⏸(6)）**：`route_after_replan_check` 第 2 分支触发。interrupt `{type, missing: 关键缺口摘要+质量结论, options:[补充/收尾]}`。补充文本 → query 增强 `[补充信息]`、`budget_hitl_used=True` → replanner 生成最后一批步骤（≤3 步）；收尾 → finalize 带现有材料兜底。只问一次。
 
 ---
 
@@ -319,12 +319,12 @@ C. 顶层 AgentState
 
 | 标号 | interrupt 类型 | 触发节点 | 载荷形状 | resume 归一 (utils.normalize_resume) |
 |------|---------------|---------|---------|------|
-| ⏸① | `risk_confirm` | risk_gate | {type, message} | y/yes/是/确认→True；n/no/否→False（拒绝→热线文案中止） |
-| ⏸② | `clarify` | ask_element | {type, round: "n/5", question, elements: [{key, label, status}]} | 原文透传；空=跳过（轮数置满，按原问题继续） |
-| ⏸③ | `pdf_confirm` | executor（存量） | {type, message} | y→True；否→False（跳过 PDF 步骤） |
-| ⏸④ | `degrade_confirm` | hitl_degrade | {type, failed_tool, options: [重试/跳过/终止], message} | 重试→"retry"；终止→"abort"；默认"skip" |
-| ⏸⑤ | `mid_clarify` | mid_clarify | {type, question, context_hint} | 原文透传；空=转联网兜底 |
-| ⏸⑥ | `budget_confirm` | hitl_budget | {type, missing, options: [补充/收尾], message} | 空回复或含"收尾"→"finish"；其余非空原文透传为补充信息 |
+| ⏸(1) | `risk_confirm` | risk_gate | {type, message} | y/yes/是/确认→True；n/no/否→False（拒绝→热线文案中止） |
+| ⏸(2) | `clarify` | ask_element | {type, round: "n/5", question, elements: [{key, label, status}]} | 原文透传；空=跳过（轮数置满，按原问题继续） |
+| ⏸(3) | `pdf_confirm` | executor（存量） | {type, message} | y→True；否→False（跳过 PDF 步骤） |
+| ⏸(4) | `degrade_confirm` | hitl_degrade | {type, failed_tool, options: [重试/跳过/终止], message} | 重试→"retry"；终止→"abort"；默认"skip" |
+| ⏸(5) | `mid_clarify` | mid_clarify | {type, question, context_hint} | 原文透传；空=转联网兜底 |
+| ⏸(6) | `budget_confirm` | hitl_budget | {type, missing, options: [补充/收尾], message} | 空回复或含"收尾"→"finish"；其余非空原文透传为补充信息 |
 
 ### 8.4 提示词模板清单（prompts.py v2）
 
@@ -408,7 +408,7 @@ C. 顶层 AgentState
   ├─ [risk_gate] Flash LLM 判定 → 无高风险, 放行
   │
   ├─ [element_assess] Flash LLM 评估: 彩礼纠纷 → timeline 升关键,
-  │   关键要素仍缺 → [ask_element] ⏸② 律师式反问
+  │   关键要素仍缺 → [ask_element] ⏸(2) 律师式反问
   │   "结婚多少年了? 彩礼是婚前还是婚后给的? 现在还共同生活吗?"
   │   → 用户补充: "结婚3年, 婚前给的, 一直共同生活"
   │   → 要素点亮(婚姻现状/timeline), 下一轮评估 done → 进 planner
@@ -431,7 +431,7 @@ C. 顶层 AgentState
   │
   ├─ [replan_check] Flash LLM 判断 → needs_replan=true
   │   → insufficient_reason=not_found (案例库覆盖不足)
-  │   (若诊断为 vague 且未追问过 → mid_clarify ⏸⑤ 先问人后搜网)
+  │   (若诊断为 vague 且未追问过 → mid_clarify ⏸(5) 先问人后搜网)
   │
   ├─ [replanner] Pro LLM → 新增步骤:
   │   {step_id:4, tool: get_google_search}
