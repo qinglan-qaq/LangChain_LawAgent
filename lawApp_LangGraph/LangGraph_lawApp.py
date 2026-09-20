@@ -553,10 +553,12 @@ def ask_element_node(state: AgentState) -> dict:
 # Node 1: The Planner — Pro LLM 制定计划 + 思考链
 
 
+# 拼工具清单摘要(名字+描述前 120 字)喂 planner 提示词
 def _tools_desc() -> str:
     return "\n".join(f"- {t.name}: {(t.description or '')[:120]}" for t in ALL_TOOLS())
 
 
+# 结构化计划 → PlanStep 列表, 未知工具名置 None 交 executor 自行处理
 def _normalize_plan(schema) -> list[PlanStep]:
     """将 structured output 的计划规范为 PlanStep 列表（过滤未知工具名）。"""
     steps: list[PlanStep] = []
@@ -574,6 +576,7 @@ def _normalize_plan(schema) -> list[PlanStep]:
     return steps
 
 
+# regex 截 JSON 主体 + PlanSchema 校验; 失败直接 raise(用户约束: 不做兜底)
 def _parse_plan_json(raw: str) -> "PlanSchema":
     """解析 reasoner 流式累积的 content 为 PlanSchema;失败直接抛错(不做兜底)。"""
     import json
@@ -585,6 +588,7 @@ def _parse_plan_json(raw: str) -> "PlanSchema":
     return PlanSchema.model_validate(json.loads(m.group(0)))
 
 
+# raw openai SDK 流式跑 planner/replanner: reasoning 逐帧推 CoT 总线, content 拼齐后解析计划
 async def _stream_plan(
     prompt_text: str, source: str, config: RunnableConfig
 ) -> tuple["PlanSchema", list[str]]:
@@ -692,6 +696,7 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
 # Node 2: The Executor — Flash LLM 为当前步骤生成工具调用
 
 
+# 汇总 plan 步骤执行简况(供 replanner/finalize 提示词)
 def _step_summaries(state: AgentState) -> dict[str, str]:
     rag_summary = "暂无"
     if state.rag_documents:
@@ -875,6 +880,7 @@ def _build_tools_node():
 # Node 4: Merge — 合并工具结果到 AgentState,推进步骤索引
 
 
+# 从 dict/对象取字段, 缺省回退空串(merge 解析工具结果用)
 def _field(item, key: str, default: str = ""):
     """从 dict 或 Pydantic 对象中安全提取字段值."""
     if isinstance(item, dict):
@@ -1056,6 +1062,7 @@ async def replan_check_node(state: AgentState) -> dict:
     }
 
 
+# replan_check 的规则兜底: LLM 判断失败时按 评估不足且未联网 → not_found/vague 判定
 def _fallback_replan_check(state: AgentState) -> tuple[bool, str, str]:
     """规则兜底判断 —— LLM 判断失败时使用.
 
@@ -1476,6 +1483,7 @@ def route_after_ask(state: AgentState) -> str:
     return "element_assess"
 
 
+# planner 出口: 有计划 → executor 开始执行检索闭环
 def route_after_planner(state: AgentState) -> str:
     """规划器出口路由。
 
@@ -1488,6 +1496,7 @@ def route_after_planner(state: AgentState) -> str:
     return target
 
 
+# executor 出口: 带 tool_calls → tools; 连续失败达阈值 → hitl_degrade; 其余按剩余步骤走
 def route_after_executor(state: AgentState) -> str:
     """执行器出口路由（含降级分支）。
 
@@ -1513,6 +1522,7 @@ def route_after_executor(state: AgentState) -> str:
     return target
 
 
+# merge 出口: 连续失败达阈值且未降级过 → hitl_degrade; 其余按剩余步骤 → executor/replan_check
 def route_after_merge(state: AgentState) -> str:
     """合并出口路由（含降级分支）。
 
@@ -1532,6 +1542,7 @@ def route_after_merge(state: AgentState) -> str:
     return target
 
 
+# 质量门控出口(优先级短路): 通过→finalize > 预算→hitl_budget > vague未问过→mid_clarify > replanner
 def route_after_replan_check(state: AgentState) -> str:
     """质量门控出口路由（优先级短路，见 spec §5.2）。
 
@@ -1558,6 +1569,7 @@ def route_after_replan_check(state: AgentState) -> str:
     return "replanner"
 
 
+# 降级询问出口: abort(已写中止文案)→finalize / retry→replanner / skip(默认)→replan_check
 def route_after_degrade(state: AgentState) -> str:
     """降级询问出口路由。
 
@@ -1573,6 +1585,7 @@ def route_after_degrade(state: AgentState) -> str:
     return "replan_check"
 
 
+# 预算询问出口: 选择补充(replan_needed 已置)→replanner 最后一搏 / 收尾(默认)→finalize
 def route_after_budget(state: AgentState) -> str:
     """预算询问出口路由。
 
