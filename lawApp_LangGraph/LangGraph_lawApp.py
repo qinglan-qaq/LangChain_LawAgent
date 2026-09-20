@@ -5,36 +5,37 @@ Plan & Execute Agent v2 — 法律咨询智能体 (LangGraph 1.x)
     llm_planner  (DeepSeek Pro)   → structured output 制定计划/重规划
     llm_executor (DeepSeek Flash) → bind_tools 逐步执行、调用工具
 
-Graph 流程 (14 节点):
-    START → ingest → risk_gate(HITL① 高风险确认) → element_assess
-    element_assess ⇄ ask_element(HITL② 要素反问, 最多 settings.max_clarify_rounds 轮)
+Graph 流程 (15 节点):
+    START → ingest → risk_gate(HITL-1 高风险确认) → element_assess
+    element_assess ──[chitchat 闲聊类]──→ chitchat(轻量应答) → END
+    element_assess ⇄ ask_element(HITL-2 要素反问, 最多 settings.max_clarify_rounds 轮)
     element_assess ──[要素齐/轮数尽]──→ planner
     planner ──[plan 空]──→ finalize → END
     planner ──[有步骤]──→ executor ⇄ tools(ToolNode) → merge
-    executor/merge ──[连续失败≥阈值]──→ hitl_degrade(HITL④)
+    executor/merge ──[连续失败≥阈值]──→ hitl_degrade(HITL-4)
         hitl_degrade ──[retry→replanner | skip→replan_check | abort→finalize]
     executor/merge ──[步骤完成]──→ replan_check
         replan_check ──[质量通过]──→ finalize
-        replan_check ──[预算耗尽]──→ hitl_budget(HITL⑥)
+        replan_check ──[预算耗尽]──→ hitl_budget(HITL-6)
             hitl_budget ──[补充→replanner | 收尾→finalize]
-        replan_check ──[vague 未问过]──→ mid_clarify(HITL⑤) → replanner
+        replan_check ──[vague 未问过]──→ mid_clarify(HITL-5) → replanner
         replan_check ──[其余]──→ replanner → executor
 
 v2 变更 (upgrade-v1):
 - 4 处「剥代码栅栏 + json.loads」全部改为 with_structured_output(Pydantic Schema)
 - executor 手动 TOOL_BY_NAME 循环 → prebuilt ToolNode + bind_tools(单工具)
-- 全节点 async（replan_check / replanner 由同步 .invoke 改为 await ainvoke）
-- 删除 _TOOL_FALLBACK_ARGS 字典（structured 单次重试取代）
-- 新增 ingest 节点：每轮请求重置累积字段（reducer + RESET 标记），
+- 全节点 async(replan_check / replanner 由同步 .invoke 改为 await ainvoke）
+- 删除 _TOOL_FALLBACK_ARGS 字典(structured 单次重试取代）
+- 新增 ingest 节点:每轮请求重置累积字段(reducer + RESET 标记）,
 多轮对话不再泄漏上一轮的检索/调用记录
-- HITL 六处 interrupt() + Command(resume=...)：
-    ① risk_gate: 高风险话题确认(拒绝 → 热线文案中止)
-    ② ask_element: 关键要素缺失反问(要素循环, 最多 settings.max_clarify_rounds 轮)
-    ③ executor: markdown_to_pdf 执行前确认
-    ④ hitl_degrade: 工具连续失败降级询问(重试/跳过/终止)
-    ⑤ mid_clarify: 检索反馈追问(先问人后搜网)
-    ⑥ hitl_budget: 重规划预算耗尽询问(补充/收尾)
-- LLM 懒加载单例，模块导入不再要求 API Key（可安全冒烟测试）
+- HITL 六处 interrupt() + Command(resume=...):
+    (1) risk_gate: 高风险话题确认(拒绝 → 热线文案中止)
+    (2) ask_element: 关键要素缺失反问(要素循环, 最多 settings.max_clarify_rounds 轮)
+    (3) executor: markdown_to_pdf 执行前确认
+    (4) hitl_degrade: 工具连续失败降级询问(重试/跳过/终止)
+    (5) mid_clarify: 检索反馈追问(先问人后搜网)
+    (6) hitl_budget: 重规划预算耗尽询问(补充/收尾)
+- LLM 懒加载单例,模块导入不再要求 API Key(可安全冒烟测试）
 - 持久化: checkpointer(PostgresSaver/MemorySaver) + store(PostgresStore/InMemoryStore)
 由 FastAPI lifespan 注入；记忆工具经 langgraph.config.get_store() 访问
 """
@@ -78,6 +79,7 @@ from lawApp_LangGraph.config import settings
 #  Task 3: 提示词统一改用 prompts.py 单一来源(旧版常量已于 Task 6 删除).
 from lawApp_LangGraph.prompts import (
     BUDGET_CONFIRM_MSG,
+    CHITCHAT_PROMPT,
     DEGRADE_CONFIRM_MSG,
     ELEMENT_ASSESS_PROMPT,
     EXECUTOR_PROMPT,
@@ -100,7 +102,7 @@ _llm_executor_lock = threading.Lock()
 
 
 def get_planner_llm():
-    """Pro LLM（规划/重规划，强推理）。测试可 monkeypatch 本函数。"""
+    """Pro LLM(规划/重规划,强推理）。测试可 monkeypatch 本函数。"""
     global _llm_planner
     if _llm_planner is None:
         with _llm_planner_lock:
@@ -118,7 +120,7 @@ def get_planner_llm():
 
 
 def get_executor_llm():
-    """Flash LLM（执行/质量门控，低成本低延迟）。测试可 monkeypatch 本函数。"""
+    """Flash LLM(执行/质量门控,低成本低延迟）。测试可 monkeypatch 本函数。"""
     global _llm_executor
     if _llm_executor is None:
         with _llm_executor_lock:
@@ -203,6 +205,9 @@ def _schema_models():
         status: Literal["known", "na"] = Field(default="known")
 
     class ElementAssessmentSchema(BaseModel):
+        question_category: Literal["marriage_legal", "concept", "chitchat", "other"] = (
+            Field(default="marriage_legal", description="咨询分类四选一")
+        )
         applicable: bool = Field(description="是否婚姻家事类咨询")
         element_updates: List[ElementUpdate] = Field(
             default_factory=list, description="用户上轮回答映射到的要素"
@@ -269,15 +274,14 @@ def _build_elements(mode: str) -> CaseElements:
     if mode == "assistant":
         return CaseElements(
             elements=[
-                CaseElement(key=k, label=l, critical=c)
-                for k, l, c in DOC_ELEMENT_DEFS
+                CaseElement(key=k, label=l, critical=c) for k, l, c in DOC_ELEMENT_DEFS
             ]
         )
     return default_case_elements()
 
 
 def ingest_node(state: AgentState) -> dict:
-    """重置上一轮遗留的计划/结果/累积字段（messages 保留，支撑多轮对话）。"""
+    """重置上一轮遗留的计划/结果/累积字段(messages 保留,支撑多轮对话）。"""
     debug.debug("→ 进入 Ingest 节点", detail=f"query={state.query[:60]}")
     mode = state.mode or "attorney"
     return {
@@ -307,6 +311,8 @@ def ingest_node(state: AgentState) -> dict:
         "budget_hitl_used": False,
         "degrade_used": False,
         "pending_questions": [],
+        # 咨询分类归位(防止上一轮 chitchat 残留路由到闲聊节点)
+        "question_category": "marriage_legal",
         # 累积语义字段 → RESET 清空
         "tool_calls": RESET,
         "reasoning": RESET,
@@ -316,7 +322,7 @@ def ingest_node(state: AgentState) -> dict:
     }
 
 
-# Node 0.5a: Risk Gate — 高风险话题确认 (HITL ①)
+# Node 0.5a: Risk Gate — 高风险话题确认 (HITL)
 
 
 async def risk_gate_node(state: AgentState) -> dict:
@@ -341,10 +347,7 @@ async def risk_gate_node(state: AgentState) -> dict:
 
     high_risk = False
     try:
-        chain = (
-            PromptTemplate.from_template(RISK_GATE_PROMPT)
-            | _structured(RiskSchema)
-        )
+        chain = PromptTemplate.from_template(RISK_GATE_PROMPT) | _structured(RiskSchema)
         verdict = await chain.ainvoke({"query": query[:2000]})
         high_risk = bool(verdict.high_risk)
     except Exception as e:
@@ -358,15 +361,15 @@ async def risk_gate_node(state: AgentState) -> dict:
     confirmed = interrupt(
         {
             "type": "risk_confirm",
-            "message": "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险，请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗？",
+            "message": "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险,请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗？",
         }
     )
     if not confirmed:
         return {
             "final_answer": (
-                "已中止本次咨询。请优先保证人身安全：紧急情况拨打110，"
-                "家暴可拨打全国妇联维权热线12338，心理困境可拨打希望热线400-161-9995。"
-                "安全得到保障后，欢迎随时回来咨询法律问题。"
+                "已中止本次咨询。请优先保证人身安全:紧急情况拨打110,"
+                "家暴可拨打全国妇联维权热线12338,心理困境可拨打希望热线400-161-9995。"
+                "安全得到保障后,欢迎随时回来咨询法律问题。"
             ),
             "risk_confirmed": True,
             "hitl_event": {
@@ -389,7 +392,7 @@ async def risk_gate_node(state: AgentState) -> dict:
 
 
 async def element_assess_node(state: AgentState) -> dict:
-    """评估案件要素:①应用用户上轮回答的要素映射 ②生成下一轮反问.
+    """评估案件要素:1,应用用户上轮回答的要素映射 2,生成下一轮反问.
 
     Args:
         state (AgentState): 图状态,读取 query / case_elements /
@@ -415,9 +418,8 @@ async def element_assess_node(state: AgentState) -> dict:
         last_q, last_a = ex.question, ex.answer
 
     try:
-        chain = (
-            PromptTemplate.from_template(ELEMENT_ASSESS_PROMPT)
-            | _structured(ElementAssessmentSchema)
+        chain = PromptTemplate.from_template(ELEMENT_ASSESS_PROMPT) | _structured(
+            ElementAssessmentSchema
         )
         v = await chain.ainvoke(
             {
@@ -430,21 +432,38 @@ async def element_assess_node(state: AgentState) -> dict:
             }
         )
     except Exception as e:
-        debug.warning(
-            "Element Assess LLM 失败,软放行进 planner", detail=str(e)[:100]
-        )
+        debug.warning("Element Assess LLM 失败,软放行进 planner", detail=str(e)[:100])
         return {"pending_questions": [], "case_elements": ce}
 
-    # ① 非婚姻家事类 → 全 na,直接放行
+    # 咨询分类(冒烟替身无该字段 → getattr 兜底为 marriage_legal)
+    category = getattr(v, "question_category", "marriage_legal") or "marriage_legal"
+
+    # 闲聊/问候 → 不做要素处理,路由直接送闲聊节点出终答
+    if category == "chitchat":
+        debug.info(
+            "← Element Assess: 闲聊类,转 chitchat 节点",
+            result=f"elapsed={time.time() - t0:.2f}s",
+        )
+        return {
+            "pending_questions": [],
+            "question_category": "chitchat",
+            "case_elements": ce,
+        }
+
+    # 非婚姻家事类 → 全 na,直接放行
     if not v.applicable:
         ce.mark_na([e.key for e in ce.elements])
         debug.info(
             "← Element Assess: 非目标类咨询,全 na 直通",
             result=f"elapsed={time.time() - t0:.2f}s",
         )
-        return {"pending_questions": [], "case_elements": ce}
+        return {
+            "pending_questions": [],
+            "question_category": category,
+            "case_elements": ce,
+        }
 
-    # ② 应用要素更新(用户回答映射 + na + 关键级提升)
+    # (2) 应用要素更新(用户回答映射 + na + 关键级提升)
     valid_keys = {e.key for e in ce.elements}
     for u in v.element_updates:
         if u.key in valid_keys:
@@ -454,7 +473,7 @@ async def element_assess_node(state: AgentState) -> dict:
     if v.promote_keys:
         ce.promote([k for k in v.promote_keys if k in valid_keys])
 
-    # ③ 决定是否继续问
+    # (3) 决定是否继续问
     questions = []
     if not v.done and state.clarify_rounds < settings.max_clarify_rounds:
         questions = [q for q in v.questions if q.key in valid_keys][:3]
@@ -468,10 +487,10 @@ async def element_assess_node(state: AgentState) -> dict:
         f"/{len(ce.elements)} | critical_missing={len(ce.critical_missing())}",
         result=f"elapsed={time.time() - t0:.2f}s | {'继续反问' if questions else '放行'}",
     )
-    return {"case_elements": ce, "pending_questions": questions}
+    return {"case_elements": ce, "pending_questions": questions, "question_category": category}
 
 
-# Node 0.5c: Ask Element — HITL ② 要素反问(纯记账,resume 重跑幂等)
+# Node 0.5c: Ask Element — HITL-2 要素反问(纯记账,resume 重跑幂等)
 
 
 def ask_element_node(state: AgentState) -> dict:
@@ -550,6 +569,39 @@ def ask_element_node(state: AgentState) -> dict:
     }
 
 
+# Node 0.5d: Chitchat — 闲聊轻量应答(question_category=chitchat 专用)
+
+
+async def chitchat_node(state: AgentState) -> dict:
+    """闲聊应答节点 — Flash LLM 流式生成 1~2 句友好回应并引导法律提问.
+
+    由 route_after_assess 在 question_category=chitchat 时路由进入,
+    不经 planner/检索,直接写 final_answer 后结束(省规划与检索成本).
+    LLM 失败直接抛错(用户约束: 不做兜底).
+
+    Args:
+        state (AgentState): 图状态,读取 query.
+
+    Returns:
+        dict: 状态更新,final_answer 为闲聊回应文本.
+    """
+    t0 = time.time()
+    debug.debug("→ 进入 Chitchat 节点", detail=f"query={state.query[:60]}")
+
+    chain = PromptTemplate.from_template(CHITCHAT_PROMPT) | get_executor_llm()
+    parts: list[str] = []
+    async for chunk in chain.astream({"query": state.query[:1000]}):
+        parts.append(chunk.content or "")
+    answer = "".join(parts).strip()
+
+    debug.info(
+        "← Chitchat 完成",
+        detail=f"answer_len={len(answer)}",
+        result=f"elapsed={time.time() - t0:.2f}s",
+    )
+    return {"final_answer": answer}
+
+
 # Node 1: The Planner — Pro LLM 制定计划 + 思考链
 
 
@@ -560,7 +612,7 @@ def _tools_desc() -> str:
 
 # 结构化计划 → PlanStep 列表, 未知工具名置 None 交 executor 自行处理
 def _normalize_plan(schema) -> list[PlanStep]:
-    """将 structured output 的计划规范为 PlanStep 列表（过滤未知工具名）。"""
+    """将 structured output 的计划规范为 PlanStep 列表(过滤未知工具名）。"""
     steps: list[PlanStep] = []
     for p in schema.plan:
         tn = p.tool_name
@@ -742,10 +794,10 @@ def _step_summaries(state: AgentState) -> dict[str, str]:
 
 
 async def executor_node(state: AgentState) -> dict:
-    """Flash LLM 为当前步骤生成工具调用（AIMessage + tool_calls）。
+    """Flash LLM 为当前步骤生成工具调用(AIMessage + tool_calls）。
 
     - 无工具步骤 → 直接标记完成并推进
-    - markdown_to_pdf 且未确认 → interrupt 请求用户确认（HITL ③）
+    - markdown_to_pdf 且未确认 → interrupt 请求用户确认(HITL-3）
     - LLM 未发起调用 → 严格重试一次；再失败则标记步骤 failed 并推进
     """
     t0 = time.time()
@@ -770,12 +822,12 @@ async def executor_node(state: AgentState) -> dict:
         ]
         return {"plan": done, "current_step_index": idx + 1}
 
-    # HITL ③: PDF 生成前确认（resume 后 confirmed 为真则继续）
+    # HITL-3: PDF 生成前确认(resume 后 confirmed 为真则继续）
     if step.tool_name == "markdown_to_pdf" and not state.pdf_confirmed:
         confirmed = interrupt(
             {
                 "type": "pdf_confirm",
-                "message": f"即将生成 PDF 报告（步骤: {step.description}）。确认生成吗？回复 y/是 确认，其他内容跳过该步骤。",
+                "message": f"即将生成 PDF 报告(步骤: {step.description}）。确认生成吗？回复 y/是 确认,其他内容跳过该步骤。",
             }
         )
         if not confirmed or str(confirmed).strip().lower() in ("n", "no", "否", "跳过"):
@@ -815,7 +867,7 @@ async def executor_node(state: AgentState) -> dict:
         else:
             raise RuntimeError("Flash LLM 未发起工具调用")
     except Exception as first_err:
-        # 严格重试一次（取代旧版 _TOOL_FALLBACK_ARGS 参数映射）
+        # 严格重试一次(取代旧版 _TOOL_FALLBACK_ARGS 参数映射）
         try:
             retry_prompt = f"{prompt}\n\n注意:上一次调用失败({str(first_err)[:80]}).必须立即调用工具 {step.tool_name}."
             response = (
@@ -1023,9 +1075,9 @@ async def replan_check_node(state: AgentState) -> dict:
 
     needs, reason, insufficient_reason = False, "", "none"
     try:
-        chain = PromptTemplate.from_template(
-            REPLAN_CHECK_PROMPT
-        ) | _structured(ReplanCheckSchema)
+        chain = PromptTemplate.from_template(REPLAN_CHECK_PROMPT) | _structured(
+            ReplanCheckSchema
+        )
         result = await chain.ainvoke(
             {
                 "user_query": state.query[:1000],
@@ -1091,7 +1143,7 @@ def _fallback_replan_check(state: AgentState) -> tuple[bool, str, str]:
     return False, "规则兜底: 无明显问题", "none"
 
 
-# Node 5.5: Mid Clarify — HITL ⑤ 检索反馈追问(先问人后搜网)
+# Node 5.5: Mid Clarify — HITL-5 检索反馈追问(先问人后搜网)
 
 
 async def mid_clarify_node(state: AgentState) -> dict:
@@ -1108,15 +1160,17 @@ async def mid_clarify_node(state: AgentState) -> dict:
             附 hitl_event(type=mid_clarify, question=追问文本).
     """
     t0 = time.time()
-    top_docs = "\n".join(
-        f"- [{d.case_number}] {d.chunk_text[:120]}..."
-        for d in state.rag_documents[:5]
-    ) or "(检索为空)"
+    top_docs = (
+        "\n".join(
+            f"- [{d.case_number}] {d.chunk_text[:120]}..."
+            for d in state.rag_documents[:5]
+        )
+        or "(检索为空)"
+    )
 
     try:
-        chain = (
-            PromptTemplate.from_template(MID_CLARIFY_PROMPT)
-            | _structured(MidClarifySchema)
+        chain = PromptTemplate.from_template(MID_CLARIFY_PROMPT) | _structured(
+            MidClarifySchema
         )
         v = await chain.ainvoke(
             {
@@ -1222,7 +1276,7 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
 
 
 async def finalize_node(state: AgentState) -> dict:
-    """优先复用已有 final_answer；否则用案例兜底生成 / LLM 直接回答（流式）。"""
+    """优先复用已有 final_answer；否则用案例兜底生成 / LLM 直接回答(流式）。"""
     t0 = time.time()
     debug.debug("→ 进入 Finalize 节点", detail="组装最终回答...")
 
@@ -1245,13 +1299,17 @@ async def finalize_node(state: AgentState) -> dict:
             if state.doc_type == "defense"
             else FINALIZE_COMPLAINT_PROMPT
         )
-        laws_digest = "\n".join(
-            f"{l.law_title} {l.article_number}: {l.content[:80]}"
-            for l in (state.law_results or [])[:5]
-        ) or "无"
-        cases_digest = "\n".join(
-            d.chunk_text[:100] for d in (state.rag_documents or [])[:3]
-        ) or "无"
+        laws_digest = (
+            "\n".join(
+                f"{l.law_title} {l.article_number}: {l.content[:80]}"
+                for l in (state.law_results or [])[:5]
+            )
+            or "无"
+        )
+        cases_digest = (
+            "\n".join(d.chunk_text[:100] for d in (state.rag_documents or [])[:3])
+            or "无"
+        )
         chain = PromptTemplate.from_template(template) | get_executor_llm()
         parts = []
         async for chunk in chain.astream(
@@ -1298,7 +1356,7 @@ async def finalize_node(state: AgentState) -> dict:
     return {"final_answer": answer}
 
 
-# Node 8.5: HITL Degrade — HITL ④ 工具连续失败降级询问
+# Node 8.5: HITL Degrade — HITL-4 工具连续失败降级询问
 
 
 def hitl_degrade_node(state: AgentState) -> dict:
@@ -1350,8 +1408,8 @@ def hitl_degrade_node(state: AgentState) -> dict:
         return {
             "degrade_used": True,
             "final_answer": (
-                "本次咨询因服务暂时不可用而中止，已收集的信息不会丢失。"
-                "请稍后再试，或联系专业律师获取帮助。"
+                "本次咨询因服务暂时不可用而中止,已收集的信息不会丢失。"
+                "请稍后再试,或联系专业律师获取帮助。"
             ),
             "hitl_event": {
                 "type": "degrade_confirm",
@@ -1373,7 +1431,7 @@ def hitl_degrade_node(state: AgentState) -> dict:
     }
 
 
-# Node 8.6: HITL Budget — HITL ⑥ 重规划预算耗尽询问
+# Node 8.6: HITL Budget — HITL-6 重规划预算耗尽询问
 
 
 def hitl_budget_node(state: AgentState) -> dict:
@@ -1426,9 +1484,7 @@ def hitl_budget_node(state: AgentState) -> dict:
         }
 
     augmented_query = f"{state.query}\n[用户补充信息] {answer}"
-    debug.info(
-        "← Budget: 用户补充", detail=f"answer={answer[:80]} | 最后一次 replan"
-    )
+    debug.info("← Budget: 用户补充", detail=f"answer={answer[:80]} | 最后一次 replan")
     return {
         "budget_hitl_used": True,
         "query": augmented_query,
@@ -1463,9 +1519,12 @@ def route_after_assess(state: AgentState) -> str:
     """要素评估出口路由。
 
     Returns:
-        str: 下一节点名 —— 有关键缺口反问且未达轮数上限 → "ask_element";
+        str: 下一节点名 —— 闲聊类 → "chitchat"(直接出轻量终答);
+            有关键缺口反问且未达轮数上限 → "ask_element";
             否则(要素齐/轮数尽/软放行) → "planner".
     """
+    if state.question_category == "chitchat":
+        return "chitchat"
     if state.pending_questions and state.clarify_rounds < settings.max_clarify_rounds:
         return "ask_element"
     return "planner"
@@ -1498,7 +1557,7 @@ def route_after_planner(state: AgentState) -> str:
 
 # executor 出口: 带 tool_calls → tools; 连续失败达阈值 → hitl_degrade; 其余按剩余步骤走
 def route_after_executor(state: AgentState) -> str:
-    """执行器出口路由（含降级分支）。
+    """执行器出口路由(含降级分支）。
 
     Returns:
         str: 下一节点名 —— 连续失败达阈值且未用过降级 → "hitl_degrade";
@@ -1524,7 +1583,7 @@ def route_after_executor(state: AgentState) -> str:
 
 # merge 出口: 连续失败达阈值且未降级过 → hitl_degrade; 其余按剩余步骤 → executor/replan_check
 def route_after_merge(state: AgentState) -> str:
-    """合并出口路由（含降级分支）。
+    """合并出口路由(含降级分支）。
 
     Returns:
         str: 下一节点名 —— 连续失败达阈值且未用过降级 → "hitl_degrade";
@@ -1544,10 +1603,10 @@ def route_after_merge(state: AgentState) -> str:
 
 # 质量门控出口(优先级短路): 通过→finalize > 预算→hitl_budget > vague未问过→mid_clarify > replanner
 def route_after_replan_check(state: AgentState) -> str:
-    """质量门控出口路由（优先级短路，见 spec §5.2）。
+    """质量门控出口路由(优先级短路,见 spec §5.2）。
 
     Returns:
-        str: 下一节点名，优先级从高到低 —— 质量通过(不需重规划) →
+        str: 下一节点名,优先级从高到低 —— 质量通过(不需重规划) →
             "finalize";预算耗尽(工具调用数达 settings.max_rounds) → 已问过
             budget 则 "finalize"、未问过 → "hitl_budget";不足原因为
             vague(问题笼统)且未用过 → "mid_clarify";其余(not_found/
@@ -1602,12 +1661,12 @@ def route_after_budget(state: AgentState) -> str:
 
 
 def build_graph(checkpointer=None, store=None):
-    """构建 Plan & Execute 主图（14 节点，子项目A 最终拓扑）。
+    """构建 Plan & Execute 主图(14 节点,子项目A 最终拓扑）。
 
     Args:
-        checkpointer: LangGraph checkpointer（PostgresSaver / MemorySaver），
-            None 时不持久化（单次调用）
-        store: LangGraph BaseStore（PostgresStore / InMemoryStore），
+        checkpointer: LangGraph checkpointer(PostgresSaver / MemorySaver）,
+            None 时不持久化(单次调用）
+        store: LangGraph BaseStore(PostgresStore / InMemoryStore）,
             供记忆工具经 get_store() 访问
     """
     builder = StateGraph(AgentState)
@@ -1626,64 +1685,93 @@ def build_graph(checkpointer=None, store=None):
     builder.add_node("hitl_budget", hitl_budget_node)
     builder.add_node("replanner", replanner_node)
     builder.add_node("finalize", finalize_node)
+    builder.add_node("chitchat", chitchat_node)
 
     builder.add_edge(START, "ingest")
     builder.add_edge("ingest", "risk_gate")
     builder.add_conditional_edges(
-        "risk_gate", route_after_risk_gate,
+        "risk_gate",
+        route_after_risk_gate,
         {"element_assess": "element_assess", "finalize": "finalize"},
     )
     builder.add_conditional_edges(
-        "element_assess", route_after_assess,
-        {"ask_element": "ask_element", "planner": "planner"},
+        "element_assess",
+        route_after_assess,
+        {
+            "ask_element": "ask_element",
+            "planner": "planner",
+            "chitchat": "chitchat",
+        },
     )
     builder.add_conditional_edges(
-        "ask_element", route_after_ask,
+        "ask_element",
+        route_after_ask,
         {"element_assess": "element_assess", "planner": "planner"},
     )
     builder.add_conditional_edges(
-        "planner", route_after_planner,
+        "planner",
+        route_after_planner,
         {"executor": "executor", "finalize": "finalize"},
     )
     builder.add_conditional_edges(
-        "executor", route_after_executor,
-        {"tools": "tools", "executor": "executor",
-         "replan_check": "replan_check", "hitl_degrade": "hitl_degrade"},
+        "executor",
+        route_after_executor,
+        {
+            "tools": "tools",
+            "executor": "executor",
+            "replan_check": "replan_check",
+            "hitl_degrade": "hitl_degrade",
+        },
     )
     builder.add_edge("tools", "merge")
     builder.add_conditional_edges(
-        "merge", route_after_merge,
-        {"executor": "executor", "replan_check": "replan_check",
-         "hitl_degrade": "hitl_degrade"},
+        "merge",
+        route_after_merge,
+        {
+            "executor": "executor",
+            "replan_check": "replan_check",
+            "hitl_degrade": "hitl_degrade",
+        },
     )
     builder.add_conditional_edges(
-        "replan_check", route_after_replan_check,
-        {"mid_clarify": "mid_clarify", "replanner": "replanner",
-         "hitl_budget": "hitl_budget", "finalize": "finalize"},
+        "replan_check",
+        route_after_replan_check,
+        {
+            "mid_clarify": "mid_clarify",
+            "replanner": "replanner",
+            "hitl_budget": "hitl_budget",
+            "finalize": "finalize",
+        },
     )
     builder.add_edge("mid_clarify", "replanner")
     builder.add_conditional_edges(
-        "hitl_degrade", route_after_degrade,
-        {"replanner": "replanner", "replan_check": "replan_check",
-         "finalize": "finalize"},
+        "hitl_degrade",
+        route_after_degrade,
+        {
+            "replanner": "replanner",
+            "replan_check": "replan_check",
+            "finalize": "finalize",
+        },
     )
     builder.add_conditional_edges(
-        "hitl_budget", route_after_budget,
+        "hitl_budget",
+        route_after_budget,
         {"replanner": "replanner", "finalize": "finalize"},
     )
     builder.add_edge("replanner", "executor")
     builder.add_edge("finalize", END)
+    builder.add_edge("chitchat", END)
 
     return builder.compile(checkpointer=checkpointer, store=store)
 
 
-# 模块级懒加载单例（简单场景直接 import graph；生产由 FastAPI lifespan 注入持久化版）
+# 模块级懒加载单例(简单场景直接 import graph；生产由 FastAPI lifespan 注入持久化版）
 
 _graph = None
 
 
 def get_graph():
-    """默认图单例（无 checkpointer）。带持久化请用 FastAPI lifespan 或 build_graph()。"""
+    """默认图单例(无 checkpointer）。带持久化请用 FastAPI lifespan 或 build_graph()。"""
     global _graph
     if _graph is None:
         _graph = build_graph()
