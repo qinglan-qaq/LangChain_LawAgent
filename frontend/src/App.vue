@@ -1,14 +1,15 @@
 <script setup>
 import { onMounted } from 'vue'
 import { state, resetTurn, setSession } from './store'
-import { askAttorney, askAssistant } from './api'
-import { streamConsult } from './sse'
+import { streamConsult, streamResume } from './sse'
 import ModeSwitch from './components/ModeSwitch.vue'
 import DisclaimerToast from './components/DisclaimerToast.vue'
 import HistorySidebar from './components/HistorySidebar.vue'
 import ChatView from './components/ChatView.vue'
 import ThinkingPanel from './components/ThinkingPanel.vue'
 import ToolTimeline from './components/ToolTimeline.vue'
+import StatusBar from './components/StatusBar.vue'
+import PlanPanel from './components/PlanPanel.vue'
 import ElementPanel from './components/ElementPanel.vue'
 import CitationList from './components/CitationList.vue'
 import InterruptPanel from './components/InterruptPanel.vue'
@@ -19,6 +20,40 @@ import TypewriterText from './components/inspira/TypewriterText.vue'
 onMounted(() => {
   /* HistorySidebar 数据拉取由其自身 onMounted 负责 */
 })
+
+// SSE 事件路由(提问流与 HITL 恢复流共用):
+// reasoning 按 source 分流(status 工作状态 / *_plan 计划内容 / 其余 CoT),
+// token 进当轮 assistant 气泡, interrupt 挂 HITL 面板, answer 收终答
+function handleStreamEvent(e, assistant) {
+  if (e.event === 'reasoning') {
+    const { source, delta } = e.data
+    if (source === 'status') state.value.status = delta // 工作状态覆盖式更新
+    else if (source && source.endsWith('_plan')) state.value.planText += delta // 计划内容流
+    else {
+      state.value.reasoningActive = true
+      state.value.reasoning += delta
+    }
+  } else if (e.event === 'token') assistant.text += e.data
+  else if (e.event === 'tool_call') state.value.tools.push({ name: e.data })
+  else if (e.event === 'tool_result')
+    state.value.tools[state.value.tools.length - 1] &&
+      (state.value.tools[state.value.tools.length - 1].result = e.data)
+  else if (e.event === 'elements') state.value.elements = e.data
+  else if (e.event === 'interrupt') {
+    state.value.interrupt = e.data
+    assistant.done = true
+  } else if (e.event === 'answer') assistant.text = e.data
+  else if (e.event === 'session_id') setSession(e.data)
+  else if (e.event === 'tool_usage') state.value.toolUsage = e.data
+  else if (e.event === 'error') {
+    state.value.error = String(e.data)
+    state.value.reasoningError = true
+  } else if (e.event === 'done') {
+    assistant.done = true
+    state.value.reasoningActive = false
+    state.value.status = ''
+  }
+}
 
 async function submit({ text, docType }) {
   resetTurn()
@@ -32,49 +67,34 @@ async function submit({ text, docType }) {
     : `/api/assistant/ask/stream?case_details=${encodeURIComponent(text)}&doc_type=${docType || 'complaint'}&session_id=${encodeURIComponent(state.value.sessionId || '')}`
   const assistant = state.value.messages[state.value.messages.length - 1]
   try {
-    await streamConsult(url, (e) => {
-      if (e.event === 'reasoning') {
-        state.value.reasoningActive = true
-        state.value.reasoning += e.data.delta
-      } else if (e.event === 'token') assistant.text += e.data
-      else if (e.event === 'tool_call') state.value.tools.push({ name: e.data })
-      else if (e.event === 'tool_result')
-        state.value.tools[state.value.tools.length - 1] &&
-          (state.value.tools[state.value.tools.length - 1].result = e.data)
-      else if (e.event === 'elements') state.value.elements = e.data
-      else if (e.event === 'interrupt') {
-        state.value.interrupt = e.data
-        assistant.done = true
-      } else if (e.event === 'answer') assistant.text = e.data
-      else if (e.event === 'session_id') setSession(e.data)
-      else if (e.event === 'error') {
-        state.value.error = String(e.data)
-        state.value.reasoningError = true
-      } else if (e.event === 'done') {
-        assistant.done = true
-        state.value.reasoningActive = false
-      }
-    })
+    await streamConsult(url, (e) => handleStreamEvent(e, assistant))
   } catch (err) {
     state.value.error = String(err)
   } finally {
     state.value.busy = false
     state.value.reasoningActive = false
+    state.value.status = ''
     assistant.done = true
   }
 }
 
-// HITL resume 返回: 有新 interrupt 继续挂面板, 有 final_answer 追加为 assistant 消息
-function onResumed(r) {
-  state.value.interrupt = r.interrupt || null
-  if (r.final_answer)
-    state.value.messages.push({
-      role: 'assistant',
-      text: r.final_answer,
-      collapsed: false,
-      done: true,
-    })
-  if (r.session_id) setSession(r.session_id)
+// HITL 恢复(流式): resume 后的 planner CoT/状态/工具/interrupt/answer 全程实时下发
+async function resumeHITL(answer) {
+  state.value.interrupt = null
+  state.value.busy = true
+  state.value.error = ''
+  state.value.messages.push({ role: 'assistant', text: '', done: false })
+  const assistant = state.value.messages[state.value.messages.length - 1]
+  try {
+    await streamResume(answer, state.value.sessionId, (e) => handleStreamEvent(e, assistant))
+  } catch (err) {
+    state.value.error = String(err)
+  } finally {
+    state.value.busy = false
+    state.value.reasoningActive = false
+    state.value.status = ''
+    if (!state.value.interrupt) assistant.done = true
+  }
 }
 </script>
 
@@ -103,14 +123,16 @@ function onResumed(r) {
         >
           出错: {{ state.error }} (不做兜底, 请修正后重试)
         </p>
+        <StatusBar />
         <ThinkingPanel />
+        <PlanPanel />
         <ToolTimeline />
         <ChatView />
         <ElementPanel />
         <InterruptPanel
           v-if="state.interrupt"
           :interrupt="state.interrupt"
-          @resumed="onResumed"
+          @resume="resumeHITL"
         />
       </main>
       <footer class="border-t p-3 bg-white/80">

@@ -8,6 +8,9 @@ export const state = ref({
   reasoning: '',             // CoT 累积文本
   reasoningActive: false,
   reasoningError: false,
+  planText: '',              // planner/replanner 计划内容实时流(source=*_plan)
+  status: '',                // 当前工作状态(source=status, 覆盖式更新)
+  toolUsage: {},             // 工具使用 JSON 记录 {toolName: [结果摘要]}
   tools: [],                 // 工具时间线 {name, result}
   elements: [],              // 要素面板
   interrupt: null,           // 当前 HITL 载荷
@@ -28,6 +31,7 @@ export function markDisclaimerShown() {
 export function resetTurn() {
   Object.assign(state.value, {
     reasoning: '', reasoningActive: false, reasoningError: false,
+    planText: '', status: '', toolUsage: {},
     tools: [], elements: [], interrupt: null, error: '',
   })
 }

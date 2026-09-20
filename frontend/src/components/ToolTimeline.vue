@@ -25,5 +25,12 @@ import { state } from '../store'
         <span v-if="item.result" class="truncate text-slate-500">{{ item.result }}</span>
       </Motion>
     </ol>
+    <!-- 工具使用 JSON 记录: {toolName: [结果摘要, ...]}(后端 tool_usage 事件) -->
+    <details v-if="Object.keys(state.toolUsage).length" class="mt-1">
+      <summary class="cursor-pointer select-none text-slate-500">工具使用记录(JSON)</summary>
+      <pre class="whitespace-pre-wrap mt-1 font-mono text-slate-500">{{
+        JSON.stringify(state.toolUsage, null, 2)
+      }}</pre>
+    </details>
   </div>
 </template>
