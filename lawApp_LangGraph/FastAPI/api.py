@@ -267,16 +267,20 @@ async def disclaimer():
 
 @app.get("/sessions")
 async def list_sessions():
-    """会话列表(sessions 表, 双模式端点的 _safe_upsert_session 数据源)。"""
+    """会话列表(sessions 表)。PG 断连降级为空列表 + ERROR 日志,不再 500(规格故事 22)。"""
     from lawApp_LangGraph.db import get_pool
 
-    pool = await get_pool()
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT session_id, meta, last_active_at FROM sessions "
-            "ORDER BY last_active_at DESC LIMIT 50"
-        )
-        rows = await cur.fetchall()
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT session_id, meta, last_active_at FROM sessions "
+                "ORDER BY last_active_at DESC LIMIT 50"
+            )
+            rows = await cur.fetchall()
+    except Exception as e:
+        flow.error("会话列表降级", detail=str(e))
+        return []
     return [
         {"session_id": r[0], "meta": r[1], "last_active_at": str(r[2])} for r in rows
     ]
