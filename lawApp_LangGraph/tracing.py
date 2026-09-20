@@ -181,22 +181,54 @@ def _msg_text(m: Any) -> Any:
     return {"role": role, "content": content} if role is not None else content
 
 
+def _gen_message(result: Any) -> Any:
+    """从 ChatResult 取 AIMessage。
+
+    generations 形状随调用路径浮动(ChatResult 扁平 list / 批处理嵌套
+    list-of-lists)→ 两种都兼容, 取不出时返回 None(观测旁路不报错)。
+    """
+    gens = getattr(result, "generations", None) or []
+    first = gens[0] if gens else None
+    if isinstance(first, (list, tuple)):
+        first = first[0] if first else None
+    return getattr(first, "message", None)
+
+
+def _usage_from(msg: Any) -> Optional[dict]:
+    """token 用量三处兜底: usage_metadata / response_metadata.token_usage /
+    generation_info.token_usage(DeepSeek 流式聚合块的放置位置随版本浮动)。"""
+    if msg is None:
+        return None
+    u = getattr(msg, "usage_metadata", None)
+    if isinstance(u, dict) and u.get("input_tokens") is not None:
+        return {"prompt": u.get("input_tokens"), "completion": u.get("output_tokens")}
+    for holder in (getattr(msg, "response_metadata", None),
+                   getattr(msg, "generation_info", None)):
+        if isinstance(holder, dict):
+            tu = holder.get("token_usage")
+            if isinstance(tu, dict):
+                return {
+                    "prompt": tu.get("prompt_tokens"),
+                    "completion": tu.get("completion_tokens"),
+                }
+    return None
+
+
 def _emit_llm_span(model: str, messages: Any, output_msg: Any,
-                   t0: float, status: str) -> None:
+                   t0: float, status: str, content: Any = None) -> None:
     span = Span(
         span_type="llm", name=f"llm:{model}",
         input=[_msg_text(m) for m in (messages or [])],
         latency_ms=int((time.perf_counter() - t0) * 1000),
         started_at=time.time(), status=status,
     )
-    if output_msg is not None:
-        span.output = getattr(output_msg, "content", output_msg)
-        usage = getattr(output_msg, "usage_metadata", None)
-        if usage:
-            span.token_usage = {
-                "prompt": usage.get("input_tokens"),
-                "completion": usage.get("output_tokens"),
-            }
+    if output_msg is not None or content is not None:
+        # output_msg 可能是 AIMessage / AIMessageChunk / ChatGenerationChunk(包装)
+        msg = getattr(output_msg, "message", output_msg)
+        if content is None and msg is not None:
+            content = getattr(msg, "content", None)
+        span.output = content if content else None
+        span.token_usage = _usage_from(msg)
     _emit(span)
 
 
@@ -237,27 +269,38 @@ def _instrument_llm_cls():
             except Exception:
                 _emit_llm_span(self.model_name, messages, None, t0, "error")
                 raise
-            msg = (
-                result.generations[0][0].message
-                if getattr(result, "generations", None)
-                else None
-            )
-            _emit_llm_span(self.model_name, messages, msg, t0, "ok")
+            try:
+                _emit_llm_span(self.model_name, messages,
+                               _gen_message(result), t0, "ok")
+            except Exception:
+                # 观测旁路: span 记录失败绝不影响 LLM 结果返回
+                logger.error("llm span 记录失败(观测旁路)", exc_info=True)
             return result
 
         async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
             t0 = time.perf_counter()
             last = None
+            parts: list[str] = []
             try:
                 async for chunk in super()._astream(
                     messages, stop=stop, run_manager=run_manager, **kwargs
                 ):
                     last = chunk
+                    # chunk 可能是 AIMessageChunk 或 ChatGenerationChunk(包装)
+                    m = getattr(chunk, "message", chunk)
+                    c = getattr(m, "content", None)
+                    if isinstance(c, str) and c:
+                        parts.append(c)
                     yield chunk
             except Exception:
                 _emit_llm_span(self.model_name, messages, last, t0, "error")
                 raise
-            _emit_llm_span(self.model_name, messages, last, t0, "ok")
+            try:
+                # 流式全文聚合(末块 content 常为空, usage 在末块 metadata)
+                _emit_llm_span(self.model_name, messages, last, t0, "ok",
+                               content="".join(parts) or None)
+            except Exception:
+                logger.error("llm span 记录失败(观测旁路)", exc_info=True)
 
     return InstrumentedChatOpenAI
 
