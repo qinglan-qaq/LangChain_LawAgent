@@ -266,3 +266,88 @@ InterruptPanel @resumed → App.onResumed(r)
 5. `InterruptPanel.vue` TYPE_UI ↔ `utils.py:51` normalize_resume 六类字符串对齐
 6. `sse.js` 帧解析 ↔ `utils.py:159` sse_event 格式契约
 7. `scripts/ingest_cases_pgvector.py` — 切块/幂等/批大小 (执行前复核)
+
+---
+
+## 8. 人工检索流程梳理 — mermaid 流程图 (2026-09-20, 仅梳理不动代码)
+
+> 范围: 案例检索 + 检索反馈 HITL(mid_clarify「先问人后搜网」)闭环。
+> 本节只画清现状 + 列优化点, **不改任何代码**; 优化项待拍板后另行立项。
+
+### 8.1 检索闭环主链路 (图级)
+
+```mermaid
+flowchart TD
+    P["planner<br/>生成工具计划"] --> EX["executor<br/>按步取工具"]
+    EX -->|"AI 带 tool_calls"| TL["tools (ToolNode)<br/>执行 8 本地工具 + MCP"]
+    EX -->|"无 tool_calls 且还有步骤"| EX
+    EX -->|"步骤走完"| RC["replan_check<br/>质量门控 (LLM + 规则兜底)"]
+    TL --> MG["merge<br/>合并工具结果入 PromptsRecord"]
+    MG -->|"error_streak 达阈值 未降级过"| HD["hitl_degrade<br/>HITL④ degrade_confirm"]
+    MG -->|"还有步骤"| EX
+    MG -->|"步骤走完"| RC
+    RC -->|"质量通过 (replan_needed=False)"| FZ["finalize<br/>流式生成终稿"]
+    RC -->|"预算耗尽 未问过"| HB["hitl_budget<br/>HITL⑥ budget_confirm"]
+    RC -->|"insufficient_reason=vague<br/>且未用过 mid_clarify"| MC["mid_clarify<br/>HITL⑤ 先问人后搜网"]
+    RC -->|"not_found / error /<br/>已用过 mid_clarify"| RP["replanner<br/>重规划 (通常补 get_google_search)"]
+    MC -->|"用户补充: query 织入<br/>[检索反馈追问]+[用户澄清]"| RP
+    MC -->|"用户未补充 / LLM 追问生成失败<br/>(静默放行)"| RP
+    HB -->|"选择补充预算"| RP
+    HB -->|"选择收尾 (默认)"| FZ
+    HD -->|"abort → 中止文案"| FZ
+    HD -->|"retry → replan_needed 已置"| RP
+    HD -->|"skip (默认) → 回门控"| RC
+    RP --> EX
+```
+
+文字锚点 (行号以 2026-09-20 为准, 会漂移):
+- 路由函数: `route_after_executor` / `route_after_merge` / `route_after_replan_check`
+  (`LangGraph_lawApp.py` ~1480-1560); 门控优先级 = 质量通过 > 预算 > vague问人 > replanner。
+- `mid_clarify_node` (~1090): `MidClarifySchema` json_mode 生成追问 → `interrupt(mid_clarify)`;
+  未补充 → `{"mid_clarify_used": True}` 静默放行; 补充 → query 织入 + `case_elements.update(by="mid_clarify")`。
+- `_fallback_replan_check` (~1057): replan_check 的 LLM 失败时**规则兜底** — 行为决策级兜底,
+  非"不做兜底"约束针对的错误掩盖, 但梳理时值得复核两者边界。
+
+### 8.2 executor 内 CRAG 工具链 (细粒度)
+
+```mermaid
+flowchart LR
+    subgraph 执行期工具 ["planner/replanner 可编排的工具 (ALL_TOOLS)"]
+        RT["retrieve_legal_knowledge<br/>混合检索(向量+BM25)+CrossEncoder 重排<br/>后端: pgvector 默认 / Pinecone 可选"]
+        EV["evaluate_case_relevance<br/>三档: correct≥0.5 / ambiguous≥0.2 / incorrect"]
+        AN["analyze_legal_issue<br/>LLM 分析生成 (flash, 流式)"]
+        LAW["fetch_laws<br/>法条检索 (PG)"]
+        GS["get_google_search<br/>SerpAPI 联网"]
+        MEM["search_memory / save_to_memory<br/>跨会话记忆 (store)"]
+        PDF["markdown_to_pdf<br/>文书导出"]
+    end
+    RT --> EV
+    EV -->|"verdict=充足<br/>(correct 或可用数 ≥ min_quality_docs)"| AN
+    EV -->|"verdict=不足,建议网络搜索补充<br/>→ 留给 replan_check 门控处置"| GATE["(回到图级 replan_check)"]
+    LAW & GS & MEM -.平行可编排, 无质量门控.-> AN
+```
+
+关键事实 (代码锚点):
+- `retrieve_legal_knowledge` (`rag_tools.py:64`): **后端异常时优雅降级** 返回
+  `status=error` (不中断流程, 由 Agent 自决是否联网) — 工具级设计意图, 与全局"不做兜底"
+  约束不冲突但需审查者知晓。
+- `evaluate_case_relevance` (`rag_tools.py:160`): 阈值来自 settings (`correct_threshold` /
+  `incorrect_threshold` / `min_quality_docs`), **只评估案例库**, 不评估法条/联网结果。
+- `analyze_legal_issue` (`rag_tools.py:275`): 上下文 = PromptsRecord 的 法条+案例+联网 三源拼接。
+- 用户澄清织入后的 query 是**后续 planner/executor/检索的唯一基准**
+  (`LangGraph_lawApp.py` ~527 注释)。
+
+### 8.3 现状问题与优化点清单 (待拍板, 优先级序)
+
+| # | 优先级 | 现状 | 问题 | 优化方向 | 证据 |
+|---|---|---|---|---|---|
+| O1 | 高 | mid_clarify 仅在 `vague` 触发; `not_found` 直接联网 | 案例库覆盖不到时**不问人**, 联网质量不可控且用户语境丢失 | not_found 且首轮也可考虑问人(如管辖/地区/时间), 或至少在追问面板提示"案例库未覆盖, 将联网" | route_after_replan_check ~1555 |
+| O2 | 高 | mid_clarify 的 top_docs 检索为空时 = "(检索为空)" | 空上下文喂给追问 LLM, 追问只能泛泛而谈 | not_found 场景追问应改基于 query 本身的要素缺口(复用 case_elements), 而非"检索到的案例集中在…" | mid_clarify_node ~1107/1128 |
+| O3 | 中 | 联网结果 `get_google_search` **无质量评估环节** | CRAG 三档评估只覆盖案例库; 网页 snippet 直接入分析上下文 | 增加联网结果轻量评估(时效/来源)或至少长度/条数过滤 | rag_tools.py 只评 rag_documents |
+| O4 | 中 | 评估阈值全局固定 (0.5/0.2) | hybrid_score 绝对阈值跨 query 稳定性存疑; 不同案由分布不同 | 阈值按 namespace/案由分层, 或改相对分位; 先做离线统计再定 | settings + evaluate_case_relevance |
+| O5 | 中 | mid_clarify `context_hint` 截 200 字 | 前端 HITL 面板信息量不足, 用户难判断"检索集中在哪" | hint 提为案由+年份分布摘要(比塞原文更有用) | mid_clarify_node ~1128 |
+| O6 | 低 | replan_check LLM 失败走规则兜底 | 与"不做兜底"约束的边界需明确声明 | 文档化即可(本节已声明); 若要严格对齐约束, 需用户拍板是否改为直接报错 | _fallback_replan_check ~1057 |
+| O7 | 低 | 检索后端异常返回 status=error 继续走 | Agent 拿到 error 文案后自行决定下一步, 可能多绕一轮 | error 结果附"建议动作"(直接联网)降低规划不确定性 | rag_tools.py:107-117 |
+| O8 | 低 | 法条 fetch_laws 无质量门控 | 法条空结果不影响 replan_check 判定 | 法条为空的场景在门控 insufficient_reason 中显式区分 | db_tools.py:207 |
+
+> 以上均为**梳理结论**, 未动任何代码。要实施哪几项, 圈选后走 brainstorming → spec → plan 流程。
