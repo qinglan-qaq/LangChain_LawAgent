@@ -93,6 +93,7 @@ from lawApp_LangGraph.prompts import (
     SEMANTIC_CONFIRM_PROMPT,
 )
 from lawApp_LangGraph.tools.rag_tools import analyze_legal_issue  # noqa — 已有,确认不缺
+from lawApp_LangGraph.tracing import get_instrumented_llm_cls, traced
 
 #  LLM 懒加载单例 — 导入期不触碰 API Key; Lock 双检防多线程/多 worker 重复初始化
 
@@ -108,9 +109,9 @@ def get_planner_llm():
     if _llm_planner is None:
         with _llm_planner_lock:
             if _llm_planner is None:
-                from langchain_openai import ChatOpenAI
-
-                _llm_planner = ChatOpenAI(
+                # 观测包装(决策 6): 拦截 _agenerate/_astream 记 llm span;
+                # 子类 → _structured 的 isinstance(ChatOpenAI) 分支保持生效
+                _llm_planner = get_instrumented_llm_cls()(
                     model=settings.deepseek_pro_model,
                     temperature=0.4,
                     max_tokens=4096,
@@ -126,9 +127,7 @@ def get_executor_llm():
     if _llm_executor is None:
         with _llm_executor_lock:
             if _llm_executor is None:
-                from langchain_openai import ChatOpenAI
-
-                _llm_executor = ChatOpenAI(
+                _llm_executor = get_instrumented_llm_cls()(
                     model=settings.deepseek_flash_model,
                     temperature=0.25,
                     max_tokens=2048,
@@ -1803,21 +1802,23 @@ def build_graph(checkpointer=None, store=None):
     """
     builder = StateGraph(AgentState)
 
-    builder.add_node("ingest", ingest_node)
-    builder.add_node("risk_gate", risk_gate_node)
-    builder.add_node("element_assess", element_assess_node)
-    builder.add_node("ask_element", ask_element_node)
-    builder.add_node("planner", planner_node)
-    builder.add_node("executor", executor_node)
-    builder.add_node("tools", _build_tools_node())
-    builder.add_node("merge", merge_node)
-    builder.add_node("replan_check", replan_check_node)
-    builder.add_node("mid_clarify", mid_clarify_node)
-    builder.add_node("hitl_degrade", hitl_degrade_node)
-    builder.add_node("hitl_budget", hitl_budget_node)
-    builder.add_node("replanner", replanner_node)
-    builder.add_node("finalize", finalize_node)
-    builder.add_node("chitchat", chitchat_node)
+    #  节点观测(决策 3): traced("node") 包装注册 — 记名称/时延/前后成果/结果
+    #  (显式 name = 注册名: 函数名带 _node 后缀会与 values 回填的 pending_nodes 对不上)
+    builder.add_node("ingest", traced("node", "ingest")(ingest_node))
+    builder.add_node("risk_gate", traced("node", "risk_gate")(risk_gate_node))
+    builder.add_node("element_assess", traced("node", "element_assess")(element_assess_node))
+    builder.add_node("ask_element", traced("node", "ask_element")(ask_element_node))
+    builder.add_node("planner", traced("node", "planner")(planner_node))
+    builder.add_node("executor", traced("node", "executor")(executor_node))
+    builder.add_node("tools", traced("node", "tools")(_build_tools_node()))
+    builder.add_node("merge", traced("node", "merge")(merge_node))
+    builder.add_node("replan_check", traced("node", "replan_check")(replan_check_node))
+    builder.add_node("mid_clarify", traced("node", "mid_clarify")(mid_clarify_node))
+    builder.add_node("hitl_degrade", traced("node", "hitl_degrade")(hitl_degrade_node))
+    builder.add_node("hitl_budget", traced("node", "hitl_budget")(hitl_budget_node))
+    builder.add_node("replanner", traced("node", "replanner")(replanner_node))
+    builder.add_node("finalize", traced("node", "finalize")(finalize_node))
+    builder.add_node("chitchat", traced("node", "chitchat")(chitchat_node))
 
     builder.add_edge(START, "ingest")
     builder.add_edge("ingest", "risk_gate")

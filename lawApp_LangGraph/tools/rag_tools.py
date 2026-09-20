@@ -26,6 +26,7 @@ from lawApp_LangGraph.FastAPI.logging import (
 )
 from lawApp_LangGraph.prompts import get_analysis_prompt
 from lawApp_LangGraph.config import settings
+from lawApp_LangGraph.tracing import traced
 from lawApp_LangGraph.state import (
     LawsResult,
     WebSearchResult,
@@ -60,6 +61,7 @@ def _get_llm():
 
 # Tool 1: 案例库混合检索(向量+BM25) + CrossEncoder 重排; 后端异常降级返回 status=error 不中断流程
 @tool
+@traced("tool")
 async def retrieve_legal_knowledge(
     query: str,
     top_k: int = 20,
@@ -158,6 +160,7 @@ def _to_simple_doc(doc: Any) -> simpleRetrievedDocument:
 
 
 @tool
+@traced("tool")
 def evaluate_case_relevance(
     documents: list[dict[str, Any]],
 ) -> dict:
@@ -275,6 +278,7 @@ def _build_analysis_context(pr: PromptsRecord) -> str:
 
 # 三源上下文喂 flash LLM 流式生成终稿分析, token 经 astream(messages) 透出
 @tool
+@traced("tool")
 async def analyze_legal_issue(
     query: str,
     prompts_record: Any = None,

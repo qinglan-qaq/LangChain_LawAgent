@@ -119,3 +119,37 @@ def test_attach_state_backfills_node_spans():
     # 已回填的不覆盖
     attach_state(["planner"], {"plan": ["s2"]})
     assert run.spans[0].state == {"plan": ["s1"]}
+
+
+#  Task 6 — 三层接线断言
+
+def test_node_registration_wrapped_with_traced():
+    from lawApp_LangGraph.LangGraph_lawApp import build_graph
+    from langgraph.checkpoint.memory import MemorySaver
+
+    graph = build_graph(checkpointer=MemorySaver())
+    nodes = set(graph.get_graph().nodes)
+    expected = {"ingest", "risk_gate", "element_assess", "ask_element", "planner",
+                "executor", "tools", "merge", "replan_check", "mid_clarify",
+                "hitl_degrade", "hitl_budget", "replanner", "finalize", "chitchat"}
+    assert expected <= nodes
+
+
+def test_tool_traced_keeps_signature():
+    from lawApp_LangGraph.tools import ALL_TOOLS
+    names = {t.name for t in ALL_TOOLS()}
+    for required in ("retrieve_legal_knowledge", "evaluate_case_relevance",
+                     "analyze_legal_issue", "fetch_laws", "search_memory",
+                     "save_to_memory", "get_google_search", "markdown_to_pdf"):
+        assert required in names
+
+
+def test_llm_factory_returns_instrumented_chatopenai():
+    from langchain_openai import ChatOpenAI
+    from lawApp_LangGraph.LangGraph_lawApp import get_executor_llm, get_planner_llm
+    from lawApp_LangGraph import tracing
+
+    for llm in (get_planner_llm(), get_executor_llm()):
+        assert isinstance(llm, ChatOpenAI)  # 子类 → _structured json_mode 分支不受影响
+        assert type(llm).__name__ == "InstrumentedChatOpenAI"
+        assert isinstance(llm, tracing.get_instrumented_llm_cls())

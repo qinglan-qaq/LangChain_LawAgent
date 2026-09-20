@@ -16,9 +16,11 @@ from langchain_core.tools import tool
 
 from lawApp_LangGraph.FastAPI.logging import tool as tool_log
 from lawApp_LangGraph.state import WebSearchResult
+from lawApp_LangGraph.tracing import traced
 
 # get_google_search — SerpAPI 谷歌搜索, 返回标题/链接/摘要结构化结果(最多 8 条)
 @tool
+@traced("tool")
 async def get_google_search(query: str) -> dict:
     """使用谷歌搜索API在线搜索法律相关信息.返回结构化结果,每项包含标题、链接、摘要.
 
@@ -113,6 +115,7 @@ def _render_pdf(styled_html: str, file_path: str) -> None:
 
 # markdown_to_pdf — Markdown 套 A4 样式转 PDF, 阻塞渲染放线程池执行
 @tool
+@traced("tool")
 async def markdown_to_pdf(markdown_text: str, filename: str = "") -> dict:
     """MarkDown文件转为pdf,当用户指定pdf文件输出时使用.
 
