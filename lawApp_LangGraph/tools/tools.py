@@ -8,6 +8,7 @@ Agent 工具集 — 网络搜索与 PDF 生成
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime
 
@@ -127,15 +128,44 @@ async def markdown_to_pdf(markdown_text: str, filename: str = "") -> dict:
     dict,含 pdf_path 和 is_pdf_output
     """
     t0 = time.time()
-    tool_log.info(
-        "→ 调用工具: markdown_to_pdf",
-        detail=f"filename={filename or 'auto'} | content_len={len(markdown_text)}",
-    )
-
+    # H9: 文件名清洗 —— filename 是 LLM 可控参数, basename 防路径穿越
+    # (../../evil.pdf / E:\x\evil.pdf 任意写), 非白名单字符(中英文/数字/
+    # 点/横杠/下划线)统一替换为下划线
+    filename = (filename or "").strip()
     if not filename:
         filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    filename = re.sub(
+        r"[^\w\-.\u4e00-\u9fff]", "_", os.path.basename(filename)
+    )
+    if not filename or filename.startswith("."):
+        tool_log.error(
+            "← 工具异常: markdown_to_pdf",
+            detail=f"文件名非法: {filename!r}",
+        )
+        return {
+            "status": "error",
+            "message": "文件名非法",
+            "pdf_path": None,
+            "is_pdf_output": False,
+        }
 
-    html_content = markdown_to_html(markdown_text)
+    try:
+        tool_log.info(
+            "→ 调用工具: markdown_to_pdf",
+            detail=f"filename={filename} | content_len={len(markdown_text)}",
+        )
+        html_content = markdown_to_html(markdown_text)
+    except Exception as e:
+        tool_log.error(
+            "← 工具异常: markdown_to_pdf",
+            detail=f"输入非法: {str(e)[:120]}",
+        )
+        return {
+            "status": "error",
+            "message": f"PDF 生成失败: {str(e)[:200]}",
+            "pdf_path": None,
+            "is_pdf_output": False,
+        }
 
     styled_html = f"""
     <!DOCTYPE html>

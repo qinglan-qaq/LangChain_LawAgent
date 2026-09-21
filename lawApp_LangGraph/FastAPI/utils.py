@@ -70,6 +70,41 @@ def extract_interrupt(snapshot) -> Optional[dict]:
 _YES = ("y", "yes", "是", "确认", "好", "继续", "生成", "确认生成", "没问题")
 _NO = ("n", "no", "否", "跳过", "不要", "中止", "算了", "先不要")
 
+# HITL 短指令词集(H3 fast-path) — 仅当用户回复 strip 后与之**完全相等**
+# 才直接命中; 子串匹配会把「婚姻关系已于2020年结束」这类正常补充误判成
+# 收尾指令。值域: finish(收尾/结束)/ continue(继续)/ retry(重试)/
+# abort(终止)/ skip(跳过)。
+_COMMAND_WORDS = {
+    # 英文(小写归一)
+    "finish": "finish",
+    "stop": "finish",
+    "continue": "continue",
+    "retry": "retry",
+    "abort": "abort",
+    "skip": "skip",
+    # 中文
+    "收尾": "finish",
+    "结束": "finish",
+    "继续": "continue",
+    "重试": "retry",
+    "终止": "abort",
+    "跳过": "skip",
+}
+
+
+def is_command_word(text: str) -> Optional[str]:
+    """判断用户回复是否为纯短指令词(完全相等, 大小写不敏感).
+
+    Args:
+        text: 用户原始回复文本.
+
+    Returns:
+        命中时返回规范指令("finish"/"continue"/"retry"/"abort"/"skip"),
+        否则 None。
+    """
+    w = (text or "").strip().lower()
+    return _COMMAND_WORDS.get(w)
+
 
 async def normalize_resume(
     interrupt_type: str, answer: str, request_text: str = ""
@@ -86,11 +121,14 @@ async def normalize_resume(
     Returns:
         risk_confirm / pdf_confirm: bool。显式确认词/拒绝词直接映射;
             其他自由文本交 semantic_confirm(LLM 语义判断);
-        degrade_confirm: "retry" / "skip" / "abort" 之一,默认 skip;
-        budget_confirm: 空回复或含收尾指令(收尾/结束/finish)返回
-            "finish",否则补充原文透传;
+        degrade_confirm: "retry" / "skip" / "abort" 之一;纯指令词直接命中,
+            其余自由文本走 semantic_confirm(同意继续=retry,否则=abort);
+        budget_confirm: 空回复或纯收尾指令词返回 "finish",
+            其余自由文本走 semantic_confirm(同意继续=原文透传,否则=finish);
         clarify / mid_clarify: 原文透传(空=跳过)。
     """
+    from lawApp_LangGraph.LangGraph_lawApp import semantic_confirm
+
     ans = (answer or "").strip()
     lowered = ans.lower()
 
@@ -100,21 +138,32 @@ async def normalize_resume(
         if lowered in _NO:
             return False
         # 自由文本 → LLM 语义判断(用户决策: 不按关键词硬匹配)
-        from lawApp_LangGraph.LangGraph_lawApp import semantic_confirm
-
         return await semantic_confirm(request_text or "确认请求", ans)
 
     if interrupt_type == "degrade_confirm":
-        if "重试" in ans or "retry" in lowered:
+        cmd = is_command_word(ans)
+        if cmd == "retry":
             return "retry"
-        if "终止" in ans or "结束" in ans or "abort" in lowered:
+        if cmd == "abort":
             return "abort"
-        return "skip"  # 默认跳过
+        if cmd == "skip":
+            return "skip"
+        # 自由文本 → LLM 语义判断: 同意继续(重试)=retry, 否则=abort
+        proceed = await semantic_confirm(request_text or "服务调用失败确认", ans)
+        return "retry" if proceed else "abort"
 
     if interrupt_type == "budget_confirm":
-        if not ans or any(w in lowered for w in ("收尾", "结束", "finish")):
+        # 空回复 → 默认收尾(既有语义保留)
+        if not ans:
             return "finish"
-        return ans  # 补充原文
+        cmd = is_command_word(ans)
+        if cmd in ("finish", "abort"):
+            return "finish"
+        if cmd == "continue":
+            return ans  # 继续补充
+        # 自由文本 → LLM 语义判断: 同意继续(补充)=原文透传, 否则=finish
+        proceed = await semantic_confirm(request_text or "补充信息确认", ans)
+        return ans if proceed else "finish"
 
     # clarify / mid_clarify: 原文透传
     return ans

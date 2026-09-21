@@ -29,14 +29,22 @@ def _get_service():
                 from lawApp_LangGraph.RAG_service.RAG_program import RAG_service
 
                 logger.info("初始化 Pinecone RAG_service (冷启动)")
-                _service = RAG_service(
-                    index_name=settings.pinecone_index_name,
-                    api_key=settings.pinecone_api_key,  # type: ignore[arg-type]
-                    cloud=settings.pinecone_cloud,
-                    region=settings.pinecone_region,
-                )
-                # 检索路径只附着到已存在的索引，不创建
-                _service.index = _service.pc.Index(_service.index_name)
+                # H6: 局部变量构造 —— 全局单例仅在构造+index 附着全部成功后才赋值;
+                # 半初始化失败会污染 _service, 之后每次 RuntimeError("索引未初始化")
+                # 直到重启
+                try:
+                    svc = RAG_service(
+                        index_name=settings.pinecone_index_name,
+                        api_key=settings.pinecone_api_key,  # type: ignore[arg-type]
+                        cloud=settings.pinecone_cloud,
+                        region=settings.pinecone_region,
+                    )
+                    # 检索路径只附着到已存在的索引，不创建
+                    svc.index = svc.pc.Index(svc.index_name)
+                except Exception:
+                    logger.warning("Pinecone RAG_service 初始化失败", exc_info=True)
+                    raise
+                _service = svc
     return _service
 
 

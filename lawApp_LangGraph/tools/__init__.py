@@ -33,7 +33,7 @@ def ALL_TOOLS() -> list:
     """完整工具列表 = 本地工具 + MCP 工具。
 
     做成函数而非静态列表: MCP 挂载发生在 runtime 装配期,
-    图/ToolNode/TOOL_BY_NAME 在 build_graph 时读取此刻的快照。
+    图/ToolNode/_tool_by_name 在运行期每次现读注册表。
     """
     return LOCAL_TOOLS + MCP_TOOLS
 

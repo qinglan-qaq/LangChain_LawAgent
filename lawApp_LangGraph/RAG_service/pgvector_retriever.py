@@ -35,6 +35,7 @@ class PgvectorRetriever(BaseRetriever):
                 SELECT id, year, case_number, case_cause, chunk_text,
                        1 - (embedding <=> %s::vector) AS hybrid_score
                 FROM law_cases
+                WHERE embedding IS NOT NULL
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
                 """,
@@ -42,17 +43,21 @@ class PgvectorRetriever(BaseRetriever):
             )
             rows = await cur.fetchall()
 
-        results = [
-            {
-                "id": r[0],
-                "year": r[1] or "",
-                "case_number": r[2] or "",
-                "case_cause": r[3] or "",
-                "chunk_text": (r[4] or "")[:500],
-                "hybrid_score": round(float(r[5]), 4),
-            }
-            for r in rows
-        ]
+        results = []
+        for r in rows:
+            # H7 双保险: NULL 行不进 float() 崩整次检索
+            if r[5] is None:
+                continue
+            results.append(
+                {
+                    "id": r[0],
+                    "year": r[1] or "",
+                    "case_number": r[2] or "",
+                    "case_cause": r[3] or "",
+                    "chunk_text": (r[4] or "")[:500],
+                    "hybrid_score": round(float(r[5]), 4),
+                }
+            )
 
         if not results:
             return []

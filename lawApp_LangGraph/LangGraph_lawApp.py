@@ -71,6 +71,7 @@ from lawApp_LangGraph.state import (
     default_case_elements,
 )
 from lawApp_LangGraph.tools import ALL_TOOLS
+from lawApp_LangGraph.FastAPI.utils import is_command_word
 
 load_dotenv()
 
@@ -153,7 +154,19 @@ def _structured(schema):
     return llm.with_structured_output(schema)
 
 
-TOOL_BY_NAME: Dict[str, Any] = {t.name: t for t in ALL_TOOLS()}
+def _tool_by_name(name: str) -> Optional[Any]:
+    """运行期按名查工具(每次现读 ALL_TOOLS 注册表)。
+
+    取代导入期快照 TOOL_BY_NAME: MCP 工具在 runtime.setup_runtime() 里
+    经 register_mcp_tools 注入, 晚于本模块导入;快照会导致 planner 规划出的
+    MCP 工具名在 _normalize_plan 被剥成 None、executor 裸下标 KeyError(H1)。
+    """
+    if not name:
+        return None
+    for t in ALL_TOOLS():
+        if t.name == name:
+            return t
+    return None
 
 # 工具返回 dict 中与 AgentState 同名的 key 将被 merge 节点合并
 _STATE_KEYS = {
@@ -248,8 +261,9 @@ def _schema_models():
 ) = _schema_models()
 
 
-# CoT 总线: thread_id → Queue; SSE 端点开道, planner/replanner 推 reasoning 增量
-_REASONING_BUS: dict[str, "asyncio.Queue"] = {}
+# CoT 总线: thread_id → 订阅队列集合; SSE 端点开道, planner/replanner 推 reasoning 增量
+# (H4: 值改 set[Queue] fan-out —— 同会话多订阅互不覆盖, 断开只摘自己的队列)
+_REASONING_BUS: dict[str, "set[asyncio.Queue]"] = {}
 
 
 def open_reasoning_channel(thread_id: str) -> "asyncio.Queue":
@@ -259,18 +273,46 @@ def open_reasoning_channel(thread_id: str) -> "asyncio.Queue":
         thread_id: 会话 ID(与 graph_config 的 configurable.thread_id 一致)。
 
     Returns:
-        新建的 Queue; planner/replanner 推 {"source","delta"}, 结束推 None 哨兵。
+        本次调用新建的独立 Queue(已加入订阅集); planner/replanner 经
+        _bus_put 广播 {"source","delta"}, 结束由 SSE 端推 None 哨兵。
     """
     import asyncio
 
     q: asyncio.Queue = asyncio.Queue()
-    _REASONING_BUS[thread_id] = q
+    _REASONING_BUS.setdefault(thread_id, set()).add(q)
     return q
 
 
-def close_reasoning_channel(thread_id: str) -> None:
-    """关闭并移除 reasoning 通道(幂等)。"""
-    _REASONING_BUS.pop(thread_id, None)
+def close_reasoning_channel(thread_id: str, q: "asyncio.Queue" = None) -> None:
+    """关闭并移除 reasoning 通道(幂等)。
+
+    q 给定时只摘该订阅队列(流断开不影响同会话其他订阅);
+    不给 q 时整个会话通道移除(兼容旧调用)。
+    """
+    if q is None:
+        _REASONING_BUS.pop(thread_id, None)
+        return
+    subs = _REASONING_BUS.get(thread_id)
+    if subs is not None:
+        subs.discard(q)
+        if not subs:
+            _REASONING_BUS.pop(thread_id, None)
+
+
+def _bus_put(thread_id: str, item) -> None:
+    """向会话全部 reasoning 队列广播一条事件(H4 fan-out)。
+
+    put_nowait 非阻塞(队列无界不会满); 已关闭/死队列移除且吞异常,
+    观测旁路失败不打穿节点执行。
+    """
+    subs = _REASONING_BUS.get(thread_id)
+    if not subs:
+        return
+    for q in list(subs):
+        try:
+            q.put_nowait(item)
+        except Exception:
+            subs.discard(q)
 
 
 #  工作状态上报 — 复用 reasoning 总线, source="status" 区分; SSE 端 pump 原样转发
@@ -292,9 +334,7 @@ async def _publish_status(config, text: str) -> None:
     节点入口/工具调用前调用;通道未开(非流式调用/测试)时静默跳过。
     """
     cfg = (config or {}).get("configurable") or {}
-    q = _REASONING_BUS.get(cfg.get("thread_id", ""))
-    if q is not None:
-        await q.put({"source": "status", "delta": text})
+    _bus_put(cfg.get("thread_id", ""), {"source": "status", "delta": text})
 
 
 async def _publish_node_status(config, node: str) -> None:
@@ -686,7 +726,7 @@ def _normalize_plan(schema) -> list[PlanStep]:
     steps: list[PlanStep] = []
     for p in schema.plan:
         tn = p.tool_name
-        if tn and tn not in TOOL_BY_NAME:
+        if tn and _tool_by_name(tn) is None:
             tn = None
         steps.append(
             PlanStep(
@@ -746,7 +786,6 @@ async def _stream_plan(
         return verdict, list(verdict.reasoning or [])
 
     thread_id = (config.get("configurable") or {}).get("thread_id", "")
-    q = _REASONING_BUS.get(thread_id)
     reasoning: list[str] = []
     content: list[str] = []
     client = openai.AsyncOpenAI(
@@ -765,13 +804,12 @@ async def _stream_plan(
         rc = getattr(delta, "reasoning_content", None) or ""
         if rc:
             reasoning.append(rc)
-            if q is not None:
-                await q.put({"source": source, "delta": rc})
+            # CoT 增量经总线广播(H4: 同会话全部订阅队列 fan-out)
+            _bus_put(thread_id, {"source": source, "delta": rc})
         if delta.content:
             content.append(delta.content)
             # 计划内容实时流(先思考后计划): source 加 _plan 后缀区分, 前端路由到计划面板
-            if q is not None:
-                await q.put({"source": f"{source}_plan", "delta": delta.content})
+            _bus_put(thread_id, {"source": f"{source}_plan", "delta": delta.content})
     return _parse_plan_json("".join(content)), reasoning
 
 
@@ -941,7 +979,27 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             }
         # 确认 → 继续 LLM 参数提取
 
-    tool = TOOL_BY_NAME[step.tool_name]
+    tool = _tool_by_name(step.tool_name)
+    if tool is None:
+        # 旧 checkpoint 引用已消失的工具(如 MCP server 下线)→ 步骤记 failed,
+        # 不裸抛 KeyError 打穿整次执行(H1;status 对齐既有失败分支的 Literal)
+        errored = [
+            s.model_copy(update={"status": "failed", "retry_count": s.retry_count + 1})
+            if i == idx
+            else s
+            for i, s in enumerate(plan)
+        ]
+        debug.warning(
+            "← Executor 工具不可用,标记步骤 failed",
+            detail=f"tool={step.tool_name} | step={idx + 1}",
+        )
+        return {
+            "plan": errored,
+            "current_step_index": idx + 1,
+            "error": f"步骤{step.step_id}({step.tool_name}) 工具 {step.tool_name} 不可用",
+            "error_streak": state.error_streak + 1,
+            "messages": [AIMessage(content="")],
+        }
     summaries = _step_summaries(state)
     prompt = EXECUTOR_PROMPT.format(
         step_description=step.description,
@@ -1378,7 +1436,7 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
         PlanStep(
             step_id=len(state.plan) + i + 1,
             description=p.description,
-            tool_name=(p.tool_name if p.tool_name in TOOL_BY_NAME else None),
+            tool_name=(p.tool_name if _tool_by_name(p.tool_name) is not None else None),
         )
         for i, p in enumerate(result.plan)
     ][:3]
@@ -1521,9 +1579,12 @@ def hitl_degrade_node(state: AgentState) -> dict:
             "message": DEGRADE_CONFIRM_MSG.format(failed_tool=failed_tool),
         }
     )
-    choice = str(choice).strip().lower() if choice else "skip"
+    choice = str(choice).strip() if choice else ""
 
-    if "retry" in choice or "重试" in choice:
+    # H3: 子串匹配降级为纯指令词 fast-path(与 utils.is_command_word 共用),
+    # 自由文本已由 API normalize_resume 经 LLM 语义归一("retry"/"skip"/"abort")
+    cmd = is_command_word(choice) or ""
+    if cmd == "retry":
         debug.info("← Degrade: 用户选择重试", detail=f"tool={failed_tool}")
         return {
             "degrade_used": True,
@@ -1537,7 +1598,7 @@ def hitl_degrade_node(state: AgentState) -> dict:
                 "at": datetime.now().isoformat(),
             },
         }
-    if "abort" in choice or "终止" in choice or "结束" in choice:
+    if cmd in ("abort", "finish"):  # 终止类指令(结束/终止/stop)
         return {
             "degrade_used": True,
             "final_answer": (
@@ -1569,7 +1630,7 @@ def hitl_degrade_node(state: AgentState) -> dict:
 
 def hitl_budget_node(state: AgentState) -> dict:
     """interrupt: 补充(原文) / 收尾(finish). resume 值经 normalize_resume:
-    空或含收尾关键词 → 'finish'; 其余非空文本 → 原文.
+    空或纯收尾指令词 → 'finish'; 其余非空文本 → 原文.
 
     Args:
         state (AgentState): 图状态,读取 evaluation / rag_documents / error /
@@ -1608,7 +1669,9 @@ def hitl_budget_node(state: AgentState) -> dict:
     )
     answer = str(answer).strip() if answer else ""
 
-    if not answer or any(w in answer.lower() for w in ("收尾", "结束", "finish")):
+    # H3: 子串匹配降级为纯指令词 fast-path ——「婚姻关系已于2020年结束」
+    # 这类正常补充不再被误判成收尾;自由文本走补充分支
+    if not answer or is_command_word(answer) == "finish":
         debug.info("← Budget: 用户选择收尾", detail="带现有材料 finalize")
         return {
             "budget_hitl_used": True,

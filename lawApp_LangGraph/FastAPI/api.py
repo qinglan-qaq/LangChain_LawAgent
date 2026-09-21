@@ -13,6 +13,7 @@ Legal Consultation API v3.0.0 (upgrade-v1)
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
@@ -113,6 +114,49 @@ async def log_requests(request: Request, call_next):
 
 
 # ── 工具函数 ──
+
+# 同会话并发流防护(H4): 并发 SSE 互踩 reasoning 总线/checkpoint 写
+# session_id → 流锁;SSE 端点进入前抢锁, 已占用 → 409 session_busy
+_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def _acquire_session_lock(sid: str) -> asyncio.Lock:
+    """获取会话流锁;已被其他流占用 → 409 session_busy。
+
+    返回已持有的锁, 由 _run_sse 生成器 finally 释放(断连也释放)。
+    locked() 检查与 acquire 之间无 await(同事件循环内无竞态窗口)。
+    """
+    lock = _SESSION_LOCKS.setdefault(sid, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="session_busy")
+    await lock.acquire()
+    return lock
+
+
+def _validate_resume_session(session_id: str | None) -> str:
+    """resume 路径守卫(H5): 空/纯空白 sid → 400;不建新线程。
+
+    resume 与新提问不同: 空 sid 被 ensure_session 当"新建"处理会开出
+    一个注定无 checkpoint 的新线程, 图从头执行, 用户材料丢失。
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+    return sid
+
+
+async def _require_pending_interrupt(sid: str) -> dict:
+    """resume 路径守卫(H5): 无 pending interrupt → 400 no_pending_interrupt。
+
+    Returns:
+        待恢复的 interrupt 载荷(含 type/message/question)。
+    """
+    graph = get_graph()
+    snapshot = await graph.aget_state(graph_config(sid))
+    interrupt_req = extract_interrupt(snapshot)
+    if interrupt_req is None:
+        raise HTTPException(status_code=400, detail="no_pending_interrupt")
+    return interrupt_req
 
 
 async def _finalize_or_interrupt(session_id: str, state_values) -> QueryResponse:
@@ -301,22 +345,22 @@ async def get_session(sid: str):
 @app.post("/ask/resume", response_model=QueryResponse)
 async def ask_resume(request: ResumeRequest):
     """HITL 继续: 用户对 interrupt 的回复经 Command(resume=...) 回传,图从暂停点恢复."""
-    sid = ensure_session(request.session_id, "attorney")
+    # H5: 空/纯空白 sid → 400(不建新线程);无 pending interrupt → 400
+    sid = _validate_resume_session(request.session_id)
     set_session(sid)
     flow.info("HITL 恢复", summary="用户回传", detail=f"answer={request.answer[:60]}")
 
-    graph = get_graph()
     config = graph_config(sid)
 
     # 先读快照取 interrupt 类型,再类型感知归一(v4: 确认类自由文本走 LLM 语义判断)
-    snapshot = await graph.aget_state(config)
-    interrupt_req = extract_interrupt(snapshot)
+    interrupt_req = await _require_pending_interrupt(sid)
     itype = (interrupt_req or {}).get("type", "")
     request_text = (interrupt_req or {}).get("message") or (interrupt_req or {}).get(
         "question"
     ) or ""
     resume_value = await normalize_resume(itype, request.answer, request_text)
 
+    graph = get_graph()
     t0 = time.time()
     try:
         state = await graph.ainvoke(Command(resume=resume_value), config=config)
@@ -339,16 +383,13 @@ async def ask_resume_stream(request: ResumeRequest):
     (planner CoT / 节点状态 / 工具调用 / interrupt / answer / tool_usage)
     实时下发事件 —— 正常咨询的主干(planner→executor→finalize)发生在 resume 阶段,
     纯 REST 版看不到任何过程。"""
-    sid = ensure_session(request.session_id, "attorney")
+    # H5: 空/纯空白 sid → 400(不建新线程);无 pending interrupt → 400
+    sid = _validate_resume_session(request.session_id)
     set_session(sid)
     flow.info("HITL 恢复", summary="用户回传(流式)", detail=f"answer={request.answer[:60]}")
 
-    graph = get_graph()
-    config = graph_config(sid)
-
     # 先读快照取 interrupt 类型,再类型感知归一(确认类自由文本走 LLM 语义判断)
-    snapshot = await graph.aget_state(config)
-    interrupt_req = extract_interrupt(snapshot)
+    interrupt_req = await _require_pending_interrupt(sid)
     itype = (interrupt_req or {}).get("type", "")
     request_text = (
         (interrupt_req or {}).get("message")
@@ -357,7 +398,11 @@ async def ask_resume_stream(request: ResumeRequest):
     )
     resume_value = await normalize_resume(itype, request.answer, request_text)
 
-    return _run_sse(sid, Command(resume=resume_value), mode="attorney")
+    # H4: 同会话并发流防护 —— 抢锁失败 409, 成功后由 _run_sse finally 释放
+    lock = await _acquire_session_lock(sid)
+    return _run_sse(
+        sid, Command(resume=resume_value), mode="attorney", session_lock=lock
+    )
 
 
 @app.get("/ask/stream")
@@ -372,6 +417,8 @@ async def ask_stream(query: str = "", session_id: str | None = None):
     flow.info("流式流程开始", summary="用户提问", detail=f"query={query[:80]}")
     config = graph_config(sid)
     graph = get_graph()
+    # H4: 同会话并发流防护 —— 抢锁失败 409, 生成器 finally 释放(断连也释放)
+    session_lock = await _acquire_session_lock(sid)
 
     async def event_stream():
         final_state: dict = {}
@@ -472,6 +519,9 @@ async def ask_stream(query: str = "", session_id: str | None = None):
         except Exception as e:
             flow.error("流式流程异常", detail=str(e))
             yield sse_event("error", str(e))
+        finally:
+            # H4: 会话流锁随生成器退出释放(含客户端断连的 GeneratorExit)
+            session_lock.release()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -484,7 +534,17 @@ def _validate_stream_text(text: str, limit: int = 4000) -> None:
         )
 
 
-def _run_sse(sid: str, astream_input, mode: str = "") -> StreamingResponse:
+# SSE keepalive 注释帧间隔(H10): 流未结束期间每 15s 发一行 ": ping",
+# 防中间层(nginx/代理)因空闲超时掐断长连接;前端解析器忽略 ":" 开头行
+_SSE_PING_SECONDS = 15
+
+
+def _run_sse(
+    sid: str,
+    astream_input,
+    mode: str = "",
+    session_lock: asyncio.Lock | None = None,
+) -> StreamingResponse:
     """SSE 流式工厂: astream_input(新提问 dict 或 Command(resume=...)) 驱动图。
 
     ask 与 resume 两种流共用: 事件协议与 /ask/stream 一致
@@ -492,6 +552,7 @@ def _run_sse(sid: str, astream_input, mode: str = "") -> StreamingResponse:
     session_id/interrupt/answer/prompts_record/tool_usage/done)。
     全链路 trace: event_stream 顶部建 RunContext, run()/pump() 子任务继承
     contextvars → 节点/工具/llm span 自动归集, finally flush_run 落库(观测旁路)。
+    session_lock(H4): 调用端抢到的会话流锁, 生成器 finally 释放(断连也释放)。
     """
     graph = get_graph()
     config = graph_config(sid)
@@ -664,17 +725,34 @@ def _run_sse(sid: str, astream_input, mode: str = "") -> StreamingResponse:
                 # 唤醒 pump 排空残余 CoT 增量, done 由 pump 统一发出
                 await reasoning_q.put(None)
 
-        tasks = [asyncio.create_task(run()), asyncio.create_task(pump())]
+        async def ping():
+            """keepalive(H10): 流期间周期性向输出队列塞注释帧标记。"""
+            while True:
+                await asyncio.sleep(_SSE_PING_SECONDS)
+                await out_q.put((":ping", ""))
+
+        tasks = [
+            asyncio.create_task(run()),
+            asyncio.create_task(pump()),
+            asyncio.create_task(ping()),
+        ]
         try:
             while True:
                 item = await out_q.get()
                 if item is None:
                     break
+                if item[0] == ":ping":
+                    # SSE 注释帧: 纯 keepalive, 前端解析器忽略 ":" 开头行
+                    yield ": ping\n\n"
+                    continue
                 yield sse_event(item[0], item[1])
         finally:
             for t in tasks:
                 t.cancel()
-            close_reasoning_channel(sid)
+            close_reasoning_channel(sid, reasoning_q)
+            # H4: 会话流锁随生成器退出释放(含客户端断连的 GeneratorExit)
+            if session_lock is not None:
+                session_lock.release()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -704,7 +782,9 @@ async def _mode_stream(
     if mode == "assistant":
         inputs["doc_type"] = doc_type
 
-    return _run_sse(sid, inputs, mode=mode)
+    # H4: 同会话并发流防护 —— 抢锁失败 409, 成功后由 _run_sse finally 释放
+    lock = await _acquire_session_lock(sid)
+    return _run_sse(sid, inputs, mode=mode, session_lock=lock)
 
 
 @app.get("/attorney/ask/stream")
@@ -723,6 +803,7 @@ async def assistant_ask_stream(
     return await _mode_stream("assistant", case_details, doc_type, session_id)
 
 
+@app.post("/ask/pdf", response_model=QueryResponse)
 async def ask_pdf(request: QueryRequest):
     """生成 PDF 报告并返回文件下载."""
     from lawApp_LangGraph.tools.tools import markdown_to_pdf
@@ -733,7 +814,13 @@ async def ask_pdf(request: QueryRequest):
 
     t0 = time.time()
     graph = get_graph()
-    state = await graph.ainvoke({"query": request.query}, config=graph_config(sid))
+    try:
+        state = await graph.ainvoke(
+            {"query": request.query}, config=graph_config(sid)
+        )
+    except Exception as e:
+        flow.error("PDF流程失败", summary="Graph 执行失败", detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Graph 执行失败: {e}")
 
     answer = state.get("final_answer", "")
     if not answer:
