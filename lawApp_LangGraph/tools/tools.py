@@ -48,13 +48,16 @@ async def get_google_search(query: str) -> dict:
         search = SerpAPIWrapper()
         raw = await asyncio.to_thread(search.results, query)
     except Exception as e:
+        # M9: 异常原文不进工具结果(LLM 可见可转述, 可能含 DSN/密钥提示)——
+        # 换固定中文文案, 原始异常进日志; 对齐 db_tools.fetch_laws 模式
         tool_log.error(
             "← 工具异常: get_google_search",
             detail=f"SerpAPI 不可用: {str(e)[:120]}",
+            exc_info=True,
         )
         return {
             "status": "error",
-            "message": f"联网搜索不可用: {str(e)[:200]}",
+            "message": "联网搜索暂时不可用,请稍后重试",
             "web_search_results": [],
         }
 

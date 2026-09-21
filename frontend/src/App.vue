@@ -66,9 +66,20 @@ async function submit({ text, docType }) {
   state.value.messages.push({ role: 'user', text, collapsed: text.length > 120, done: true })
   state.value.messages.push({ role: 'assistant', text: '', done: false })
   const isAttorney = state.value.mode === 'attorney'
-  const url = isAttorney
-    ? `/api/attorney/ask/stream?query=${encodeURIComponent(text)}&session_id=${encodeURIComponent(state.value.sessionId || '')}`
-    : `/api/assistant/ask/stream?case_details=${encodeURIComponent(text)}&doc_type=${docType || 'complaint'}&session_id=${encodeURIComponent(state.value.sessionId || '')}`
+  // M11: assistant 模式案情走 POST body(4000 CJK 经 URL 会超浏览器/代理长度
+  // 限制); attorney 保持 GET 不动
+  let url
+  let reqBody = null
+  if (isAttorney) {
+    url = `/api/attorney/ask/stream?query=${encodeURIComponent(text)}&session_id=${encodeURIComponent(state.value.sessionId || '')}`
+  } else {
+    url = '/api/assistant/ask/stream'
+    reqBody = {
+      case_details: text,
+      doc_type: docType || 'complaint',
+      session_id: state.value.sessionId || '',
+    }
+  }
   const assistant = state.value.messages[state.value.messages.length - 1]
   let sawEvent = false // 校验失败回滚空消息用: 未收到任何流事件前的失败视为请求未成立
   const controller = new AbortController()
@@ -77,7 +88,7 @@ async function submit({ text, docType }) {
     await streamConsult(url, (e) => {
       sawEvent = true
       handleStreamEvent(e, assistant)
-    }, controller.signal)
+    }, controller.signal, reqBody)
   } catch (err) {
     if (isAbort(err)) {
       // 用户取消: 静默, 保留已生成的部分内容

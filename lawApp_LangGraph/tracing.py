@@ -33,7 +33,7 @@ _ORPHAN_CAP = 200
 class Span:
     span_type: str  # node | tool | llm | hitl
     name: str
-    status: str = "ok"  # ok | error | interrupted
+    status: str = "ok"  # ok | error | interrupted | cancelled(M5)
     input: Any = None
     output: Any = None
     state: Any = None  # values 流回填
@@ -50,7 +50,7 @@ class RunContext:
     mode: str = ""
     query: str = ""
     final_answer: str = ""
-    status: str = "ok"
+    status: str = "ok"  # ok | error | interrupted | cancelled(M5 断开)
     spans: list[Span] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
 
@@ -112,6 +112,13 @@ def _is_interrupt(e: Exception) -> bool:
         return False
 
 
+def _is_cancel(e: BaseException) -> bool:
+    """M5: 生成器被提前 close / 任务取消(GeneratorExit / CancelledError)。"""
+    import asyncio
+
+    return isinstance(e, (asyncio.CancelledError, GeneratorExit))
+
+
 def traced(span_type: str, name: Optional[str] = None) -> Callable:
     """装饰器工厂(规格决策 3): 包住需检测的图节点/工具函数。
 
@@ -132,8 +139,15 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                 )
                 try:
                     out = await fn(*args, **kwargs)
-                except Exception as e:
-                    span.status = "interrupted" if _is_interrupt(e) else "error"
+                except BaseException as e:
+                    # M5: BaseException 分支 —— CancelledError/GeneratorExit
+                    # (客户端断开)不是 Exception, 旧实现不捕 → span 不落库;
+                    # 取消类记 "cancelled", 记后原样 re-raise
+                    span.status = (
+                        "interrupted" if _is_interrupt(e)
+                        else "cancelled" if _is_cancel(e)
+                        else "error"
+                    )
                     span.output = {"exception": repr(e)}
                     span.latency_ms = int((time.perf_counter() - t0) * 1000)
                     _emit(span)
@@ -317,6 +331,7 @@ def _instrument_llm_cls():
             t0 = time.perf_counter()
             last = None
             parts: list[str] = []
+            emitted = False  # M5: 异常/取消分支已自行 emit 的标记
             try:
                 async for chunk in super()._astream(
                     messages, stop=stop, run_manager=run_manager, **kwargs
@@ -330,19 +345,36 @@ def _instrument_llm_cls():
                     yield chunk
             except Exception:
                 _emit_llm_span(self.model_name, messages, last, t0, "error")
+                emitted = True
                 raise
-            try:
-                # 流式全文聚合(末块 content 常为空, usage 在末块 metadata)
+            except BaseException as e:
+                # M5: 生成器被提前 close / 任务取消(GeneratorExit/CancelledError
+                # 在 yield 点抛出, 不是 Exception) → 已聚合的 parts 也要落 span,
+                # 记 cancelled 后原样 re-raise, 不再留 "无任何 llm span"
                 _emit_llm_span(
                     self.model_name,
                     messages,
                     last,
                     t0,
-                    "ok",
+                    "cancelled" if _is_cancel(e) else "error",
                     content="".join(parts) or None,
                 )
-            except Exception:
-                logger.error("llm span 记录失败(观测旁路)", exc_info=True)
+                emitted = True
+                raise
+            finally:
+                # 正常读尽: 全文聚合(末块 content 常为空, usage 在末块 metadata)
+                if not emitted:
+                    try:
+                        _emit_llm_span(
+                            self.model_name,
+                            messages,
+                            last,
+                            t0,
+                            "ok",
+                            content="".join(parts) or None,
+                        )
+                    except Exception:
+                        logger.error("llm span 记录失败(观测旁路)", exc_info=True)
 
     return InstrumentedChatOpenAI
 

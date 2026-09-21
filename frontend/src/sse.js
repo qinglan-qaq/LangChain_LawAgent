@@ -46,9 +46,20 @@ async function readSSE(res, onEvent) {
   return { sawDone }
 }
 
-// 提问流(GET): /attorney/ask/stream | /assistant/ask/stream
-export async function streamConsult(url, onEvent, signal) {
-  const res = await fetch(url, { signal })
+// 提问流: /attorney/ask/stream(GET) | /assistant/ask/stream(GET 或 POST)
+// body 给定时走 POST(长案情超 URL 长度限制, M11), 不给保持 GET 兼容
+export async function streamConsult(url, onEvent, signal, body) {
+  const res = await fetch(
+    url,
+    body
+      ? {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal,
+        }
+      : { signal }
+  )
   await checkOk(res)
   const { sawDone } = await readSSE(res, onEvent)
   // 流读尽但未见终止帧: 连接中途断, 不能当完整答案收场(用户主动 abort 会直接抛 AbortError, 不走此分支)

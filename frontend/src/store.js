@@ -1,8 +1,13 @@
 import { ref } from 'vue'
 
+// 会话 id 按模式分键存储(M13): 两模式共用一个 sid 会让 AT/AS 前缀与
+// 端点模式不符(后端 400 session_mode_mismatch)且线程互串
+const SID_KEYS = { attorney: 'lawapp_sid_attorney', assistant: 'lawapp_sid_assistant' }
+const sidKey = () => SID_KEYS[state.value.mode] || SID_KEYS.attorney
+
 export const state = ref({
   mode: 'attorney',          // attorney | assistant
-  sessionId: localStorage.getItem('lawapp_sid') || '',
+  sessionId: localStorage.getItem(SID_KEYS.attorney) || '',
   disclaimerShown: localStorage.getItem('lawapp_disclaimer') === '1',
   messages: [],              // {role:'user'|'assistant', text, collapsed, done}
   reasoning: '',             // CoT 累积文本
@@ -18,9 +23,14 @@ export const state = ref({
   error: '',
 })
 
+// 按当前模式读取持久化的会话 id(切模式后调用, sessionId 自动切换到对应模式)
+export function loadSession() {
+  state.value.sessionId = localStorage.getItem(sidKey()) || ''
+}
+
 export function setSession(sid) {
   state.value.sessionId = sid
-  if (sid) localStorage.setItem('lawapp_sid', sid)
+  if (sid) localStorage.setItem(sidKey(), sid)
 }
 
 export function markDisclaimerShown() {

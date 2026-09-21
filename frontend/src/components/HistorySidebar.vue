@@ -8,6 +8,7 @@ const sessions = ref([])
 const error = ref('')
 const detail = ref(null)
 const detailOf = ref('')
+const openSeq = ref(0) // M12: 乱序守卫 —— 只认最新一次点击的响应
 
 onMounted(async () => {
   try {
@@ -17,15 +18,26 @@ onMounted(async () => {
   }
 })
 
+// M12: 旧实现裸 await 无 try/catch(fetch 失败未提示)、慢响应乱序覆盖、
+// setSession 在 fetch 前提交(点了会话切走后仍被切回)——
+// 失败写 error 并显示; 只认最新响应; setSession 移到详情拉取成功后
 async function open(sid) {
-  setSession(sid)
   if (detailOf.value === sid) {
     detail.value = null
     detailOf.value = ''
     return
   }
-  detail.value = await getSessionDetail(sid)
-  detailOf.value = sid
+  const seq = ++openSeq.value
+  error.value = ''
+  try {
+    const d = await getSessionDetail(sid)
+    if (seq !== openSeq.value) return // 已有更新的点击, 丢弃本次过期响应
+    detail.value = d
+    detailOf.value = sid
+    setSession(sid)
+  } catch (e) {
+    error.value = String(e)
+  }
 }
 
 function citationsOf(d) {

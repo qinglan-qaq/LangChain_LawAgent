@@ -31,6 +31,17 @@ class AssistantAskRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, description="续聊会话 ID")
 
 
+class AssistantStreamRequest(BaseModel):
+    """律师助理模式 SSE 流式请求(M11: 长案情走 POST body, 规避浏览器/代理
+    URL 长度限制; 行为与 GET /assistant/ask/stream 完全一致)。"""
+
+    case_details: str = Field(..., min_length=1, max_length=4000, description="完整案件详情")
+    doc_type: Literal["complaint", "defense"] = Field(
+        default="complaint", description="complaint=起诉状, defense=答辩状"
+    )
+    session_id: Optional[str] = Field(default=None, description="续聊会话 ID")
+
+
 class ResumeRequest(BaseModel):
     """HITL resume:对 interrupt 的回复(反问补充 / 高风险确认 / PDF 确认)."""
 

@@ -319,6 +319,13 @@ class AgentState(BaseModel):
     replan_reason: Optional[str] = None
     # 不足原因诊断(vague/not_found/error/none) — replan_check 写入,路由读取
     insufficient_reason: str = "none"
+    # M3: replanner 空 plan 标记 — replanner 写入/路由读取,空补充计划直接
+    # 走 finalize 收尾(防 executor↔replan_check 空转到 recursion_limit)
+    replan_empty: bool = False
+    # M8: HITL 用户补充信息列表 — 三处 HITL 节点 append, planner/replanner/
+    # executor/replan_check 的 prompt 组装拼接(query 不再被改写, 原问题
+    # 不会多轮后被挤出截断窗); 旧 checkpoint 缺字段由 default_factory 兜底
+    user_supplements: List[str] = Field(default_factory=list)
 
     #  HITL(人机协同)
     # 案件要素清单(覆盖语义, ingest 重建默认清单)

@@ -72,37 +72,63 @@ mcp = FastMCP("law-search")
 #  服务器侧 Store — 独立实例(不在图上下文,不能 get_store())
 
 _store = None
+# M7: 双建防护 —— 并发首调时防两个协程各建一个 store
+_store_lock = asyncio.Lock()
+
+
+class MemoryStoreUnavailable(RuntimeError):
+    """MCP server 侧记忆库不可用(M7)。
+
+    PG store setup 失败时不再静默换 InMemoryStore —— 图写 PG store、
+    server 读 InMemory, 记忆互不可见且零信号。显式失败让记忆工具返回
+    「记忆库暂不可用」, 调用方可感知。
+    """
+
+
+async def _close_store_pool(store) -> None:
+    """尽力关闭 store 半初始化持有的连接池(防泄漏);池属性随版本浮动。"""
+    for attr in ("conn", "pool", "_pool"):
+        pool = getattr(store, attr, None)
+        if pool is not None and not isinstance(pool, str) and hasattr(pool, "close"):
+            try:
+                await pool.close()
+            except Exception:  # pragma: no cover — 观测旁路尽力而为
+                pass
+            return
 
 
 async def _get_server_store():
-    """MCP server 自用的 store(优先 Postgres,降级 InMemory)。
+    """MCP server 自用的 store(Postgres;M7: 失败显式报错, 不降级 InMemory)。
     与图的 store 分属两个进程,同一 Postgres 时记忆互通。"""
     global _store
     if _store is not None:
         return _store
-    try:
-        from langgraph.store.postgres.aio import AsyncPostgresStore
+    async with _store_lock:
+        if _store is not None:
+            return _store
+        pg_store = None
+        try:
+            from langgraph.store.postgres.aio import AsyncPostgresStore
 
-        from lawApp_LangGraph.RAG_service.embedder import embed_fn_for_store
-        from lawApp_LangGraph.db import build_dsn
+            from lawApp_LangGraph.RAG_service.embedder import embed_fn_for_store
+            from lawApp_LangGraph.db import build_dsn
 
-        _store = AsyncPostgresStore(
-            conn=None,  # AutoPoolConn: 传 None 时内部自动建池
-            index={"dims": 1024, "embed": embed_fn_for_store,
-                   "fields": ["summary", "content"]},
-        )
-        await _store.setup()
-        logger.info("MCP store: Postgres")
-    except Exception as e:
-        logger.warning("MCP store 降级 InMemory: %s", str(e)[:120])
-        from langgraph.store.memory import InMemoryStore
-
-        from lawApp_LangGraph.RAG_service.embedder import embed_fn_for_store
-
-        _store = InMemoryStore(
-            index={"dims": 1024, "embed": embed_fn_for_store,
-                   "fields": ["summary", "content"]}
-        )
+            pg_store = AsyncPostgresStore(
+                conn=None,  # AutoPoolConn: 传 None 时内部自动建池
+                index={"dims": 1024, "embed": embed_fn_for_store,
+                       "fields": ["summary", "content"]},
+            )
+            await pg_store.setup()
+            _store = pg_store
+            logger.info("MCP store: Postgres")
+        except Exception as e:
+            # M7: PG store 不可用 → 显式失败。静默换 InMemory 会让图写 PG、
+            # server 读内存, 记忆互不可见零信号; 半初始化的连接池关掉防泄漏
+            logger.warning("MCP Postgres store 不可用, 记忆工具将返回错误: %s",
+                           str(e)[:120])
+            if pg_store is not None:
+                await _close_store_pool(pg_store)
+            raise MemoryStoreUnavailable(str(e)[:200])
     return _store
 
 
@@ -189,7 +215,11 @@ async def recall_memory(query: str, top_k: int = 3) -> str:
         query: 要回忆的内容描述
         top_k: 返回条数,默认 3
     """
-    store = await _get_server_store()
+    # M7: PG store 不可用 → 显式错误文案, 不静默回 InMemory 空结果
+    try:
+        store = await _get_server_store()
+    except MemoryStoreUnavailable:
+        return "记忆库暂不可用,请稍后再试。"
     try:
         items = await store.asearch(MEM_NAMESPACE, query=query, limit=top_k)
     except (TypeError, ValueError):

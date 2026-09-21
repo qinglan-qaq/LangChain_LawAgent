@@ -36,6 +36,7 @@ from lawApp_LangGraph.FastAPI.logging import (
 )
 from lawApp_LangGraph.FastAPI.model import (
     AssistantAskRequest,
+    AssistantStreamRequest,
     AttorneyAskRequest,
     FeedbackRequest,
     QueryRequest,
@@ -44,12 +45,15 @@ from lawApp_LangGraph.FastAPI.model import (
     ToolInfo,
 )
 from lawApp_LangGraph.FastAPI.utils import (
+    _NO,
+    _YES,
     build_response,
     build_tool_usage,
     ensure_session,
     extract_interrupt,
     get_graph,
     graph_config,
+    is_command_word,
     normalize_resume,
     sse_event,
 )
@@ -159,12 +163,69 @@ async def _require_pending_interrupt(sid: str) -> dict:
     return interrupt_req
 
 
+async def _normalize_resume_with_degrade(
+    interrupt_type: str, answer: str, request_text: str
+) -> object:
+    """normalize_resume + LLM 失败降级(M4)。
+
+    旧实现裸调 normalize_resume(在端点 try 之外), semantic_confirm 的 LLM
+    一失败 → 裸 500 且 interrupt 悬死。HITL 确认链路可用性优先(用户已批准
+    的「业务错误显式抛出」例外): 失败时降级为指令词/确认词精确匹配,
+    risk/pdf 默认拒绝(abort)、degrade 默认终止(abort)、budget 默认收尾
+    (finish), 并记 warning。
+    """
+    try:
+        return await normalize_resume(interrupt_type, answer, request_text)
+    except Exception as e:
+        system.warning(
+            "semantic_confirm 失败,降级短词精确匹配",
+            detail=f"type={interrupt_type} | err={str(e)[:150]}",
+        )
+        ans = (answer or "").strip()
+        lowered = ans.lower()
+        if interrupt_type in ("risk_confirm", "pdf_confirm"):
+            if lowered in _YES:
+                return True
+            if lowered in _NO:
+                return False
+            return False  # 默认 abort(拒绝)
+        if interrupt_type == "degrade_confirm":
+            cmd = is_command_word(ans)
+            if cmd == "retry":
+                return "retry"
+            if cmd == "skip":
+                return "skip"
+            if cmd == "abort":
+                return "abort"
+            return "abort"  # 默认 abort(终止)
+        if interrupt_type == "budget_confirm":
+            if not ans:
+                return "finish"
+            cmd = is_command_word(ans)
+            if cmd in ("finish", "abort"):
+                return "finish"
+            if cmd == "continue":
+                return ans  # 继续补充
+            return "finish"  # 默认 finish(收尾)
+        # clarify / mid_clarify: 原文透传(不经 LLM, 仅防御)
+        return ans
+
+
 async def _finalize_or_interrupt(session_id: str, state_values) -> QueryResponse:
     """构建响应:若命中 interrupt 则附带请求体,并写审计."""
     graph = get_graph()
     config = graph_config(session_id)
-    snapshot = await graph.aget_state(config)
-    interrupt_req = extract_interrupt(snapshot)
+    try:
+        snapshot = await graph.aget_state(config)
+        interrupt_req = extract_interrupt(snapshot)
+    except Exception as e:
+        # M15: PG 掉线不打穿已跑完的结果 —— 用已有 state_values 降级返回
+        # (不附 interrupt), 观测旁路记日志放行
+        flow.warning(
+            "读取图快照失败,降级不带 interrupt 返回",
+            detail=str(e)[:200],
+        )
+        interrupt_req = None
     response = build_response(state_values, session_id)
     if interrupt_req:
         response.interrupt = interrupt_req
@@ -335,7 +396,25 @@ async def list_sessions():
 async def get_session(sid: str):
     """单会话详情: 最新快照 + interrupt 状态(等待回复时返回待回答问题)。"""
     graph = get_graph()
-    snap = await graph.aget_state(graph_config(sid))
+    try:
+        snap = await graph.aget_state(graph_config(sid))
+    except Exception as e:
+        # M15: PG 掉线 → 降级返回会话基本信息(interrupt 等置 None), 不抛 500
+        flow.error("会话快照读取失败,降级返回基本信息", detail=str(e)[:200])
+        return {
+            "session_id": sid,
+            "query": "",
+            "final_answer": "",
+            "final_prompt": None,
+            "sources": None,
+            "tool_calls": None,
+            "reasoning": None,
+            "interrupt": None,
+            "prompts_record": None,
+            "elements": None,
+            "tool_usage": None,
+            "degraded": True,
+        }
     if not snap or not snap.values:
         raise HTTPException(status_code=404, detail=f"会话 {sid} 不存在")
     response = build_response(snap.values, sid)
@@ -352,13 +431,14 @@ async def ask_resume(request: ResumeRequest):
 
     config = graph_config(sid)
 
-    # 先读快照取 interrupt 类型,再类型感知归一(v4: 确认类自由文本走 LLM 语义判断)
+    # 先读快照取 interrupt 类型,再类型感知归一(v4: 确认类自由文本走 LLM 语义判断;
+    # M4: LLM 失败降级短词精确匹配, 不再裸 500 悬死 interrupt)
     interrupt_req = await _require_pending_interrupt(sid)
     itype = (interrupt_req or {}).get("type", "")
     request_text = (interrupt_req or {}).get("message") or (interrupt_req or {}).get(
         "question"
     ) or ""
-    resume_value = await normalize_resume(itype, request.answer, request_text)
+    resume_value = await _normalize_resume_with_degrade(itype, request.answer, request_text)
 
     graph = get_graph()
     t0 = time.time()
@@ -388,7 +468,8 @@ async def ask_resume_stream(request: ResumeRequest):
     set_session(sid)
     flow.info("HITL 恢复", summary="用户回传(流式)", detail=f"answer={request.answer[:60]}")
 
-    # 先读快照取 interrupt 类型,再类型感知归一(确认类自由文本走 LLM 语义判断)
+    # 先读快照取 interrupt 类型,再类型感知归一(确认类自由文本走 LLM 语义判断;
+    # M4: LLM 失败降级短词精确匹配, 不再裸 500 悬死 interrupt)
     interrupt_req = await _require_pending_interrupt(sid)
     itype = (interrupt_req or {}).get("type", "")
     request_text = (
@@ -396,7 +477,7 @@ async def ask_resume_stream(request: ResumeRequest):
         or (interrupt_req or {}).get("question")
         or ""
     )
-    resume_value = await normalize_resume(itype, request.answer, request_text)
+    resume_value = await _normalize_resume_with_degrade(itype, request.answer, request_text)
 
     # H4: 同会话并发流防护 —— 抢锁失败 409, 成功后由 _run_sse finally 释放
     lock = await _acquire_session_lock(sid)
@@ -715,6 +796,10 @@ def _run_sse(
                         "citations",
                         {"tool_calls": final_state.get("tool_calls", [])},
                     )
+            except asyncio.CancelledError:
+                # M5: 客户端断开时任务被取消 → trace 记 cancelled 而非留 "ok"
+                trace_run.status = "cancelled"
+                raise
             except Exception as e:
                 flow.error("流式流程异常", detail=str(e))
                 trace_run.status = "error"
@@ -736,6 +821,7 @@ def _run_sse(
             asyncio.create_task(pump()),
             asyncio.create_task(ping()),
         ]
+        saw_done = False  # M5: 是否收到终止帧(正常收场判定)
         try:
             while True:
                 item = await out_q.get()
@@ -745,6 +831,8 @@ def _run_sse(
                     # SSE 注释帧: 纯 keepalive, 前端解析器忽略 ":" 开头行
                     yield ": ping\n\n"
                     continue
+                if item[0] == "done":
+                    saw_done = True
                 yield sse_event(item[0], item[1])
         finally:
             for t in tasks:
@@ -753,6 +841,15 @@ def _run_sse(
             # H4: 会话流锁随生成器退出释放(含客户端断连的 GeneratorExit)
             if session_lock is not None:
                 session_lock.release()
+            # M5: 客户端断开(生成器被 close → GeneratorExit/子任务取消)时
+            # trace 记 cancelled 而非留 "ok";done 帧已收到或已写终态
+            # (error/interrupted)时不覆盖
+            if not saw_done and trace_run.status == "ok":
+                trace_run.status = "cancelled"
+                try:
+                    await flush_run(trace_run)
+                except Exception:
+                    pass  # 观测旁路, 落库失败放行
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -801,6 +898,16 @@ async def assistant_ask_stream(
     if doc_type not in ("complaint", "defense"):
         raise HTTPException(status_code=422, detail="doc_type 必须为 complaint|defense")
     return await _mode_stream("assistant", case_details, doc_type, session_id)
+
+
+@app.post("/assistant/ask/stream")
+async def assistant_ask_stream_post(request: AssistantStreamRequest):
+    """律师助理模式 SSE 流式(POST 版, M11): 长案情(4000 CJK)经 URL 传输会
+    超浏览器/代理 URL 长度限制 → 改 body 传参; 事件协议与 GET 完全一致
+    (复用 _mode_stream, 含校验/409 会话锁/ensure_session), GET 保留兼容。"""
+    return await _mode_stream(
+        "assistant", request.case_details, request.doc_type, request.session_id
+    )
 
 
 @app.post("/ask/pdf", response_model=QueryResponse)

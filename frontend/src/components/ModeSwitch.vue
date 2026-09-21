@@ -1,5 +1,5 @@
 <script setup>
-import { state, resetTurn, abortCurrentStream } from '../store'
+import { state, resetTurn, abortCurrentStream, loadSession } from '../store'
 
 const modes = [
   { id: 'attorney', label: '代理律师' },
@@ -11,6 +11,8 @@ function pick(id) {
   // 有流在跑先终止(触发的 AbortError 由 App.vue 按用户取消静默处理), 再重置回合
   if (state.value.busy) abortCurrentStream()
   state.value.mode = id
+  // M13: 会话 id 按模式分键 —— 切模式后自动切换到对应模式的 sid
+  loadSession()
   resetTurn()
 }
 </script>

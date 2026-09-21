@@ -58,6 +58,7 @@ def _run_one(f: str) -> tuple[str, str]:
     dur = int(time.time() - t0)
     out = (r.stdout or "") + (r.stderr or "")
     tail = [l for l in out.splitlines() if l.strip()][-6:]
+    fail_tail = [l for l in out.splitlines() if l.strip()][-40:]
     if r.returncode == 0:
         return "PASS", f"{f}: {dur}s {' | '.join(tail[-2:])}"
     # 纯超时失败(pytest-timeout thread 法 os._exit, 无 FAILED 行)→ 按约定记 SKIPPED 不算失败;
@@ -65,7 +66,7 @@ def _run_one(f: str) -> tuple[str, str]:
     n_timeouts = out.count("+++ Timeout +++")
     if n_timeouts and not re.search(r"FAILED|ERROR[_ ]|AssertionError", out):
         return "SKIPPED", f"{f}: {n_timeouts} 用例超时({PER_TEST_TIMEOUT_S}s), 按约定跳过"
-    return "FAIL", f"{f}: rc={r.returncode} {' | '.join(tail)}"
+    return "FAIL", f"{f}: rc={r.returncode} {' | '.join(fail_tail)}"
 
 
 def main() -> int:

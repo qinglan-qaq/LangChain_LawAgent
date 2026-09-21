@@ -214,7 +214,10 @@ def test_h3_budget_node_uses_fast_path():
         )
         out = app.hitl_budget_node(state)
         assert out["hitl_event"]["choice"] == "supplement"
-        assert "[用户补充信息] 婚姻关系已于2020年结束" in out["query"]
+        # M8: 补充不再改写 query, 改入 user_supplements(H3 意图不变:
+        # 补充文本保留 + 自由文本不误判收尾)
+        assert "query" not in out
+        assert out["user_supplements"] == ["婚姻关系已于2020年结束"]
 
         captured["resume"] = "收尾"
         out = app.hitl_budget_node(state)

@@ -33,6 +33,8 @@ if sys.platform == "win32":
 logger = logging.getLogger("lawApp.db")
 
 _pool: Optional[AsyncConnectionPool] = None
+# M14: 池初始化竞态防护 —— 并发首调 get_pool 时防止两个协程各建一个池
+_pool_lock = asyncio.Lock()
 
 
 def build_dsn() -> str:
@@ -52,31 +54,46 @@ def build_dsn() -> str:
 
 
 async def get_pool() -> AsyncConnectionPool:
-    """获取全局连接池（懒加载）。"""
+    """获取全局连接池（懒加载, M14: 全程加锁防双建; 失败不缓存坏池）。"""
     global _pool
-    if _pool is None or _pool.closed:
-        _pool = AsyncConnectionPool(
-            conninfo=build_dsn(),
-            min_size=1,
-            max_size=settings.db_pool_max,
-            open=False,
-        )
-        await _pool.open(wait=False)
-        # 注册 pgvector 扩展并确保业务表存在
-        async with _pool.connection() as conn:
-            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            await ensure_tables(conn)
-        logger.info("PostgreSQL 连接池就绪 | dsn=%s", build_dsn().rsplit("@", 1)[-1])
-    return _pool
+    async with _pool_lock:
+        if _pool is None or _pool.closed:
+            # timeout=5: 池操作(取连接)挂死时快速失败, 对齐 runtime.py
+            pool = AsyncConnectionPool(
+                conninfo=build_dsn(),
+                min_size=1,
+                max_size=settings.db_pool_max,
+                timeout=5,
+                open=False,
+            )
+            try:
+                await pool.open(wait=False)
+                # 注册 pgvector 扩展并确保业务表存在
+                async with pool.connection() as conn:
+                    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                    await ensure_tables(conn)
+            except Exception:
+                # M14: DDL/setup 失败 → 不缓存坏池; 关掉刚建的池再抛,
+                # 下次调用重新走 DDL
+                _pool = None
+                try:
+                    await pool.close()
+                except Exception:  # pragma: no cover — 关池失败不掩盖原异常
+                    pass
+                raise
+            _pool = pool
+            logger.info("PostgreSQL 连接池就绪 | dsn=%s", build_dsn().rsplit("@", 1)[-1])
+        return _pool
 
 
 async def close_pool() -> None:
-    """关闭连接池（API 关闭时调用）。"""
+    """关闭连接池（API 关闭时调用; M14: 先摘全局引用再关, 防关闭期间新调用）。"""
     global _pool
-    if _pool is not None and not _pool.closed:
-        await _pool.close()
-        logger.info("PostgreSQL 连接池已关闭")
+    pool = _pool
     _pool = None
+    if pool is not None and not pool.closed:
+        await pool.close()
+        logger.info("PostgreSQL 连接池已关闭")
 
 
 async def ensure_tables(conn: AsyncConnection) -> None:

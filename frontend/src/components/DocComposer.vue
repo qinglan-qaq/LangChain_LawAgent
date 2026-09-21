@@ -36,8 +36,9 @@ function send(e) {
         rows="4"
         class="border rounded-xl px-3 py-2 text-sm w-full resize-y focus:outline-none focus:ring-2 focus:ring-slate-400"
         placeholder="粘贴完整案情(至少 20 字), 将按所选文书类型起草"
-      @keydown.ctrl.enter="send"
-    ></textarea>
+        maxlength="4000"
+        @keydown.ctrl.enter="send"
+      ></textarea>
     </template>
     <input
       v-else

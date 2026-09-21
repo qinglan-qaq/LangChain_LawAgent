@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import itertools
 import json
-from datetime import datetime
+import re
+import uuid
 from typing import Optional
+
+from fastapi import HTTPException
 
 from lawApp_LangGraph.FastAPI.model import QueryResponse, SourceInfo
 from lawApp_LangGraph.config import settings
@@ -12,32 +14,55 @@ from lawApp_LangGraph.config import settings
 #  工具函数
 
 
-#  会话 id 序号发生器 — 进程级单调递增, 配合时间戳保证同进程内唯一
-_SESSION_SEQ = itertools.count(1)
-
-#  模式 → 会话 id 前缀(模式-时间-编号格式)
+#  模式 → 会话 id 前缀(前缀-uuid 格式)
 _SESSION_PREFIX = {"attorney": "AT", "assistant": "AS"}
+
+#  合法会话 id 格式(M6):
+#    新式  {AT|AS}-<uuid4hex12>          — uuid 跨进程/重启不撞号
+#    旧式  {AT|AS}-YYYYMMDD-HHMMSS-NNN  — 存量会话兼容(时间戳式)
+_SESSION_ID_NEW_RE = re.compile(r"^(AT|AS)-[0-9a-f]{12}$")
+_SESSION_ID_OLD_RE = re.compile(r"^(AT|AS)-\d{8}-\d{6}-\d{1,6}$")
 
 
 def new_session_id(mode: str = "attorney") -> str:
-    """生成「前缀-日期-时间-序号」格式的会话 id.
+    """生成「前缀-uuid」格式的会话 id.
 
     Args:
         mode: 咨询模式("attorney"/"assistant"), 映射前缀 AT/AS.
 
     Returns:
-        形如 "AT-20260918-143025-001" 的可读 id; 序号为进程级递增计数.
+        形如 "AT-1a2b3c4d5e6f" 的 id。旧实现(进程内计数器+秒级时间戳)
+        在多 worker / 同秒重启时撞号, 撞号即 checkpoint 互串 → 改 uuid4。
     """
     prefix = _SESSION_PREFIX.get(mode, "AT")
-    now = datetime.now()
-    return f"{prefix}-{now:%Y%m%d}-{now:%H%M%S}-{next(_SESSION_SEQ):03d}"
+    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+def _validate_session_id(sid: str, mode: str) -> None:
+    """显式传入 sid 的格式/前缀校验(M6/M13)。
+
+    带 AT-/AS- 前缀的 sid 必须匹配新 uuid 或旧时间戳格式, 否则
+    400 invalid_session_id;格式合法但前缀与端点模式不符 →
+    400 session_mode_mismatch(双模式共用 sid 会串线程)。
+    不带 AT-/AS- 前缀的历史 sid 原样放行(兼容, 不做模式校验)。
+    """
+    if _SESSION_ID_NEW_RE.match(sid) or _SESSION_ID_OLD_RE.match(sid):
+        if not sid.startswith(f"{_SESSION_PREFIX.get(mode, 'AT')}-"):
+            raise HTTPException(status_code=400, detail="session_mode_mismatch")
+        return
+    if sid.startswith(("AT-", "AS-")):
+        # 带模式前缀但格式非法 → 拒绝
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+    # 无前缀历史 sid: 放行
 
 
 def ensure_session(session_id: Optional[str], mode: str = "attorney") -> str:
-    """缺省时按模式生成新会话 id; 调用方显式传入(续聊/恢复)则原样透传."""
-    if not session_id or not session_id.strip():
+    """缺省时按模式生成新会话 id; 显式传入(续聊/恢复)则校验格式/前缀后透传."""
+    sid = (session_id or "").strip()
+    if not sid:
         return new_session_id(mode)
-    return session_id
+    _validate_session_id(sid, mode)
+    return sid
 
 
 def get_graph():

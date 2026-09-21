@@ -16,6 +16,24 @@ from lawApp_LangGraph.RAG_service.embedder import embed_query, rerank
 logger = logging.getLogger("lawApp.rag")
 
 
+def clamp_search_params(top_k: int, rerank_top_n: int) -> tuple[int, int]:
+    """检索参数钳制(M1): top_k → 1..50, rerank_top_n → 1..10。
+
+    0/负数不再把重排序切片切成空列表(假「未检索到」), 与
+    RAG_program.search_withDenseSparse 的 max(1, n) 语义对齐并加
+    上界(top_k 大值会拖垮 SQL 召回与 CrossEncoder 重排)。
+    """
+    try:
+        k = int(top_k)
+    except (TypeError, ValueError):
+        k = 20
+    try:
+        n = int(rerank_top_n)
+    except (TypeError, ValueError):
+        n = 5
+    return max(1, min(k, 50)), max(1, min(n, 10))
+
+
 class PgvectorRetriever(BaseRetriever):
     async def search(
         self,
@@ -26,6 +44,9 @@ class PgvectorRetriever(BaseRetriever):
         namespace: Optional[str] = None,  # noqa: ARG002 — pgvector 以表为单位，无 namespace
     ) -> list[dict]:
         from lawApp_LangGraph.db import get_pool
+
+        # M1: 参数钳制(0/负数/超大值不再产生假"未检索到"或过重查询)
+        top_k, rerank_top_n = clamp_search_params(top_k, rerank_top_n)
 
         qvec = await embed_query(query)
         pool = await get_pool()

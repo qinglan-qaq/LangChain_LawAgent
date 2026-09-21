@@ -391,6 +391,9 @@ def ingest_node(state: AgentState) -> dict:
         "current_step_index": 0,
         "replan_needed": False,
         "replan_reason": None,
+        # M3/M8: replanner 空计划标记与用户补充列表一并归位
+        "replan_empty": False,
+        "user_supplements": [],
         "final_answer": "",
         "final_prompts": "",
         "prompts_record": PromptsRecord(),
@@ -613,8 +616,8 @@ def ask_element_node(state: AgentState) -> dict:
 
     Returns:
         dict: 状态更新,各分支语义——无待问问题 → 空 dict 不重复
-            interrupt;用户回答 → query 追加「[用户补充信息]」增强,
-            clarify_rounds 自增,clarify_history 追加本轮
+            interrupt;用户回答 → user_supplements 追加补充(M8: query
+            不再改写), clarify_rounds 自增,clarify_history 追加本轮
             ClarifyExchange,hitl_event(type=clarify, question=反问文本);
             用户跳过 → clarify_rounds 置满 settings.max_clarify_rounds 按原问题
             继续,hitl_event(type=clarify, skipped=True).
@@ -651,8 +654,8 @@ def ask_element_node(state: AgentState) -> dict:
             },
         }
 
-    # 答案织入增强 query(下游 planner/executor/检索全部基于此)
-    augmented_query = f"{state.query}\n[用户补充信息] {answer}"
+    # M8: 答案进 user_supplements 列表(query 不再改写 —— 多轮后原问题
+    # 会被挤出截断窗, 下游 prompt 统一经 _query_with_supplements 拼接)
     debug.info(
         "← Ask Element 完成",
         detail=f"answer={answer[:80]}",
@@ -668,7 +671,7 @@ def ask_element_node(state: AgentState) -> dict:
                 element_keys=keys,
             )
         ],
-        "query": augmented_query,
+        "user_supplements": [*(getattr(state, "user_supplements", None) or []), answer],
         "hitl_event": {
             "type": "clarify",
             "question": question_text,
@@ -738,6 +741,33 @@ def _normalize_plan(schema) -> list[PlanStep]:
     return steps
 
 
+# M8: 用户补充信息视图 — HITL 答案不再拼进 state.query(多轮后原问题被挤出
+# 截断窗), 改存 user_supplements 列表; prompt 组装时在 query 截断之后拼接,
+# 每条截 500 字、总量上限 2000 字
+_SUPPLEMENT_PER_ITEM_LIMIT = 500
+_SUPPLEMENT_TOTAL_LIMIT = 2000
+
+
+def _query_with_supplements(state: AgentState, limit: int = 0) -> str:
+    """原 query(可选截断) + 用户补充信息的拼接视图(planner/replanner/
+    executor/replan_check 的 prompt 统一走此视图)。"""
+    base = (state.query or "")[:limit] if limit else (state.query or "")
+    parts = [base] if base else []
+    total = 0
+    for s in getattr(state, "user_supplements", None) or []:
+        piece = (s or "")[:_SUPPLEMENT_PER_ITEM_LIMIT]
+        if not piece:
+            continue
+        if total + len(piece) > _SUPPLEMENT_TOTAL_LIMIT:
+            piece = piece[: _SUPPLEMENT_TOTAL_LIMIT - total]
+            if piece:
+                parts.append(f"[用户补充信息] {piece}")
+            break
+        parts.append(f"[用户补充信息] {piece}")
+        total += len(piece)
+    return "\n".join(parts)
+
+
 # regex 截 JSON 主体 + PlanSchema 校验; 失败直接 raise(用户约束: 不做兜底)
 def _parse_plan_json(raw: str) -> "PlanSchema":
     """解析 reasoner 流式累积的 content 为 PlanSchema;失败直接抛错(不做兜底)。"""
@@ -748,6 +778,30 @@ def _parse_plan_json(raw: str) -> "PlanSchema":
     if not m:
         raise ValueError(f"Planner 输出中未找到 JSON 对象: {raw[:200]!r}")
     return PlanSchema.model_validate(json.loads(m.group(0)))
+
+
+# M2: planner/replanner 共用的裸 openai 客户端 — 模块级懒加载单例。
+# 旧实现每次 _stream_plan 都 openai.AsyncOpenAI(...) 新建且从不 close
+# (泄漏); 无 timeout 时 DeepSeek 挂住 → planner 节点永挂。单例 + 60s 超时。
+_PLANNER_OPENAI_TIMEOUT = 60.0
+_planner_openai_client = None
+_planner_openai_lock = threading.Lock()
+
+
+def _get_planner_openai_client():
+    """DeepSeek reasoner 裸流式客户端(懒加载单例, timeout=60s)。"""
+    global _planner_openai_client
+    if _planner_openai_client is None:
+        with _planner_openai_lock:
+            if _planner_openai_client is None:
+                import openai
+
+                _planner_openai_client = openai.AsyncOpenAI(
+                    api_key=settings.deepseek_api_key,
+                    base_url=settings.deepseek_base_url or None,
+                    timeout=_PLANNER_OPENAI_TIMEOUT,
+                )
+    return _planner_openai_client
 
 
 # raw openai SDK 流式跑 planner/replanner: reasoning 逐帧推 CoT 总线, content 拼齐后解析计划
@@ -788,10 +842,8 @@ async def _stream_plan(
     thread_id = (config.get("configurable") or {}).get("thread_id", "")
     reasoning: list[str] = []
     content: list[str] = []
-    client = openai.AsyncOpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url or None,
-    )
+    # M2: 模块级单例(带 60s 超时), planner/replanner/解析失败重试共用一个客户端
+    client = _get_planner_openai_client()
     stream = await client.chat.completions.create(
         model=settings.deepseek_pro_model,
         messages=[{"role": "user", "content": prompt_text}],
@@ -838,7 +890,8 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
         )
 
     prompt = PromptTemplate.from_template(template).format(
-        query=query[:3000],
+        # M8: 原问题截断后拼用户补充信息(HITL 答案不再改写 query)
+        query=_query_with_supplements(state, 3000),
         available_tools=_tools_desc(),
         elements_digest=state.case_elements.digest(),
     )
@@ -1004,7 +1057,8 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
     prompt = EXECUTOR_PROMPT.format(
         step_description=step.description,
         tool_name=step.tool_name,
-        user_query=state.query,
+        # M8: 决策用 query 统一走带用户补充的视图
+        user_query=_query_with_supplements(state),
         elements_digest=state.case_elements.digest(),
         **summaries,
     )
@@ -1222,6 +1276,16 @@ async def replan_check_node(state: AgentState, config: RunnableConfig = None) ->
     await _publish_node_status(config, "replan_check")
     debug.debug("→ 进入 Replan Check 节点", detail="LLM 语义判断执行质量...")
 
+    # M3 兜底: 空 plan 不允许再触发 replanner(executor 空转 → 死循环),
+    # 按「材料不足」直接放行 finalize
+    if not state.plan:
+        debug.warning("← Replan Check: 计划为空,按材料不足收尾")
+        return {
+            "replan_needed": False,
+            "replan_reason": "计划为空,材料不足",
+            "insufficient_reason": "none",
+        }
+
     steps_desc = []
     for s in state.plan:
         label = "✓" if s.status == "done" else "✗" if s.status == "failed" else "⋯"
@@ -1243,7 +1307,8 @@ async def replan_check_node(state: AgentState, config: RunnableConfig = None) ->
         )
         result = await chain.ainvoke(
             {
-                "user_query": state.query[:1000],
+                # M8: 决策用 query 统一走带用户补充的视图
+                "user_query": _query_with_supplements(state, 1000),
                 "executed_summary": "\n".join(steps_desc) or "无已执行步骤",
                 "doc_count": len(state.rag_documents),
                 "quality_verdict": quality_verdict,
@@ -1319,9 +1384,9 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
     Returns:
         dict: 状态更新,分支语义——LLM 生成追问失败或用户未补充 →
             {"mid_clarify_used": True} 静默放行,由 replanner 联网兜底;
-            用户补充 → query 织入「[检索反馈追问]/[用户澄清]」增强,
-            case_elements 深拷贝后按 element_key 记录(来源 mid_clarify),
-            附 hitl_event(type=mid_clarify, question=追问文本).
+            用户补充 → user_supplements 追加「[检索反馈追问]/[用户澄清]」
+            (M8: query 不改写), case_elements 深拷贝后按 element_key 记录
+            (来源 mid_clarify), 附 hitl_event(type=mid_clarify, question=追问文本).
     """
     t0 = time.time()
     await _publish_node_status(config, "mid_clarify")
@@ -1359,7 +1424,8 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
         debug.info("← Mid Clarify: 用户未补充", detail="转联网兜底")
         return {"mid_clarify_used": True}
 
-    augmented_query = f"{state.query}\n[检索反馈追问] {v.question}\n[用户澄清] {answer}"
+    # M8: 追问与澄清进 user_supplements(原 query 不改写), 下游 prompt
+    # 经 _query_with_supplements 拼接
     ce = state.case_elements.model_copy(deep=True)
     if v.element_key in {e.key for e in ce.elements}:
         ce.update(v.element_key, answer, by="mid_clarify")
@@ -1370,7 +1436,10 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
     )
     return {
         "mid_clarify_used": True,
-        "query": augmented_query,
+        "user_supplements": [
+            *(getattr(state, "user_supplements", None) or []),
+            f"[检索反馈追问] {v.question}\n[用户澄清] {answer}",
+        ],
         "case_elements": ce,
         "hitl_event": {
             "type": "mid_clarify",
@@ -1427,7 +1496,7 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
         error=state.error or "无",
         replan_reason=reason,
         available_tools=_tools_desc(),
-        user_query=state.query[:2000],
+        user_query=_query_with_supplements(state, 2000),
         next_id=len(state.plan) + 1,
     )
 
@@ -1442,6 +1511,24 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
     ][:3]
     new_reasoning = [f"[Replan] {reason}"] + list(result.reasoning or [])
 
+    # M3: LLM 返回空补充计划 → 按「材料不足」收尾, 不再回 executor 空转。
+    # 旧路径: executor idx>=len(plan) 返回 {} → replan_check 又要 replan →
+    # 循环直至 recursion_limit 整轮 GraphRecursionError
+    if not additional:
+        debug.warning(
+            "← Replanner 空 plan,按材料不足直接收尾",
+            detail=f"已有步骤{len(state.plan)}步无新增",
+            result=f"elapsed={time.time() - t0:.2f}s | → finalize",
+        )
+        return {
+            "plan": list(state.plan),
+            "reasoning": new_reasoning,
+            "replan_needed": False,
+            "replan_reason": "重规划未产生新步骤,材料不足,基于现有材料收尾",
+            "error": None,
+            "replan_empty": True,
+        }
+
     elapsed = time.time() - t0
     new_names = [f"{s.step_id}.{s.tool_name}" for s in additional]
     debug.info(
@@ -1455,6 +1542,7 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
         "replan_needed": False,
         "replan_reason": None,
         "error": None,
+        "replan_empty": False,
     }
 
 
@@ -1502,7 +1590,8 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         async for chunk in chain.astream(
             {
                 "elements_digest": state.case_elements.digest(),
-                "query": state.query[:3000],
+                # M8: 带用户补充的视图(与旧"补充拼进 query"的行为对齐)
+                "query": _query_with_supplements(state, 3000),
                 "laws_digest": laws_digest,
                 "cases_digest": cases_digest,
             }
@@ -1520,7 +1609,9 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         docs = "\n".join(f"- {d.chunk_text[:300]}" for d in state.rag_documents[:3])
         chain = FINALIZE_CASE_PROMPT | get_executor_llm()
         parts: list[str] = []
-        async for chunk in chain.astream({"docs": docs, "query": state.query}):
+        async for chunk in chain.astream(
+            {"docs": docs, "query": _query_with_supplements(state)}
+        ):
             parts.append(chunk.content or "")
         answer = "".join(parts)
         debug.info(
@@ -1532,7 +1623,9 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
 
     chain = FINALIZE_DIRECT_PROMPT | get_executor_llm()
     parts = []
-    async for chunk in chain.astream({"query": state.query}):
+    async for chunk in chain.astream(
+        {"query": _query_with_supplements(state)}
+    ):
         parts.append(chunk.content or "")
     answer = "".join(parts)
     debug.info(
@@ -1639,8 +1732,8 @@ def hitl_budget_node(state: AgentState) -> dict:
     Returns:
         dict: 状态更新,分支语义——resume 为收尾(空或含收尾关键词) →
             budget_hitl_used + hitl_event(choice=finish),带现有材料
-            finalize;补充原文 → budget_hitl_used + query 织入
-            「[用户补充信息]」+ replan_needed/replan_reason(最后一次
+            finalize;补充原文 → budget_hitl_used + user_supplements 追加
+            (M8: query 不改写) + replan_needed/replan_reason(最后一次
             执行) + error 清空,hitl_event(choice=supplement).
     """
     missing_parts = []
@@ -1682,11 +1775,12 @@ def hitl_budget_node(state: AgentState) -> dict:
             },
         }
 
-    augmented_query = f"{state.query}\n[用户补充信息] {answer}"
+    # M8: 补充进 user_supplements(query 不改写), 最后一次 replan 时由
+    # _query_with_supplements 拼进 planner/replanner prompt
     debug.info("← Budget: 用户补充", detail=f"answer={answer[:80]} | 最后一次 replan")
     return {
         "budget_hitl_used": True,
-        "query": augmented_query,
+        "user_supplements": [*(getattr(state, "user_supplements", None) or []), answer],
         "replan_needed": True,
         "replan_reason": "预算耗尽,用户补充关键信息,最后一次执行",
         "error": None,
@@ -1843,6 +1937,20 @@ def route_after_degrade(state: AgentState) -> str:
     return "replan_check"
 
 
+# replanner 出口(M3): 空补充计划 → finalize 收尾(材料不足);有新步骤 → executor
+def route_after_replanner(state: AgentState) -> str:
+    """重规划器出口路由(M3)。
+
+    Returns:
+        str: 下一节点名 —— replanner 产出空补充计划(replan_empty) →
+            "finalize"(按材料不足收尾, 防 executor↔replan_check 空转
+            到 recursion_limit);正常 → "executor"。
+    """
+    if state.replan_empty:
+        return "finalize"
+    return "executor"
+
+
 # 预算询问出口: 选择补充(replan_needed 已置)→replanner 最后一搏 / 收尾(默认)→finalize
 def route_after_budget(state: AgentState) -> str:
     """预算询问出口路由。
@@ -1961,7 +2069,12 @@ def build_graph(checkpointer=None, store=None):
         route_after_budget,
         {"replanner": "replanner", "finalize": "finalize"},
     )
-    builder.add_edge("replanner", "executor")
+    # M3: replanner 出口改条件路由 —— 空补充计划(replan_empty)直接 finalize
+    builder.add_conditional_edges(
+        "replanner",
+        route_after_replanner,
+        {"executor": "executor", "finalize": "finalize"},
+    )
     builder.add_edge("finalize", END)
     builder.add_edge("chitchat", END)
 

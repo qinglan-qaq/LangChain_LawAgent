@@ -107,13 +107,16 @@ async def retrieve_legal_knowledge(
         )
     except Exception as e:
         # 检索后端不可用时优雅降级,不中断 Agent 流程
+        # M9: 异常原文不进工具结果(可含 DSN/密钥提示, LLM 可转述)——
+        # 换固定中文文案, 原始异常进日志; 对齐 db_tools.fetch_laws 模式
         tool_log.error(
             "← 工具异常: retrieve_legal_knowledge",
             detail=f"检索后端不可用: {str(e)[:120]}",
+            exc_info=True,
         )
         return {
             "status": "error",
-            "message": f"检索后端不可用: {str(e)[:200]}",
+            "message": "案例检索暂时不可用,请稍后重试",
             "rag_documents": [],
         }
 
@@ -327,6 +330,15 @@ async def analyze_legal_issue(
         answer_parts.append(str(raw))
 
     answer = "".join(answer_parts)
+
+    # M10: LLM 流读尽但 answer 为空 —— 不再当成功返回空 final_answer
+    # (下游 finalize 复用空串会直接给出"空答案"); 显式 error 触发质量门控
+    if not answer.strip():
+        tool_log.warning("← 工具返回: analyze_legal_issue", result="answer 为空, 记 error")
+        return {
+            "status": "error",
+            "message": "分析结果为空,请重试",
+        }
 
     tool_log.info(
         "← 工具返回: analyze_legal_issue",
