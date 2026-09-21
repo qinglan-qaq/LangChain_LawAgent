@@ -119,9 +119,27 @@ class RAG_service:
         else:
             print(f"索引 '{self.index_name}' 已存在.")
         if wait_for_completion:
-            while not self.pc.describe_index(self.index_name).status.get(
-                "ready", False
-            ):
+            # L20: 就绪轮询加总超时与失败态直判, 不再无限转
+            # (Pinecone IndexModel.status 为 IndexStatus, ready/state 两字段;
+            #  state 可能取值 Ready/Initializing/InitializationFailed/...)
+            deadline = time.monotonic() + 600  # 总超时 600s
+            while True:
+                status = self.pc.describe_index(self.index_name).status
+                if status.get("ready", False):
+                    break
+                state = str(status.get("state", "") or "").lower()
+                # 明确失败态直接抛, 不再傻等
+                if state in (
+                    "failed",
+                    "initialization_failed",
+                    "initializationfailed",
+                    "error",
+                ):
+                    raise RuntimeError(f"索引创建失败: state={state}")
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"索引就绪等待超时(600 秒): {self.index_name}"
+                    )
                 time.sleep(2)
 
         self.index = self.pc.Index(self.index_name)
@@ -163,6 +181,11 @@ class RAG_service:
 
         # 默认读取的为Document形式
         documents = loader.load()
+
+        # L6: 空文档(空文件/加载异常)裸下标 documents[0] 会 IndexError →
+        # 显式校验抛错(错误风格对齐本文件 RuntimeError 中文文案)
+        if not documents:
+            raise ValueError(f"文档加载结果为空, 无法解析: {file_path}")
 
         # 统一换行符 (\r\n → \n), 避免跨平台正则匹配问题
         raw_text = documents[0].page_content
@@ -395,8 +418,8 @@ class RAG_service:
             )
             return []
 
-        # 步骤3：提取文本对
-        texts = [m.metadata["chunk_text"] for m in matches]
+        # 步骤3：提取文本对(L6: metadata 缺 chunk_text 不再 KeyError)
+        texts = [m.metadata.get("chunk_text", "") if m.metadata else "" for m in matches]
         pairs = [[query, t] for t in texts]
 
         # 步骤4：重排序

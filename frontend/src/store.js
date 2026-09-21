@@ -1,9 +1,12 @@
-import { ref } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 
 // 会话 id 按模式分键存储(M13): 两模式共用一个 sid 会让 AT/AS 前缀与
 // 端点模式不符(后端 400 session_mode_mismatch)且线程互串
 const SID_KEYS = { attorney: 'lawapp_sid_attorney', assistant: 'lawapp_sid_assistant' }
 const sidKey = () => SID_KEYS[state.value.mode] || SID_KEYS.attorney
+
+// L12: 用户消息折叠阈值(两处共用, 不再各自写 120 魔数)
+export const COLLAPSE_LEN = 120
 
 export const state = ref({
   mode: 'attorney',          // attorney | assistant
@@ -57,17 +60,30 @@ export function abortCurrentStream() {
   }
 }
 
+// L11: 会话列表刷新信号 —— App.vue 收到 session_id 事件/HistorySidebar 切会话后
+// 写入递增 tick, HistorySidebar watch 后重拉列表(单向通知, 不加轮询)
+export const sessionsTick = ref(0)
+
 // 打字机效果(用户决策): token 流入 full, 显示层逐字追平
+// L10: 组件卸载时清 interval, 不再泄漏定时器
 export function useTypewriter(full, shown, cps = 60) {
   let timer = null
+  function stop() {
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+  }
   function start() {
     if (timer) return
     timer = setInterval(() => {
       if (shown.value.length >= full.value.length) {
-        clearInterval(timer); timer = null; return
+        stop()
+        return
       }
       shown.value = full.value.slice(0, shown.value.length + 1)
     }, 1000 / cps)
   }
-  return { start }
+  onBeforeUnmount(stop)
+  return { start, stop }
 }

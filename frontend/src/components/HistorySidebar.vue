@@ -1,6 +1,6 @@
 <script setup>
-import { onMounted, ref } from 'vue'
-import { setSession } from '../store'
+import { onMounted, ref, watch } from 'vue'
+import { setSession, sessionsTick } from '../store'
 import { listSessions, getSessionDetail } from '../api'
 import CitationList from './CitationList.vue'
 
@@ -10,13 +10,19 @@ const detail = ref(null)
 const detailOf = ref('')
 const openSeq = ref(0) // M12: 乱序守卫 —— 只认最新一次点击的响应
 
-onMounted(async () => {
+// L11: 列表拉取独立成函数, onMounted 与 sessionsTick 刷新共用
+async function loadSessions() {
   try {
     sessions.value = await listSessions()
   } catch (e) {
     error.value = String(e)
   }
-})
+}
+
+onMounted(loadSessions)
+
+// L11: 新会话建立/流中 session_id 事件后刷新列表(不加轮询)
+watch(sessionsTick, loadSessions)
 
 // M12: 旧实现裸 await 无 try/catch(fetch 失败未提示)、慢响应乱序覆盖、
 // setSession 在 fetch 前提交(点了会话切走后仍被切回)——
@@ -35,14 +41,17 @@ async function open(sid) {
     detail.value = d
     detailOf.value = sid
     setSession(sid)
+    // L11: 切会话后刷新列表(切换侧 last_active 排序变化)
+    sessionsTick.value++
   } catch (e) {
     error.value = String(e)
   }
 }
 
+// L9: 列表源 filter(Boolean) 防后端降级/脏数据混入 null 项
 function citationsOf(d) {
   if (!d) return []
-  return [...(d.law_results || []), ...(d.rag_documents || [])]
+  return [...(d.law_results || []), ...(d.rag_documents || [])].filter(Boolean)
 }
 </script>
 

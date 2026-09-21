@@ -115,7 +115,8 @@ async def _get_server_store():
 
             pg_store = AsyncPostgresStore(
                 conn=None,  # AutoPoolConn: 传 None 时内部自动建池
-                index={"dims": 1024, "embed": embed_fn_for_store,
+                # L3: 嵌入维度接 settings.embed_dim 旋钮(不再硬编码 1024)
+                index={"dims": settings.embed_dim, "embed": embed_fn_for_store,
                        "fields": ["summary", "content"]},
             )
             await pg_store.setup()
@@ -182,7 +183,10 @@ async def search_cases(query: str, top_k: int = 5) -> str:
     """
     from lawApp_LangGraph.tools.rag_tools import retrieve_legal_knowledge
 
-    result = await retrieve_legal_knowledge.ainvoke({"query": query, "top_k": 20})
+    # L7: 透传调用方 top_k 并钳制 1..50(旧实现固定取 20 条, 调用方
+    # 传大 top_k 被静默砍到 20 且无任何信号)
+    k = max(1, min(int(top_k), 50))
+    result = await retrieve_legal_knowledge.ainvoke({"query": query, "top_k": k})
     docs = result.get("rag_documents", []) if isinstance(result, dict) else []
     status = result.get("status", "error") if isinstance(result, dict) else "error"
 
@@ -192,7 +196,7 @@ async def search_cases(query: str, top_k: int = 5) -> str:
         return "未检索到相关案例。"
 
     lines = [f"共检索到 {len(docs)} 个相关案例:", ""]
-    for doc in docs[:top_k]:
+    for doc in docs[:k]:
         if isinstance(doc, dict):
             lines.append(
                 f"[{doc.get('year', '')}年 | 案号:{doc.get('case_number', '未知')}] "
@@ -223,9 +227,13 @@ async def recall_memory(query: str, top_k: int = 3) -> str:
     try:
         items = await store.asearch(MEM_NAMESPACE, query=query, limit=top_k)
     except (TypeError, ValueError):
-        items = await store.asearch(MEM_NAMESPACE, limit=top_k)
+        # L4: fallback 自身在 except 体内, 裸跑不被兄弟分支捕获 → 再包一层
+        try:
+            items = await store.asearch(MEM_NAMESPACE, limit=top_k)
+        except Exception:
+            return "记忆库暂不可用,请稍后再试。"
     except Exception:
-        return "记忆库暂不可用。"
+        return "记忆库暂不可用,请稍后再试。"
 
     if not items:
         return "未找到相关记忆。"

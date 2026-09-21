@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted } from 'vue'
-import { state, resetTurn, setSession, abortController } from './store'
+import { state, resetTurn, setSession, abortController, COLLAPSE_LEN, sessionsTick } from './store'
 import { streamConsult, streamResume } from './sse'
 import { getSessionDetail } from './api'
 import ModeSwitch from './components/ModeSwitch.vue'
@@ -44,8 +44,10 @@ function handleStreamEvent(e, assistant) {
     state.value.interrupt = e.data
     assistant.done = true
   } else if (e.event === 'answer') assistant.text = e.data
-  else if (e.event === 'session_id') setSession(e.data)
-  else if (e.event === 'tool_usage') state.value.toolUsage = e.data
+  else if (e.event === 'session_id') {
+    setSession(e.data)
+    sessionsTick.value++ // L11: 新会话建立后刷新会话列表
+  } else if (e.event === 'tool_usage') state.value.toolUsage = e.data
   else if (e.event === 'error') {
     state.value.error = String(e.data)
     state.value.reasoningError = true
@@ -63,7 +65,7 @@ async function submit({ text, docType }) {
   resetTurn()
   state.value.busy = true
   state.value.error = ''
-  state.value.messages.push({ role: 'user', text, collapsed: text.length > 120, done: true })
+  state.value.messages.push({ role: 'user', text, collapsed: text.length > COLLAPSE_LEN, done: true })
   state.value.messages.push({ role: 'assistant', text: '', done: false })
   const isAttorney = state.value.mode === 'attorney'
   // M11: assistant 模式案情走 POST body(4000 CJK 经 URL 会超浏览器/代理长度

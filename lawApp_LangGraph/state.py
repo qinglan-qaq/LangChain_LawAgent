@@ -347,6 +347,9 @@ class AgentState(BaseModel):
     mid_clarify_used: bool = False
     budget_hitl_used: bool = False
     degrade_used: bool = False
+    # 降级询问次数(L15: 每询问一次门槛翻倍 —— 首次 error_streak>=阈值,
+    # 之后 >=阈值*(次数+1);旧 checkpoint 缺字段按默认 0, 兼容)
+    degrade_ask_count: int = 0
     # 最近一次 interrupt 事件(覆盖语义)
     hitl_event: Optional[Dict[str, Any]] = None
 

@@ -66,15 +66,19 @@ async def setup_runtime() -> None:
         from lawApp_LangGraph.RAG_service.embedder import embed_fn_for_store
 
         checkpointer = MemorySaver()
+        # L3: 嵌入维度接 settings.embed_dim 旋钮(不再硬编码 1024)
         store = InMemoryStore(
             index={
-                "dims": 1024,
+                "dims": settings.embed_dim,
                 "embed": embed_fn_for_store,
                 "fields": ["summary", "content"],
             }
         )
         checkpoint_backend = "inmemory"
-        logger.info("使用 InMemory checkpointer + InMemoryStore(BGE 1024 维索引)")
+        logger.info(
+            "使用 InMemory checkpointer + InMemoryStore(BGE %d 维索引)",
+            settings.embed_dim,
+        )
 
     graph = app.build_graph(checkpointer=checkpointer, store=store)
     app.set_graph(graph)  # utils / api 经 app.get_graph() 取同一实例
@@ -125,7 +129,8 @@ async def _setup_postgres():
     store = AsyncPostgresStore(
         conn=store_pool,
         index={
-            "dims": 1024,
+            # L3: 嵌入维度接 settings.embed_dim 旋钮(不再硬编码 1024)
+            "dims": settings.embed_dim,
             "embed": embed_fn_for_store,
             "fields": ["summary", "content"],
         },

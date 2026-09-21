@@ -14,6 +14,7 @@ Legal Consultation API v3.0.0 (upgrade-v1)
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -60,6 +61,10 @@ from lawApp_LangGraph.FastAPI.utils import (
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
+# 标准库 logger(观测旁路告警, propagate=True 便于测试/采集捕获;
+# system/flow 包装 logger propagate=False, 不适合旁路告警)
+logger = logging.getLogger("lawApp.api")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -79,6 +84,17 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:  # pragma: no cover — runtime 内部已降级,此处兜底
         system.warning("运行时装配异常", detail=str(e)[:200])
+
+    # L19: DEEPSEEK_API_KEY 缺失在启动期显式爆(fail loud), 不再等到首次
+    # LLM 调用才炸;只在此处(startup 路径)抛, 模块 import 不触发
+    if not (settings.deepseek_api_key or "").strip():
+        system.error(
+            "启动校验失败", detail="DEEPSEEK_API_KEY 未配置, LLM 全链路不可用"
+        )
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY 未配置: LLM 全链路(规划/分析/语义确认)不可用, "
+            "请在 lawApp_LangGraph/.env 配置后重启服务"
+        )
     yield
     from lawApp_LangGraph import runtime
 
@@ -250,7 +266,9 @@ async def _safe_audit(session_id: str, event_type: str, payload: dict) -> None:
         await upsert_session(session_id)
         await record_audit(session_id, event_type, payload)
     except Exception:
-        pass  # 审计失败不影响主流程(db 层已捕获,双保险)
+        # L1: 审计旁路失败零日志曾完全静默 —— 记 warning 带堆栈(对齐
+        # _safe_upsert_session 模式), 不影响主流程
+        logger.warning("审计写入失败(旁路)", exc_info=True)
 
 
 async def _safe_upsert_session(sid: str) -> None:
@@ -961,13 +979,22 @@ async def ask_pdf(request: QueryRequest):
 
 @app.post("/feedback")
 async def feedback(request: FeedbackRequest):
-    """记录用户对回答的评分反馈."""
+    """记录用户对回答的评分反馈.
+
+    L1: 反馈是旁路观测, 与其他写路径统一契约 —— 写入失败不 500
+    (其他审计/会话登记失败均静默放行, 唯独这里打穿用户体验),
+    记 warning 返回 200 + degraded 标记."""
     from lawApp_LangGraph.db import record_feedback
 
     try:
         await record_feedback(request.session_id, request.rating, request.comment)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"反馈写入失败: {e}")
+    except Exception:
+        logger.warning("反馈写入失败(旁路)", exc_info=True)
+        return {
+            "status": "ok",
+            "degraded": True,
+            "message": "反馈记录暂不可用,感谢您的反馈",
+        }
     return {"status": "success", "message": "感谢您的反馈"}
 
 

@@ -303,5 +303,9 @@ def sse_event(event: str, data) -> str:
     """SSE 帧: data: {"event": E, "data": D}\n\n — D 保持原类型
     (str 原样, dict/list 结构化)。前端 sse.js 与 07 册按此契约解析
     e["data"] 直接取对象(如 reasoning 帧的 {"source","delta"})。
+    L2: payload 含非 JSON 原生值(datetime/模型对象等)时 default=str
+    兜底序列化(对齐 db.record_audit / _trace_json 模式), 不再 TypeError。
     """
-    return f"data: {json.dumps({'event': event, 'data': data}, ensure_ascii=False)}\n\n"
+    return (
+        f"data: {json.dumps({'event': event, 'data': data}, ensure_ascii=False, default=str)}\n\n"
+    )

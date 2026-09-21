@@ -77,7 +77,15 @@ async def search_memory(query: str, top_k: int = 3) -> dict:
         )
     except (TypeError, ValueError):
         # 无向量索引的 store 不支持语义检索 → 退化为取最近条目
-        items = await store.asearch(MEM_NAMESPACE, limit=top_k)
+        # L4: fallback 自身在 except 体内, 旧实现裸跑不被兄弟分支捕获 → 再包一层
+        try:
+            items = await store.asearch(MEM_NAMESPACE, limit=top_k)
+        except Exception as e:
+            tool_log.error(
+                "← 工具异常: search_memory(降级检索)",
+                detail=str(e)[:120],
+            )
+            return {"memory_results": [], "status": "error", "count": 0}
     except Exception as e:
         tool_log.error("← 工具异常: search_memory", detail=str(e)[:120])
         return {"memory_results": [], "status": "error", "count": 0}

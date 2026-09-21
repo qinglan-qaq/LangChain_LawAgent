@@ -411,6 +411,7 @@ def ingest_node(state: AgentState) -> dict:
         "mid_clarify_used": False,
         "budget_hitl_used": False,
         "degrade_used": False,
+        "degrade_ask_count": 0,
         "pending_questions": [],
         # 咨询分类归位(防止上一轮 chitchat 残留路由到闲聊节点)
         "question_category": "marriage_legal",
@@ -1677,10 +1678,15 @@ def hitl_degrade_node(state: AgentState) -> dict:
     # H3: 子串匹配降级为纯指令词 fast-path(与 utils.is_command_word 共用),
     # 自由文本已由 API normalize_resume 经 LLM 语义归一("retry"/"skip"/"abort")
     cmd = is_command_word(choice) or ""
+    # L15: 降级询问由一次性 degrade_used 改计数 —— 每询问一次门槛翻倍
+    # (路由按 error_streak >= 阈值*(degrade_ask_count+1) 判定),
+    # 允许再次询问但越来越难, 不再首次询问后永久关闭
+    ask_count = state.degrade_ask_count + 1
     if cmd == "retry":
         debug.info("← Degrade: 用户选择重试", detail=f"tool={failed_tool}")
         return {
             "degrade_used": True,
+            "degrade_ask_count": ask_count,
             "error_streak": 0,
             "error": None,
             "replan_needed": True,
@@ -1694,6 +1700,7 @@ def hitl_degrade_node(state: AgentState) -> dict:
     if cmd in ("abort", "finish"):  # 终止类指令(结束/终止/stop)
         return {
             "degrade_used": True,
+            "degrade_ask_count": ask_count,
             "final_answer": (
                 "本次咨询因服务暂时不可用而中止,已收集的信息不会丢失。"
                 "请稍后再试,或联系专业律师获取帮助。"
@@ -1708,6 +1715,7 @@ def hitl_degrade_node(state: AgentState) -> dict:
     debug.info("← Degrade: 用户选择跳过", detail=f"tool={failed_tool}")
     return {
         "degrade_used": True,
+        "degrade_ask_count": ask_count,
         "error_streak": 0,
         "error": None,
         "hitl_event": {
@@ -1850,14 +1858,19 @@ def route_after_planner(state: AgentState) -> str:
 
 # executor 出口: 带 tool_calls → tools; 连续失败达阈值 → hitl_degrade; 其余按剩余步骤走
 def route_after_executor(state: AgentState) -> str:
-    """执行器出口路由(含降级分支）。
+    """执行器出口路由(含降级分支,L15 计数门槛)。
 
     Returns:
-        str: 下一节点名 —— 连续失败达阈值且未用过降级 → "hitl_degrade";
+        str: 下一节点名 —— 连续失败达阈值*(degrade_ask_count+1) →
+            "hitl_degrade"(每询问一次门槛翻倍, 不再一次性永久关闭);
             最新 AIMessage 带 tool_calls → "tools";其余按剩余步骤 →
             "executor"(还有步骤) / "replan_check"(全部完成).
     """
-    if state.error_streak >= settings.error_streak_threshold and not state.degrade_used:
+    # L15: 旧条件 ... and not state.degrade_used 一次询问后永久关闭
+    if (
+        state.error_streak
+        >= settings.error_streak_threshold * (state.degrade_ask_count + 1)
+    ):
         return "hitl_degrade"
     last_ai = next(
         (m for m in reversed(state.messages) if isinstance(m, AIMessage)), None
@@ -1874,15 +1887,20 @@ def route_after_executor(state: AgentState) -> str:
     return target
 
 
-# merge 出口: 连续失败达阈值且未降级过 → hitl_degrade; 其余按剩余步骤 → executor/replan_check
+# merge 出口: 连续失败达阈值 → hitl_degrade; 其余按剩余步骤 → executor/replan_check
 def route_after_merge(state: AgentState) -> str:
-    """合并出口路由(含降级分支）。
+    """合并出口路由(含降级分支,L15 计数门槛)。
 
     Returns:
-        str: 下一节点名 —— 连续失败达阈值且未用过降级 → "hitl_degrade";
+        str: 下一节点名 —— 连续失败达阈值*(degrade_ask_count+1) →
+            "hitl_degrade"(每询问一次门槛翻倍, 不再一次性永久关闭);
             其余按剩余步骤 → "executor"(还有步骤) / "replan_check"(全部完成).
     """
-    if state.error_streak >= settings.error_streak_threshold and not state.degrade_used:
+    # L15: 旧条件 ... and not state.degrade_used 一次询问后永久关闭
+    if (
+        state.error_streak
+        >= settings.error_streak_threshold * (state.degrade_ask_count + 1)
+    ):
         return "hitl_degrade"
     target = (
         "executor" if state.current_step_index < len(state.plan) else "replan_check"

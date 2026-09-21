@@ -41,12 +41,13 @@ class BaseRetriever(ABC):
         """
         raise NotImplementedError
 
-    async def health_check(self) -> bool:
-        try:
-            await self.search("__health_check__", top_k=1, rerank_top_n=1)
-            return True
-        except Exception:
-            return False
+    async def health_check(self) -> dict:
+        """轻量健康检查(L8): 只确认后端对象可寻址, 返回状态与后端名。
+
+        旧实现调 self.search(...) 触发 GB 级嵌入/重排模型全冷启动,
+        供探活调用得不偿失;现不触发任何检索/模型加载。
+        """
+        return {"status": "ok", "backend": type(self).__name__}
 
 
 def get_retriever() -> BaseRetriever:

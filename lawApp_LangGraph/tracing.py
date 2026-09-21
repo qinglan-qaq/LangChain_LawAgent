@@ -342,6 +342,10 @@ def _instrument_llm_cls():
                     c = getattr(m, "content", None)
                     if isinstance(c, str) and c:
                         parts.append(c)
+                    elif c:
+                        # L22: list 形式 content(多模态/内容块)不再落 None,
+                        # str() 兜底拼进聚积文本
+                        parts.append(str(c))
                     yield chunk
             except Exception:
                 _emit_llm_span(self.model_name, messages, last, t0, "error")

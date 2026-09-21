@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
-import { state, useTypewriter } from '../store'
+import { state, useTypewriter, COLLAPSE_LEN } from '../store'
 
 // 流式目标: 最后一条 assistant 消息(打字机只对它生效)
 const lastAssistant = computed(
@@ -38,7 +38,7 @@ watch(lastAssistant, () => {
           <!-- 用户消息: 超长默认折叠, 点击展开(用户决策「提问可折叠」) -->
           <template v-if="m.role === 'user'">
             <span class="whitespace-pre-wrap">{{
-              m.collapsed && !m.expanded ? m.text.slice(0, 120) + '…' : m.text
+              m.collapsed && !m.expanded ? m.text.slice(0, COLLAPSE_LEN) + '…' : m.text
             }}</span>
             <button
               v-if="m.collapsed"

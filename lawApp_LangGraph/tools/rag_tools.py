@@ -189,6 +189,22 @@ def evaluate_case_relevance(
         detail=f"input_docs={len(documents) if documents else 0}",
     )
 
+    # L5: planner/LLM 可能误把整个检索结果 dict 当 documents 传入,
+    # 旧实现 len() 报错或把 dict 当"非空"逐 key 评估出假结论 ——
+    # 先尝试取 rag_documents, 取不到或仍非列表 → 显式 error
+    if isinstance(documents, dict):
+        documents = documents.get("rag_documents")
+    if not isinstance(documents, list):
+        tool_log.error(
+            "← 工具异常: evaluate_case_relevance",
+            detail=f"输入格式错误: {type(documents).__name__}",
+        )
+        return {
+            "status": "error",
+            "message": "输入格式错误,应为检索文档列表",
+            "evaluation": None,
+        }
+
     if not documents:
         tool_log.info(
             "← 工具返回: evaluate_case_relevance",
@@ -301,7 +317,19 @@ async def analyze_legal_issue(
     """
     t0 = time.time()
 
-    pr = _resolve_prompts_record(prompts_record)
+    # L5: PromptsRecord(**dict) 对非法字段(未知键/类型不符)会抛
+    # TypeError/ValidationError —— 旧实现直接打穿为工具异常, 显式 error
+    try:
+        pr = _resolve_prompts_record(prompts_record)
+    except Exception as e:
+        tool_log.error(
+            "← 工具异常: analyze_legal_issue",
+            detail=f"prompts_record 格式错误: {str(e)[:120]}",
+        )
+        return {
+            "status": "error",
+            "message": "提示词记录格式错误,请重试",
+        }
 
     case_n = len(pr.evaluate_retrieved_documents)
     web_n = len(pr.web_search_results)
