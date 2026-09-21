@@ -20,6 +20,8 @@ export const state = ref({
   status: '',                // 当前工作状态(source=status, 覆盖式更新)
   toolUsage: {},             // 工具使用 JSON 记录 {toolName: [结果摘要]}
   tools: [],                 // 工具时间线 {name, result}
+  steps: [],                 // 执行进度步骤 {text, done, current}(progress 事件 "[2/5] xx" 解析)
+  promptsLog: '',            // 提示词记录(prompts_record/final_prompts 事件, 单行截断 200 字符)
   elements: [],              // 要素面板
   interrupt: null,           // 当前 HITL 载荷
   busy: false,
@@ -45,7 +47,8 @@ export function resetTurn() {
   Object.assign(state.value, {
     reasoning: '', reasoningActive: false, reasoningError: false,
     planText: '', status: '', toolUsage: {},
-    tools: [], elements: [], interrupt: null, error: '',
+    tools: [], steps: [], promptsLog: '',
+    elements: [], interrupt: null, error: '',
   })
 }
 

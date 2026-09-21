@@ -77,6 +77,22 @@ function citationsOf(d) {
         {{ detail.final_answer }}
       </div>
       <div v-else class="text-slate-400">未产出最终回答(可能停在人工确认)</div>
+      <!-- 澄清记录(需求3): 后端会话详情新增 clarify_history, 旧会话可能缺失 -->
+      <div
+        v-if="detail.clarify_history && detail.clarify_history.length"
+        class="mt-2 border-t pt-1"
+      >
+        <div class="text-slate-500 mb-1">澄清记录</div>
+        <ul class="space-y-1">
+          <li v-for="(c, i) in detail.clarify_history" :key="i" class="text-slate-600">
+            <div>第{{ c.round }}轮 · {{ c.question }}</div>
+            <div v-if="c.options && c.options.length" class="text-slate-500">
+              {{ c.options.map((o) => (typeof o === 'string' ? o : o.label)).join(' / ') }}
+            </div>
+            <div>用户: {{ c.answer }}</div>
+          </li>
+        </ul>
+      </div>
       <CitationList :sources="citationsOf(detail)" />
     </div>
   </aside>

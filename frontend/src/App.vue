@@ -7,10 +7,7 @@ import ModeSwitch from './components/ModeSwitch.vue'
 import DisclaimerToast from './components/DisclaimerToast.vue'
 import HistorySidebar from './components/HistorySidebar.vue'
 import ChatView from './components/ChatView.vue'
-import ThinkingPanel from './components/ThinkingPanel.vue'
-import ToolTimeline from './components/ToolTimeline.vue'
-import StatusBar from './components/StatusBar.vue'
-import PlanPanel from './components/PlanPanel.vue'
+import ThinkingBox from './components/ThinkingBox.vue'
 import ElementPanel from './components/ElementPanel.vue'
 import CitationList from './components/CitationList.vue'
 import InterruptPanel from './components/InterruptPanel.vue'
@@ -40,8 +37,42 @@ function handleStreamEvent(e, assistant) {
     state.value.tools[state.value.tools.length - 1] &&
       (state.value.tools[state.value.tools.length - 1].result = e.data)
   else if (e.event === 'elements') state.value.elements = e.data
-  else if (e.event === 'interrupt') {
+  else if (e.event === 'progress') {
+    // 执行进度(需求2): "[2/5] 检索婚姻法条文" → 解析当前步/总步数, 重建 steps
+    const text = String(e.data || '')
+    const m = /^\[(\d+)\/(\d+)\]/.exec(text)
+    if (m) {
+      const cur = Number(m[1])
+      const total = Number(m[2])
+      const steps = state.value.steps
+      // 补齐总槽位(保留已见文本, 未到的步骤先用占位符)
+      while (steps.length < total) steps.push({ text: `步骤 ${steps.length + 1}`, done: false, current: false })
+      if (steps.length > total) steps.length = total
+      steps[cur - 1].text = text.replace(/^\[\d+\/\d+\]\s*/, '')
+      steps.forEach((s, i) => {
+        s.done = i + 1 < cur
+        s.current = i + 1 === cur
+      })
+    }
+  } else if (e.event === 'prompts_record') {
+    // 提示词记录(需求5): 单行截断 200 字符逐行追加
+    state.value.promptsLog +=
+      (typeof e.data === 'string' ? e.data : JSON.stringify(e.data)).slice(0, 200) + '\n'
+  } else if (e.event === 'final_prompts') {
+    // 最终提示词: 同 prompts_record, 加「【最终】」前缀区分
+    state.value.promptsLog +=
+      ('【最终】' + (typeof e.data === 'string' ? e.data : JSON.stringify(e.data))).slice(0, 200) + '\n'
+  } else if (e.event === 'interrupt') {
     state.value.interrupt = e.data
+    // HITL 问答记录(需求3): 追问以独立消息入流, 便于完整回看对话
+    state.value.messages.push({
+      role: 'assistant',
+      kind: 'hitl_question',
+      hitl_type: e.data.type || '',
+      text: e.data.question || e.data.message || '请确认',
+      options: e.data.options || null,
+      done: true,
+    })
     assistant.done = true
   } else if (e.event === 'answer') assistant.text = e.data
   else if (e.event === 'session_id') {
@@ -55,6 +86,11 @@ function handleStreamEvent(e, assistant) {
     assistant.done = true
     state.value.reasoningActive = false
     state.value.status = ''
+    // 终止帧: 全部步骤标记完成(执行进度收尾)
+    state.value.steps.forEach((s) => {
+      s.done = true
+      s.current = false
+    })
   }
 }
 
@@ -112,6 +148,14 @@ async function submit({ text, docType }) {
 // 失败保护(H11): interrupt 不预清, 首个成功流事件后才清; 失败/断流时恢复面板(本地副本优先, 服务端兜底)
 async function resumeHITL(answer) {
   const savedInterrupt = state.value.interrupt // 失败恢复用(首个成功流事件前不清)
+  // HITL 问答记录(需求3): 用户回答入消息流(跳过时记「(跳过)」), 头部带所答问题摘要
+  state.value.messages.push({
+    role: 'user',
+    kind: 'hitl_answer',
+    text: answer || '(跳过)',
+    question: savedInterrupt?.question || savedInterrupt?.message || '',
+    done: true,
+  })
   state.value.busy = true
   state.value.error = ''
   state.value.messages.push({ role: 'assistant', text: '', done: false })
@@ -192,10 +236,7 @@ async function restoreInterruptFromServer(sid) {
         >
           出错: {{ state.error }} (不做兜底, 请修正后重试)
         </p>
-        <StatusBar />
-        <ThinkingPanel />
-        <PlanPanel />
-        <ToolTimeline />
+        <ThinkingBox />
         <ChatView />
         <ElementPanel />
         <InterruptPanel

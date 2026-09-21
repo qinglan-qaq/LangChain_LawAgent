@@ -34,9 +34,37 @@ const options = computed(() =>
   )
 )
 const isText = computed(() => TEXT_KINDS.has(props.interrupt.type))
+// 选择题模式(需求1): 文本型 + 后端下发非空 options → 单选 + 「其他」补充输入
+const isMCQ = computed(() => isText.value && options.value.length > 0)
 const selected = ref('')
 const custom = ref('')
+const otherText = ref('') // 「其他」选项的补充输入
 const busy = computed(() => state.value.busy)
+
+// 「其他」选项哨兵值: 与后端下发选项 value 空间隔离
+const OTHER = '__other__'
+// 选择题选项(含追加的「其他」项)
+const mcqOptions = computed(() => [...options.value, { value: OTHER, label: '其他（请输入）' }])
+// 选项字母徽标: 优先后端 value(单字符 A/B/C...), 缺失按序号补(65+i 字符码)
+function letterOf(i, o) {
+  const v = String(o.value || '')
+  return v.length === 1 ? v : String.fromCharCode(65 + i)
+}
+// 选择题可提交: 已选项且选「其他」时补充输入非空
+const canSubmitMCQ = computed(
+  () => selected.value && (selected.value !== OTHER || otherText.value.trim()),
+)
+// 选择题提交: 载荷取选项的 label 文本(非字母/哨兵值), 「其他」取补充输入
+function onMCQSubmit() {
+  if (busy.value || !canSubmitMCQ.value) return
+  if (selected.value === OTHER) emit('resume', otherText.value.trim())
+  else emit('resume', options.value.find((o) => o.value === selected.value)?.label || selected.value)
+}
+// 「其他」输入框 Enter 提交(IME 组合中不提交, 同 send 的 keydown 判定)
+function onOtherEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  onMCQSubmit()
+}
 
 function send(answer, allowEmpty = false, e) {
   // IME 组合中(上屏候选词 Enter 在 keyup 时 isComposing 已为 false, 故改 keydown 判 isComposing/keyCode 229): 不提交
@@ -60,16 +88,74 @@ function onPass() {
 
 <template>
   <div class="border border-amber-300 rounded-xl p-4 my-2 bg-amber-50">
-    <div class="text-sm font-semibold text-amber-800">
-      {{ TYPE_LABEL[interrupt.type] || interrupt.type }}
+    <div class="flex items-center gap-2">
+      <div class="text-sm font-semibold text-amber-800">
+        {{ TYPE_LABEL[interrupt.type] || interrupt.type }}
+      </div>
+      <!-- 轮次徽标: 多轮澄清时后端下发 round(旧载荷无此键则不显示) -->
+      <span
+        v-if="interrupt.round"
+        class="text-xs text-amber-700 bg-amber-100 rounded px-1.5 py-0.5"
+      >
+        第 {{ interrupt.round }} 轮
+      </span>
     </div>
     <p class="text-sm my-2">
-      {{ interrupt.message || interrupt.question || '请补充信息' }}
+      {{ interrupt.question || interrupt.message || '请补充信息' }}
     </p>
 
-    <!-- 单选选项(后端 options 载荷, v4): 官方 Inspira 未移植 radio 组件, 按
-         ToolTimeline 策略用原生 input + Tailwind 直写, 选中态高亮 -->
-    <ul v-if="options.length" class="flex flex-col gap-1 my-2">
+    <!-- 选择题模式(需求1): 文本型 + options 载荷 → 单选(字母徽标) + 「其他」补充输入;
+         样式沿原生 input + Tailwind 直写(官方 Inspira 无 radio 组件) -->
+    <template v-if="isMCQ">
+      <ul class="flex flex-col gap-1 my-2">
+        <li v-for="(o, i) in mcqOptions" :key="o.value">
+          <label
+            class="flex items-center gap-2 px-3 py-1.5 rounded-lg border cursor-pointer text-sm transition-colors"
+            :class="
+              selected === o.value
+                ? 'border-amber-500 bg-amber-100'
+                : 'border-slate-300 bg-white hover:bg-amber-50'
+            "
+          >
+            <input v-model="selected" type="radio" class="accent-amber-600" :value="o.value" />
+            <span
+              class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border border-amber-400 bg-amber-50 text-xs font-semibold text-amber-700"
+            >
+              {{ letterOf(i, o) }}
+            </span>
+            {{ o.label }}
+          </label>
+        </li>
+      </ul>
+      <!-- 「其他」选中后展开的补充输入(IME 组合中的 Enter 不提交) -->
+      <input
+        v-if="selected === OTHER"
+        v-model="otherText"
+        class="w-full border rounded px-2 py-1 text-sm my-1"
+        placeholder="请输入其他内容"
+        @keydown.enter="onOtherEnter"
+      />
+      <div class="flex items-center gap-3 my-2">
+        <ShimmerButton
+          :disabled="busy || !canSubmitMCQ"
+          class="text-sm px-4 py-1.5"
+          background="rgba(180,83,9,1)"
+          @click="onMCQSubmit"
+        >
+          提交
+        </ShimmerButton>
+        <button
+          class="px-4 py-1.5 rounded border border-slate-400 text-sm text-slate-600 hover:bg-amber-100"
+          :disabled="busy"
+          @click="onPass"
+        >
+          跳过
+        </button>
+      </div>
+    </template>
+
+    <!-- 确认型选项(后端 options 载荷, v4): 选中态高亮 -->
+    <ul v-else-if="options.length" class="flex flex-col gap-1 my-2">
       <li v-for="o in options" :key="o.value">
         <label
           class="flex items-center gap-2 px-3 py-1.5 rounded-lg border cursor-pointer text-sm transition-colors"
@@ -85,7 +171,7 @@ function onPass() {
       </li>
     </ul>
 
-    <!-- 选择型: ShimmerButton 确认 + 跳过; 文本型: 自由输入 + 发送 + 跳过 -->
+    <!-- 选择型: ShimmerButton 确认 + 跳过; 文本型(无选项): 自由输入 + 发送 + 跳过 -->
     <div v-if="!isText" class="flex items-center gap-3 my-2">
       <ShimmerButton
         :disabled="busy"
@@ -103,7 +189,7 @@ function onPass() {
         跳过
       </button>
     </div>
-    <div v-else class="flex gap-2">
+    <div v-else-if="!isMCQ" class="flex gap-2">
       <input
         v-model="custom"
         class="flex-1 border rounded px-2 py-1 text-sm"
