@@ -230,13 +230,16 @@ def _schema_models():
             default_factory=list, description="按案由升关键的要素"
         )
         questions: List[ElementQuestion] = Field(
-            default_factory=list, description="本轮反问,只问关键且缺失,最多3个"
+            default_factory=list, description="本轮反问,每轮只生成 1 个,聚焦最关键的 missing 要素"
         )
         done: bool = Field(description="要素已足够,无需再问")
 
     class MidClarifySchema(BaseModel):
         question: str = Field(description="一个聚焦追问,律师问诊语气,一句话")
         element_key: str = Field(default="", description="追问对应的要素 key")
+        options: List[str] = Field(
+            default_factory=list, description="该追问的 2~3 个推荐选项,无合适选项时为空数组"
+        )
 
     class ConfirmSchema(BaseModel):
         proceed: bool = Field(description="用户回复语义是否为同意继续")
@@ -611,6 +614,10 @@ def ask_element_node(state: AgentState) -> dict:
     纯记账节点不调 LLM;无 pending_questions 时直接返回,保证 resume
     重跑幂等. resume 返回值: 非空字符串=用户回答;空/None=跳过(轮数置满).
 
+    每轮只取 pending_questions[0] 单问聚焦(用户决策: 不再把多要素打包
+    成一句); q.options 非空时附 options(A/B/C 字母标注)与 allow_other
+    供前端渲染推荐选项, 为空则不加键(纯文本反问, 兼容旧载荷消费方).
+
     Args:
         state (AgentState): 图状态,读取 pending_questions /
             case_elements / clarify_rounds / query.
@@ -619,27 +626,36 @@ def ask_element_node(state: AgentState) -> dict:
         dict: 状态更新,各分支语义——无待问问题 → 空 dict 不重复
             interrupt;用户回答 → user_supplements 追加补充(M8: query
             不再改写), clarify_rounds 自增,clarify_history 追加本轮
-            ClarifyExchange,hitl_event(type=clarify, question=反问文本);
-            用户跳过 → clarify_rounds 置满 settings.max_clarify_rounds 按原问题
-            继续,hitl_event(type=clarify, skipped=True).
+            ClarifyExchange(含本轮反问的 options),hitl_event(type=
+            clarify, question=反问文本);用户跳过 → clarify_rounds 置满
+            settings.max_clarify_rounds 按原问题继续,hitl_event(type=
+            clarify, skipped=True).
     """
     questions = state.pending_questions
     if not questions:
         return {}  # 防御:无问题不 interrupt
 
-    question_text = " ".join(q.question for q in questions)
-    keys = [q.key for q in questions]
-    answer = interrupt(
-        {
-            "type": "clarify",
-            "round": f"{state.clarify_rounds + 1}/{settings.max_clarify_rounds}",
-            "question": question_text,
-            "elements": [
-                {"key": e.key, "label": e.label, "status": e.status}
-                for e in state.case_elements.elements
-            ],
-        }
-    )
+    q = questions[0]  # 单问聚焦: 每轮只问 1 个要素(用户决策)
+    question_text = q.question
+    keys = [q.key]
+    payload = {
+        "type": "clarify",
+        "round": f"{state.clarify_rounds + 1}/{settings.max_clarify_rounds}",
+        "question": question_text,
+        "elements": [
+            {"key": e.key, "label": e.label, "status": e.status}
+            for e in state.case_elements.elements
+        ],
+    }
+    # 推荐选项非空 → 附 A/B/C 字母标注 + allow_other(允许自由输入);
+    # 为空不加键, 保持旧 interrupt 载荷形状(兼容存量前端/测试替身)
+    q_options = [t for t in (getattr(q, "options", None) or []) if t][:3]
+    if q_options:
+        payload["options"] = [
+            {"value": chr(ord("A") + i), "label": t} for i, t in enumerate(q_options)
+        ]
+        payload["allow_other"] = True
+    answer = interrupt(payload)
 
     answer = str(answer).strip() if answer else ""
     if not answer:
@@ -670,6 +686,7 @@ def ask_element_node(state: AgentState) -> dict:
                 question=question_text,
                 answer=answer,
                 element_keys=keys,
+                options=q_options,
             )
         ],
         "user_supplements": [*(getattr(state, "user_supplements", None) or []), answer],
@@ -1413,13 +1430,20 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
         debug.warning("Mid Clarify LLM 失败,转联网兜底", detail=str(e)[:100])
         return {"mid_clarify_used": True}
 
-    answer = interrupt(
-        {
-            "type": "mid_clarify",
-            "question": v.question,
-            "context_hint": f"检索到的案例集中在: {top_docs[:200]}",
-        }
-    )
+    # 推荐选项非空 → 附 A/B/C 字母标注 + allow_other(允许自由输入);
+    # 为空不加键, 保持旧 interrupt 载荷形状(getattr 兜底测试替身缺字段)
+    v_options = [t for t in (getattr(v, "options", None) or []) if t][:3]
+    payload = {
+        "type": "mid_clarify",
+        "question": v.question,
+        "context_hint": f"检索到的案例集中在: {top_docs[:200]}",
+    }
+    if v_options:
+        payload["options"] = [
+            {"value": chr(ord("A") + i), "label": t} for i, t in enumerate(v_options)
+        ]
+        payload["allow_other"] = True
+    answer = interrupt(payload)
     answer = str(answer).strip() if answer else ""
     if not answer:
         debug.info("← Mid Clarify: 用户未补充", detail="转联网兜底")

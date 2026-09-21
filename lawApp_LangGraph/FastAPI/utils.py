@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
+import threading
+from datetime import datetime
 from typing import Optional
 
 from fastapi import HTTPException
@@ -14,35 +15,50 @@ from lawApp_LangGraph.config import settings
 #  工具函数
 
 
-#  模式 → 会话 id 前缀(前缀-uuid 格式)
+#  模式 → 会话 id 前缀(前缀-时间戳-编号 格式)
 _SESSION_PREFIX = {"attorney": "AT", "assistant": "AS"}
 
 #  合法会话 id 格式(M6):
-#    新式  {AT|AS}-<uuid4hex12>          — uuid 跨进程/重启不撞号
-#    旧式  {AT|AS}-YYYYMMDD-HHMMSS-NNN  — 存量会话兼容(时间戳式)
-_SESSION_ID_NEW_RE = re.compile(r"^(AT|AS)-[0-9a-f]{12}$")
-_SESSION_ID_OLD_RE = re.compile(r"^(AT|AS)-\d{8}-\d{6}-\d{1,6}$")
+#    现行  {AT|AS}-YYYYMMDD-HHMMSS-NNN  — 模式-时间-编号(用户决策恢复;
+#                                          命中 NEW/OLD 任一 regex 均合法)
+#    兼容  {AT|AS}-<uuid4hex12>          — 存量 uuid 会话仍可续聊/恢复
+_SESSION_ID_NEW_RE = re.compile(r"^(AT|AS)-\d{8}-\d{6}-\d{1,6}$")
+_SESSION_ID_OLD_RE = re.compile(r"^(AT|AS)-[0-9a-f]{12}$")
+
+#  会话 id 生成(进程内锁 + 每秒计数): 同秒撞号由锁串行化 + 计数递增防住
+_SID_LOCK = threading.Lock()
+# prefix → (秒级时间戳键, 已用编号): 秒键变更即重置编号, 字典有界
+_SID_COUNTER: dict[str, tuple[str, int]] = {}
 
 
 def new_session_id(mode: str = "attorney") -> str:
-    """生成「前缀-uuid」格式的会话 id.
+    """生成「模式-时间-编号」格式的会话 id, 形如 AT-20260918-143025-001.
+
+    用户指定恢复 模式-时间-编号 格式(比 uuid 可读、可口头报号);
+    同秒撞号由进程内锁 + 计数防住; 多 worker 部署同秒跨进程撞号为
+    已知残余风险(当前 uvicorn 单 worker). 存量 uuid 会话仍合法可恢复.
 
     Args:
         mode: 咨询模式("attorney"/"assistant"), 映射前缀 AT/AS.
 
     Returns:
-        形如 "AT-1a2b3c4d5e6f" 的 id。旧实现(进程内计数器+秒级时间戳)
-        在多 worker / 同秒重启时撞号, 撞号即 checkpoint 互串 → 改 uuid4。
+        形如 "AT-20260918-143025-001" 的 id(编号 3 位, 同秒内递增).
     """
     prefix = _SESSION_PREFIX.get(mode, "AT")
-    return f"{prefix}-{uuid.uuid4().hex[:12]}"
+    with _SID_LOCK:
+        ts_key = f"{datetime.now():%Y%m%d-%H%M%S}"
+        last_key, seq = _SID_COUNTER.get(prefix, ("", 0))
+        # 秒键跨过 → 编号重置为 1; 同秒内 → 编号继续递增
+        seq = seq + 1 if last_key == ts_key else 1
+        _SID_COUNTER[prefix] = (ts_key, seq)
+    return f"{prefix}-{ts_key}-{seq:03d}"
 
 
 def _validate_session_id(sid: str, mode: str) -> None:
     """显式传入 sid 的格式/前缀校验(M6/M13)。
 
-    带 AT-/AS- 前缀的 sid 必须匹配新 uuid 或旧时间戳格式, 否则
-    400 invalid_session_id;格式合法但前缀与端点模式不符 →
+    带 AT-/AS- 前缀的 sid 必须匹配时间戳(模式-时间-编号)或存量 uuid
+    格式, 否则 400 invalid_session_id;格式合法但前缀与端点模式不符 →
     400 session_mode_mismatch(双模式共用 sid 会串线程)。
     不带 AT-/AS- 前缀的历史 sid 原样放行(兼容, 不做模式校验)。
     """
@@ -285,6 +301,20 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
          "status": e.status, "value": e.value}
         for e in (ce.elements if ce else [])
     ] if ce else []
+    # 澄清历史(需求3 后端侧): 每轮反问/回答/要素归属/推荐选项;
+    # 条目为 ClarifyExchange 实例或 dict(_field 兼容两种形状,
+    # getattr 兜底旧 checkpoint 缺 options 字段)
+    clarify_history = [
+        {
+            "round": _field(ex, "round", 0),
+            "question": _field(ex, "question", ""),
+            "answer": _field(ex, "answer", ""),
+            "element_keys": _field(ex, "element_keys", []) or [],
+            "options": _field(ex, "options", []) or [],
+            "at": _field(ex, "at", ""),
+        }
+        for ex in (state.get("clarify_history", []) or [])
+    ]
     return QueryResponse(
         query=state.get("query", ""),
         session_id=session_id,
@@ -295,6 +325,7 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
         reasoning=state.get("reasoning", []) or [],
         prompts_record=prompts_record,
         elements=elements,
+        clarify_history=clarify_history,
         tool_usage=build_tool_usage(state),
     )
 

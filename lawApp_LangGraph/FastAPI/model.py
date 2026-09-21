@@ -93,5 +93,7 @@ class QueryResponse(BaseModel):
     prompts_record: Dict[str, Any] = Field(default_factory=dict)
     # 案件要素面板数据(子项目A 澄清循环)
     elements: List[Dict[str, Any]] = Field(default_factory=list)
+    # 澄清历史(需求3 后端侧): 每轮反问/回答/推荐选项记录
+    clarify_history: Optional[List[Dict[str, Any]]] = None
     # 工具使用 JSON 记录: {tool_name: [结果摘要, ...]}(用户决策 v4)
     tool_usage: Dict[str, List[Any]] = Field(default_factory=dict)

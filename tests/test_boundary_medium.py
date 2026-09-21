@@ -425,17 +425,23 @@ def test_m5_run_sse_disconnect_records_cancelled(monkeypatch):
     assert flushed[-1].status == "cancelled", "trace 状态必须是 cancelled 而非 ok"
 
 
-# ── M6/M13: session id uuid + 校验 ──
+# ── M6/M13: session id 模式-时间-编号 + 校验 ──
+# M6 规格随用户决策变更: uuid → 模式-时间-编号(uuid 仍兼容)
 
 
-def test_m6_new_session_id_uuid_format_and_uniqueness():
+def test_m6_new_session_id_timestamp_format_and_uniqueness():
+    import re
+
     from lawApp_LangGraph.FastAPI.utils import new_session_id
 
     ids = {new_session_id("attorney") for _ in range(50)}
-    assert len(ids) == 50, "基本唯一性: 50 次生成不得撞号"
+    assert len(ids) == 50, "基本唯一性: 50 次生成不得撞号(同秒靠编号递增防重)"
+    pat = re.compile(r"^AT-\d{8}-\d{6}-\d{3}$")
     for sid in ids:
-        assert sid.startswith("AT-") and len(sid) == 3 + 12
-    assert new_session_id("assistant").startswith("AS-")
+        assert pat.match(sid), f"格式必须为 模式-时间-编号(3位): {sid}"
+    # 同秒两次生成 → 编号不同(进程内锁+计数)
+    assert new_session_id("attorney") != new_session_id("attorney")
+    assert re.match(r"^AS-\d{8}-\d{6}-\d{3}$", new_session_id("assistant"))
 
 
 def test_m6_ensure_session_validation():
@@ -443,12 +449,12 @@ def test_m6_ensure_session_validation():
 
     from lawApp_LangGraph.FastAPI.utils import ensure_session
 
-    # 新 uuid 格式
-    assert ensure_session("AT-1a2b3c4d5e6f", "attorney") == "AT-1a2b3c4d5e6f"
-    assert ensure_session("AS-1a2b3c4d5e6f", "assistant") == "AS-1a2b3c4d5e6f"
-    # 旧时间戳格式(存量会话兼容)
+    # 现行 模式-时间-编号 格式
     assert ensure_session("AT-20260918-143025-001", "attorney") == "AT-20260918-143025-001"
     assert ensure_session("AS-20260918-143025-42", "assistant") == "AS-20260918-143025-42"
+    # 存量 uuid 格式(旧会话兼容)
+    assert ensure_session("AT-1a2b3c4d5e6f", "attorney") == "AT-1a2b3c4d5e6f"
+    assert ensure_session("AS-1a2b3c4d5e6f", "assistant") == "AS-1a2b3c4d5e6f"
     # 无前缀历史 sid: 放行
     assert ensure_session("T-409-1", "attorney") == "T-409-1"
     # 空 sid → 新建

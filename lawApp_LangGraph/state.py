@@ -155,10 +155,13 @@ class ElementQuestion(BaseModel):
 
     由评估节点写入 pending_questions,反问节点读取后转为 interrupt
     载荷;随 state 序列化,支撑 checkpoint 恢复.
+    options 为该反问的 2~3 个推荐选项(律师问诊式), 无合适选项时为空
+    (退化为纯文本反问); 旧 checkpoint 缺该字段由默认值兜底.
     """
 
     key: str
     question: str
+    options: List[str] = Field(default_factory=list)
 
 
 class CaseElements(BaseModel):
@@ -260,6 +263,8 @@ class ClarifyExchange(BaseModel):
     question: str
     answer: str
     element_keys: List[str]
+    # 本轮反问的推荐选项(空=纯文本反问); 旧 checkpoint 缺字段由默认值兜底
+    options: List[str] = Field(default_factory=list)
     at: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 

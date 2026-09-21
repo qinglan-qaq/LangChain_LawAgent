@@ -430,6 +430,7 @@ async def get_session(sid: str):
             "interrupt": None,
             "prompts_record": None,
             "elements": None,
+            "clarify_history": None,
             "tool_usage": None,
             "degraded": True,
         }

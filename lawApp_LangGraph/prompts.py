@@ -89,11 +89,12 @@ ELEMENT_ASSESS_PROMPT = """你是法律AI系统的接诊分诊员,完成三件�
 
 ## 规则
 1. question_category=chitchat 或 other → applicable=false,要素映射与反问全部留空
-2. 反问只针对清单内**关键且仍为 missing** 的要素,每次最多 3 个
-3. 反问要像律师问诊:自然口语,一次最多打包 2~3 个要素为一句问话,体现专业与共情
-4. 已问过但用户没答的要素不要重复追问
-5. 关键要素齐了 → done=true(常规要素缺失不阻塞)
-6. element_updates 只标注有把握的映射,无把握不要标
+2. 反问只针对清单内的要素缺口, 每轮只生成 **1 个**反问: 优先针对当前最关键的 1 个 missing 要素; 关键要素都齐了, 就问最影响下一步分析的 1 个常规缺失要素
+3. 反问要像律师问诊: 自然口语、聚焦单一要素, 体现专业与共情
+4. 为该反问生成 **2~3 个推荐选项**: 选项要具体、互斥、覆盖常见真实情形, 律师问诊口吻, 每个不超过 20 字; 无合适选项时 options 为空数组(退化为纯文本反问)
+5. 已问过但用户没答的要素不要重复追问
+6. 关键要素齐了 → done=true(常规要素缺失不阻塞)
+7. element_updates 只标注有把握的映射,无把握不要标
 
 ## 用户问题
 {query}
@@ -102,7 +103,7 @@ ELEMENT_ASSESS_PROMPT = """你是法律AI系统的接诊分诊员,完成三件�
 第 {round} 轮 / 上限 {max_rounds} 轮
 
 只输出一个 JSON 对象,字段名必须与下面完全一致(不要输出任何其他文本):
-{{"question_category": "marriage_legal 或 concept 或 chitchat 或 other", "applicable": true 或 false, "element_updates": [{{"key": "要素key", "value": "要素摘要", "status": "known" 或 "na"}}], "na_keys": ["不涉及的要素key"], "promote_keys": ["升关键的要素key"], "questions": [{{"key": "要素key", "question": "一句话反问"}}], "done": true 或 false}}"""
+{{"question_category": "marriage_legal 或 concept 或 chitchat 或 other", "applicable": true 或 false, "element_updates": [{{"key": "要素key", "value": "要素摘要", "status": "known" 或 "na"}}], "na_keys": ["不涉及的要素key"], "promote_keys": ["升关键的要素key"], "questions": [{{"key": "要素key", "question": "一句话反问", "options": ["选项一文本", "选项二文本", "选项三文本"]}}], "done": true 或 false}}"""
 
 
 #  检索反馈追问 (v2 新增 — 检索不足且原因笼统时,先问人后搜网; v3: 去人设(用户决策))
@@ -121,9 +122,10 @@ MID_CLARIFY_PROMPT = """你是法律AI系统的接诊助理.
     (如:案例集中在"婚后共同还贷",就问"你的房子是婚前买的还是婚后买的?")
 2. 律师问诊语气,一句话
 3. element_key 填该追问对应的要素 key
+4. 为该追问生成 **2~3 个推荐选项**: 选项要具体、互斥、覆盖常见真实情形, 律师问诊口吻, 每个不超过 20 字; 无合适选项时 options 为空数组(退化为纯文本追问)
 
 只输出一个 JSON 对象,字段名必须与下面完全一致(不要输出任何其他文本):
-{{"question": "一个聚焦追问,律师问诊语气,一句话", "element_key": "追问对应的要素key"}}"""
+{{"question": "一个聚焦追问,律师问诊语气,一句话", "element_key": "追问对应的要素key", "options": ["选项一文本", "选项二文本", "选项三文本"]}}"""
 
 
 #  闲聊应答 (v3 新增 — question_category=chitchat 时走; 不带人设,不输出 JSON)
