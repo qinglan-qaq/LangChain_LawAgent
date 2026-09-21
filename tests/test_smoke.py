@@ -367,7 +367,10 @@ def test_interrupt_resume(no_llm):
         no_llm["plan_result"] = _FakeVerdict(reasoning=["要素齐"], plan=[])
         result2 = await g.ainvoke(Command(resume="结婚5年,有个3岁孩子"), config=cfg)
         assert result2.get("final_answer") == "测试回答"
-        assert "[用户补充信息]" in result2["query"]
+        # M8: HITL 补充不再改写 query, 原文进 user_supplements
+        # ([用户补充信息] 标记仅存在于 prompt 组装视图 _query_with_supplements)
+        assert result2["user_supplements"] == ["结婚5年,有个3岁孩子"]
+        assert "结婚" not in result2["query"]
         assert result2["clarify_history"], "应记录澄清历史"
         assert result2["clarify_rounds"] == 1
 

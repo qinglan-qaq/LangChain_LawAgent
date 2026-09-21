@@ -168,3 +168,8 @@
 2. H8 依 langchain-mcp-adapters 0.3.2 实际 API: MultiServerMCPClient 非 async context manager, 去掉 __aenter__/__aexit__ 调用
 3. H3 存量断言随 M8 规格冲突做意图保留修改(query→user_supplements)
 4. test_boundary_medium 加 _ENV_KEYS 快照防 api.py load_dotenv 同进程污染存量断言
+
+**补录(PG 恢复后复跑, 2026-09-21)**: postgres-vector 容器重启恢复后全量复跑
+- 4 个此前 SKIPPED 文件全部真实通过(test_sessions_degrade/test_trace_db/test_trace_e2e 直接过; test_smoke 1 断言随 M8 改为断言 user_supplements 后 11/11 过 — 与 H3 预算测试同型偏差, 偏差决策 3 已涵盖)
+- 回归 ipynb 复跑(--save 回写): **11 批 / 0 SKIPPED / 0 FAIL, ALL PASSED**
+- test_tracing 偶发抖动本轮未复现
