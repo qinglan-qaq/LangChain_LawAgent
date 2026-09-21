@@ -609,7 +609,7 @@ async def ask_stream(query: str = "", session_id: str | None = None):
                     "citations",
                     {"tool_calls": final_state.get("tool_calls", [])},
                 )
-            yield sse_event("done")
+            yield sse_event("done", "")
             flow.info(
                 "流式流程结束",
                 summary="流式回答完成",
