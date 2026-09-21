@@ -93,11 +93,11 @@
 - Produces: `_tool_by_name(name: str) -> Optional[Any]`;`_SESSION_LOCKS`/`try_acquire(sid)`;`_REASONING_BUS: dict[str, set[Queue]]`;resume 端点 400 语义 `no_pending_interrupt`/`invalid_session_id`;SSE 409 `session_busy`。
 - H4 注意: 锁释放与 `close_reasoning_channel` 在 finally;`open_reasoning_channel` 返回每流独立 queue。向后兼容: bus 只剩单订阅时行为与旧一致。
 
-- [ ] Step 1: 写失败测试(TDD): H1 注册后置 fake MCP 工具→planner 计划含它→可执行;H5 双重 resume→第二次 400;H7 插 NULL 行检索不炸;H9 `../../evil.pdf` 落 output_dir 内;H3 "婚姻关系已于2020年结束" 不判 finish(semantic_confirm 用 stub)
-- [ ] Step 2: 实现 H1-H9 全部改动
-- [ ] Step 3: `$PY -m pytest tests/test_boundary_high_backend.py -q --timeout=120 --timeout-method=thread` 全绿
-- [ ] Step 4: 全量回归 `$PY -m pytest tests/ -q --timeout=120 --timeout-method=thread -rs`(超时跳过不算失败)
-- [ ] Step 5: 提交 `C: 边界修复高危后端批 H1-H9 — ...`(列改动文件)
+- [x] Step 1: 写失败测试(TDD): H1 注册后置 fake MCP 工具→planner 计划含它→可执行;H5 双重 resume→第二次 400;H7 插 NULL 行检索不炸;H9 `../../evil.pdf` 落 output_dir 内;H3 "婚姻关系已于2020年结束" 不判 finish(semantic_confirm 用 stub)
+- [x] Step 2: 实现 H1-H9 全部改动
+- [x] Step 3: `$PY -m pytest tests/test_boundary_high_backend.py -q --timeout=120 --timeout-method=thread` 全绿
+- [x] Step 4: 全量回归 `$PY -m pytest tests/ -q --timeout=120 --timeout-method=thread -rs`(超时跳过不算失败)
+- [x] Step 5: 提交 `C: 边界修复高危后端批 H1-H9 — ...`(列改动文件)
 
 ### Task 2: 前端高危 H10-H12
 
@@ -108,31 +108,31 @@
 - Modify: `frontend/src/components/{DocComposer,InterruptPanel,ModeSwitch}.vue`
 - 验证: `cd frontend && npx vite build` 通过 + 逻辑核对清单
 
-- [ ] Step 1: sse.js 重构: `streamConsult(url, onEvent, {signal, method, body})`、`readSSE` 返 `{sawDone}`、坏帧跳过
-- [ ] Step 2: App.vue: AbortController 生命周期、submit/resume 传 signal、首个流事件后才清 interrupt、catch 恢复副本、`restoreInterruptFromServer(sid)`、校验失败回滚空消息(L14 顺带)
-- [ ] Step 3: ModeSwitch 切换 abort+reset;DocComposer/InterruptPanel IME keydown
-- [ ] Step 4: `npx vite build` 通过;核对项逐条打勾(H10 断流错误横幅/取消/坏帧,H11 面板恢复,H12 上屏不发送)
-- [ ] Step 5: 提交 `C: 边界修复高危前端批 H10-H12 — ...`
+- [x] Step 1: sse.js 重构: `streamConsult(url, onEvent, {signal, method, body})`、`readSSE` 返 `{sawDone}`、坏帧跳过
+- [x] Step 2: App.vue: AbortController 生命周期、submit/resume 传 signal、首个流事件后才清 interrupt、catch 恢复副本、`restoreInterruptFromServer(sid)`、校验失败回滚空消息(L14 顺带)
+- [x] Step 3: ModeSwitch 切换 abort+reset;DocComposer/InterruptPanel IME keydown
+- [x] Step 4: `npx vite build` 通过;核对项逐条打勾(H10 断流错误横幅/取消/坏帧,H11 面板恢复,H12 上屏不发送)
+- [x] Step 5: 提交 `C: 边界修复高危前端批 H10-H12 — ...`
 
 ### Task 3: 中危 M1-M15
 
 **Files:** api.py、utils.py、LangGraph_lawApp.py、state.py、tracing.py、db.py、RAG_service/pgvector_retriever.py、mcp/mcp_server.py、tools/{tools,rag_tools}.py、前端 {HistorySidebar,store}.js;Test: `tests/test_boundary_medium.py`(新建)
 
-- [ ] Step 1: 写失败测试: M1 rerank 0→不空;M3 replanner 空 plan→finalize 不触 recursion_limit;M6 非法 sid→400;M10 空 answer→error;M15 aget_state 失败→仍返回答案
-- [ ] Step 2: 实现 M1-M15(方案见总表;M8 新增 state 字段需 bump state.py 并保证旧 checkpoint 兼容——缺字段用默认工厂)
-- [ ] Step 3: 目标测试全绿 + 全量回归(命令同上)
-- [ ] Step 4: `npx vite build` 通过
-- [ ] Step 5: 提交 `C: 边界修复中危批 M1-M15 — ...`
+- [x] Step 1: 写失败测试: M1 rerank 0→不空;M3 replanner 空 plan→finalize 不触 recursion_limit;M6 非法 sid→400;M10 空 answer→error;M15 aget_state 失败→仍返回答案
+- [x] Step 2: 实现 M1-M15(方案见总表;M8 新增 state 字段需 bump state.py 并保证旧 checkpoint 兼容——缺字段用默认工厂)
+- [x] Step 3: 目标测试全绿 + 全量回归(命令同上)
+- [x] Step 4: `npx vite build` 通过
+- [x] Step 5: 提交 `C: 边界修复中危批 M1-M15 — ...`
 
 ### Task 4: 低危 L1-L22(除 L17/L18)
 
 **Files:** db.py、api.py、runtime.py、mcp_server.py、RAG_program.py、tools/{db_tools,rag_tools}.py、config.py、前端 CitationList/TypewriterText/HistorySidebar/api.js/store.js;Test: `tests/test_boundary_low.py`(新建)
 
-- [ ] Step 1: 写失败测试: L1 audit 失败有日志(caplog);L4 fallback 失败→status error;L5 dict 输入→status error;L19 缺 key 启动抛
-- [ ] Step 2: 实现 L1-L22 总表所列(前端项核对为主)
-- [ ] Step 3: 目标测试全绿 + 全量回归
-- [ ] Step 4: `npx vite build` 通过
-- [ ] Step 5: 提交 `C: 边界修复低危批 L1-L22 — ...`
+- [x] Step 1: 写失败测试: L1 audit 失败有日志(caplog);L4 fallback 失败→status error;L5 dict 输入→status error;L19 缺 key 启动抛
+- [x] Step 2: 实现 L1-L22 总表所列(前端项核对为主)
+- [x] Step 3: 目标测试全绿 + 全量回归
+- [x] Step 4: `npx vite build` 通过
+- [x] Step 5: 提交 `C: 边界修复低危批 L1-L22 — ...`
 
 ### Task 5: 回归证据 ipynb + 收官
 
@@ -140,7 +140,31 @@
 - Create: `tests_ipynb/08_boundary_audit_regression.ipynb`
 - Modify: `docs/superpowers/plans/2026-09-21-boundary-audit-fixes.md`(勾选框)
 
-- [ ] Step 1: 新建 notebook: cell 1 说明,cell 2 subprocess 跑 `$PY -m pytest tests/ -q --timeout=120 --timeout-method=thread -rs`、cell 3 解析末行输出结论 `ALL PASSED`/`HAS FAILURES`(超时 skipped 不算失败)
-- [ ] Step 2: `$PY scripts/run_nb.py tests_ipynb/08_boundary_audit_regression.ipynb` 实跑,确认全绿
-- [ ] Step 3: 计划文档勾选收官;提交 `C: 边界修复收官 — 回归 ipynb 全绿 ...`
-- [ ] Step 4: push 分支 `fix/boundary-audit-p0p1`
+- [x] Step 1: 新建 notebook: cell 1 说明,cell 2 subprocess 跑 `$PY -m pytest tests/ -q --timeout=120 --timeout-method=thread -rs`、cell 3 解析末行输出结论 `ALL PASSED`/`HAS FAILURES`(超时 skipped 不算失败)
+- [x] Step 2: `$PY scripts/run_nb.py tests_ipynb/08_boundary_audit_regression.ipynb` 实跑,确认全绿
+- [x] Step 3: 计划文档勾选收官;提交 `C: 边界修复收官 — 回归 ipynb 全绿 ...`
+- [x] Step 4: push 分支 `fix/boundary-audit-p0p1`
+
+---
+
+## 执行记录(2026-09-21 收官)
+
+| 批 | 提交 | 内容 | 测试 |
+|---|---|---|---|
+| 高危前端 | 85d367f | H10-H12 + L14 | vite build 过 + 逻辑核对清单 |
+| 跑测脚本 | afb4f3d | 纯超时失败记 SKIPPED | — |
+| 高危后端 | c315689 | H1-H9 + H10 后端(SSE ping) | test_boundary_high_backend 24 绿; 全量 4 PASS/5 SKIP/0 FAIL |
+| 中危 | 7c2bb5c | M1-M15 | test_boundary_medium 27 绿; 组合 65 绿; 全量 5 PASS/4 SKIP/1 FAIL(抖动, 复跑绿) |
+| 低危 | f9301df | L1-L22(除 L17/L18 非问题) | test_boundary_low 17 绿; 全量 7 PASS/4 SKIP/0 FAIL |
+| 收官 | 本提交 | 回归 ipynb + 计划勾选 | 见下 |
+
+**最终回归**: tests_ipynb/08_boundary_audit_regression.ipynb(run_all 实跑, --save 回写输出)
+- 全量 10 个测试文件: **7 PASS / 4 SKIPPED / 0 FAIL, ALL PASSED**
+- SKIPPED 4 文件(test_sessions_degrade/test_smoke/test_trace_db/test_trace_e2e)为 PG 容器不可用(Docker 引擎 WSL 挂载 vhdx E_ACCESSDENIED, 机器级问题)导致的环境超时, 按约定跳过; 修复批中 M14/H8 已使这些路径具备快速失败语义
+- 注: test_tracing::test_node_registration_wrapped_with_traced 存在偶发抖动(全量回归中出现 1 次, 累计复跑 7+ 连绿), 已观察未复现根因
+
+**偏差决策存档**:
+1. H1 步骤失败状态用 "failed" 而非 "error"(StepStatus Literal 不变量)
+2. H8 依 langchain-mcp-adapters 0.3.2 实际 API: MultiServerMCPClient 非 async context manager, 去掉 __aenter__/__aexit__ 调用
+3. H3 存量断言随 M8 规格冲突做意图保留修改(query→user_supplements)
+4. test_boundary_medium 加 _ENV_KEYS 快照防 api.py load_dotenv 同进程污染存量断言
