@@ -23,11 +23,46 @@ Cursor 挂载见 .cursor/mcp.json
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import sys
 
 from mcp.server.fastmcp import FastMCP
 
 from lawApp_LangGraph.config import settings
+
+# 工具底层走 psycopg 异步连接池, 必须跑在 SelectorEventLoop 上;
+# MCP 子进程/服务的循环由 mcp.run() 在导入之后才创建, db.py 的
+# 模块级 policy 切换来得太晚(Proactor 循环下 psycopg 池会死等) → 此处提前切
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# MCP stdio 子进程按 SDK 白名单继承 env, 可能缺 USERNAME;
+# torch dynamo 初始化走 getpass.getuser(), 缺失时在 Windows 上
+# import pwd(Unix-only) → ModuleNotFoundError → transformers 全线不可用
+os.environ.setdefault("USERNAME", "mcp-child")
+
+
+def _preload_native_deps() -> None:
+    """在 mcp.run() 启动 stdin 读取线程之前, 导入并预热全部重量级依赖。
+
+    Windows 实测死锁: stdio 传输下 MCP SDK 有工作线程阻塞在 stdin 的
+    同步读(os.read / BufferedReader.read)上, 此时任何线程再 LoadLibrary
+    新的 C 扩展(numpy/torch/psycopg 的 .pyd)会与该阻塞读互锁 → 子进程
+    在首次工具调用时挂死(见 P0-P1 执行记录)。工具内部均为函数级懒导入,
+    因此必须在模块导入期、即 stdin 读取线程尚不存在时一次性导入完:
+        - db / db_tools / rag_tools / tools: psycopg 等全部工具链依赖
+        - get_embedder(): numpy/torch + BGE 模型常驻, 调用期不再加载 DLL
+    """
+    from lawApp_LangGraph import db  # noqa: F401  psycopg C 扩展
+    from lawApp_LangGraph.RAG_service.embedder import get_embedder
+    from lawApp_LangGraph.tools import db_tools, rag_tools, tools  # noqa: F401
+
+    get_embedder()
+
+
+_preload_native_deps()
 
 logger = logging.getLogger("lawApp.mcp")
 

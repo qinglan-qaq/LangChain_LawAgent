@@ -23,7 +23,7 @@ class PgvectorRetriever(BaseRetriever):
         top_k: int = 20,
         rerank_top_n: int = 5,
         alpha: float = 0.4,  # noqa: ARG002 — 接口兼容，pgvector 为纯密集检索
-        namespace: str = "law_cases",  # noqa: ARG002 — pgvector 以表为单位，无 namespace
+        namespace: Optional[str] = None,  # noqa: ARG002 — pgvector 以表为单位，无 namespace
     ) -> list[dict]:
         from lawApp_LangGraph.db import get_pool
 

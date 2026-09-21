@@ -126,6 +126,35 @@ async def ensure_tables(conn: AsyncConnection) -> None:
             answer_snapshot TEXT,
             created_at  TIMESTAMPTZ DEFAULT NOW()
         );
+        -- P1 观测层(规格 docs/superpowers/specs/2026-09-20-eval-monitoring-spec.md 决策 2):
+        -- run→span 两表, Langfuse 兼容子集; 全文 JSONB 不截断
+        CREATE TABLE IF NOT EXISTS trace_runs (
+            run_id      TEXT PRIMARY KEY,
+            session_id  TEXT,
+            run_type    TEXT NOT NULL,
+            mode        TEXT,
+            status      TEXT NOT NULL,
+            query       TEXT,
+            final_answer TEXT,
+            metrics     JSONB DEFAULT '{}',
+            started_at  TIMESTAMPTZ,
+            ended_at    TIMESTAMPTZ
+        );
+        CREATE TABLE IF NOT EXISTS trace_spans (
+            id          BIGSERIAL PRIMARY KEY,
+            run_id      TEXT NOT NULL,
+            span_type   TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            status      TEXT,
+            input       JSONB,
+            output      JSONB,
+            state       JSONB,
+            latency_ms  INT,
+            token_usage JSONB,
+            started_at  TIMESTAMPTZ
+        );
+        CREATE INDEX IF NOT EXISTS idx_trace_spans_run ON trace_spans (run_id);
+        CREATE INDEX IF NOT EXISTS idx_trace_runs_session ON trace_runs (session_id, started_at);
         """
     )
     await conn.commit()
@@ -180,4 +209,63 @@ async def record_feedback(session_id: str, rating: int,
             "INSERT INTO feedback (session_id, rating, comment, answer_snapshot) VALUES (%s, %s, %s, %s)",
             (session_id, rating, comment, answer_snapshot[:4000]),
         )
+        await conn.commit()
+
+
+#  P1 观测层落库助手(trace_runs / trace_spans, 规格 2026-09-20-eval-monitoring-spec.md)
+
+
+def _trace_json(value: Any) -> "Json":
+    """JSONB 包装: 非 JSON 原生类型(state 含 Pydantic 模型等)用 default=str 兜住, 全文不截断。"""
+    from psycopg.types.json import Json
+
+    return Json(value, dumps=lambda o: json.dumps(o, default=str, ensure_ascii=False))
+
+
+async def insert_trace_run(run_id: str, session_id: str, run_type: str, mode: str,
+                           status: str, query: str, final_answer: str,
+                           metrics: dict, started_at: float, ended_at: float) -> None:
+    """写入/收尾更新一次运行(run_id 冲突时更新收尾字段)。"""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO trace_runs
+                (run_id, session_id, run_type, mode, status,
+                 query, final_answer, metrics, started_at, ended_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                final_answer = EXCLUDED.final_answer,
+                metrics = EXCLUDED.metrics,
+                ended_at = EXCLUDED.ended_at
+            """,
+            (run_id, session_id, run_type, mode, status, query, final_answer,
+             _trace_json(metrics), datetime.fromtimestamp(started_at),
+             datetime.fromtimestamp(ended_at)),
+        )
+        await conn.commit()
+
+
+async def insert_trace_spans(rows: list[dict]) -> None:
+    """批量写入 span 行。rows 每项键:
+    run_id / span_type / name / status / input / output / state /
+    latency_ms / token_usage / started_at(epoch float)。
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO trace_spans
+                    (run_id, span_type, name, status, input, output,
+                     state, latency_ms, token_usage, started_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                [(r["run_id"], r["span_type"], r["name"], r["status"],
+                  _trace_json(r["input"]), _trace_json(r["output"]),
+                  _trace_json(r["state"]), r["latency_ms"],
+                  _trace_json(r["token_usage"]), datetime.fromtimestamp(r["started_at"]))
+                 for r in rows],
+            )
         await conn.commit()

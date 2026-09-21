@@ -32,9 +32,13 @@ class BaseRetriever(ABC):
         top_k: int = 20,
         rerank_top_n: int = 5,
         alpha: float = 0.4,
-        namespace: str = "law_cases",
+        namespace: Optional[str] = None,
     ) -> list[dict]:
-        """检索与 query 相关的案例块，返回 RetrievedDocument 对齐的 dict 列表."""
+        """检索与 query 相关的案例块，返回 RetrievedDocument 对齐的 dict 列表.
+
+        namespace 为 None 时由实现方以 settings.pinecone_namespace 兜底
+        (env PINECONE_NAMESPACE 参数化, 见 config.py)。
+        """
         raise NotImplementedError
 
     async def health_check(self) -> bool:

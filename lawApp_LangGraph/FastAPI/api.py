@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from langgraph.types import Command
 
 from lawApp_LangGraph.config import settings
+from lawApp_LangGraph.tracing import RunContext, Span, attach_state, flush_run, set_run
 from lawApp_LangGraph.FastAPI.logging import (
     flow,
     set_session,
@@ -267,16 +268,20 @@ async def disclaimer():
 
 @app.get("/sessions")
 async def list_sessions():
-    """会话列表(sessions 表, 双模式端点的 _safe_upsert_session 数据源)。"""
+    """会话列表(sessions 表)。PG 断连降级为空列表 + ERROR 日志,不再 500(规格故事 22)。"""
     from lawApp_LangGraph.db import get_pool
 
-    pool = await get_pool()
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT session_id, meta, last_active_at FROM sessions "
-            "ORDER BY last_active_at DESC LIMIT 50"
-        )
-        rows = await cur.fetchall()
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT session_id, meta, last_active_at FROM sessions "
+                "ORDER BY last_active_at DESC LIMIT 50"
+            )
+            rows = await cur.fetchall()
+    except Exception as e:
+        flow.error("会话列表降级", detail=str(e))
+        return []
     return [
         {"session_id": r[0], "meta": r[1], "last_active_at": str(r[2])} for r in rows
     ]
@@ -352,7 +357,7 @@ async def ask_resume_stream(request: ResumeRequest):
     )
     resume_value = await normalize_resume(itype, request.answer, request_text)
 
-    return _run_sse(sid, Command(resume=resume_value))
+    return _run_sse(sid, Command(resume=resume_value), mode="attorney")
 
 
 @app.get("/ask/stream")
@@ -479,12 +484,14 @@ def _validate_stream_text(text: str, limit: int = 4000) -> None:
         )
 
 
-def _run_sse(sid: str, astream_input) -> StreamingResponse:
+def _run_sse(sid: str, astream_input, mode: str = "") -> StreamingResponse:
     """SSE 流式工厂: astream_input(新提问 dict 或 Command(resume=...)) 驱动图。
 
     ask 与 resume 两种流共用: 事件协议与 /ask/stream 一致
     (token/progress/tool_call/tool_result/elements/reasoning[CoT/状态/计划]/
     session_id/interrupt/answer/prompts_record/tool_usage/done)。
+    全链路 trace: event_stream 顶部建 RunContext, run()/pump() 子任务继承
+    contextvars → 节点/工具/llm span 自动归集, finally flush_run 落库(观测旁路)。
     """
     graph = get_graph()
     config = graph_config(sid)
@@ -495,6 +502,16 @@ def _run_sse(sid: str, astream_input) -> StreamingResponse:
 
     async def event_stream():
         import asyncio
+        from datetime import datetime
+
+        # run 上下文先于 task 创建(子任务继承 contextvar); resume 用 Command 输入
+        run_type = "live_resume" if isinstance(astream_input, Command) else "live_ask"
+        trace_run = set_run(RunContext(
+            run_id=f"{sid}:{datetime.now():%H%M%S%f}",
+            session_id=sid, run_type=run_type, mode=mode,
+            query=(astream_input.get("query") or "")
+            if isinstance(astream_input, dict) else "",
+        ))
 
         out_q: asyncio.Queue = asyncio.Queue()
         reasoning_q = open_reasoning_channel(sid)
@@ -513,6 +530,9 @@ def _run_sse(sid: str, astream_input) -> StreamingResponse:
             """消费 graph.astream, 事件形态与既有 /ask/stream 完全一致。"""
             final_state: dict = {}
             seen_steps: set[str] = set()
+            # values 流回填(决策 5): 本 super-step 更新过的节点名,
+            # 下一帧 values 到达时对应 node span 补 state 快照
+            pending_nodes: list[str] = []
             try:
                 async for stream_mode, chunk in graph.astream(
                     astream_input,
@@ -587,8 +607,14 @@ def _run_sse(sid: str, astream_input) -> StreamingResponse:
                                         ],
                                     )
                                 )
+                        pending_nodes.extend(
+                            str(n) for n in (chunk or {}) if isinstance(n, str)
+                        )
                     elif stream_mode == "values":
                         final_state = chunk or final_state
+                        # values 流回填: 本 super-step 后的完整 state → 对应 node span
+                        attach_state(pending_nodes, chunk or {})
+                        pending_nodes = []
 
                 snapshot = await graph.aget_state(config)
                 interrupt_req = extract_interrupt(snapshot)
@@ -598,8 +624,13 @@ def _run_sse(sid: str, astream_input) -> StreamingResponse:
                     await out_q.put(("session_id", sid))
                     await out_q.put(("interrupt", interrupt_req))
                     await _safe_audit(sid, "hitl_interrupt", interrupt_req)
+                    trace_run.status = "interrupted"
+                    trace_run.add(Span(span_type="hitl",
+                                       name=interrupt_req.get("type", "hitl"),
+                                       input=interrupt_req, started_at=time.time()))
                 else:
                     answer = (final_state.get("final_answer") or "").strip()
+                    trace_run.final_answer = answer
                     if answer:
                         await out_q.put(("answer", answer))
                     await out_q.put(("session_id", sid))
@@ -625,8 +656,11 @@ def _run_sse(sid: str, astream_input) -> StreamingResponse:
                     )
             except Exception as e:
                 flow.error("流式流程异常", detail=str(e))
+                trace_run.status = "error"
                 await out_q.put(("error", str(e)))
             finally:
+                # trace 落库先于 done 终止帧(观测旁路: 失败内部记 ERROR 放行, 决策 8)
+                await flush_run(trace_run)
                 # 唤醒 pump 排空残余 CoT 增量, done 由 pump 统一发出
                 await reasoning_q.put(None)
 
@@ -670,7 +704,7 @@ async def _mode_stream(
     if mode == "assistant":
         inputs["doc_type"] = doc_type
 
-    return _run_sse(sid, inputs)
+    return _run_sse(sid, inputs, mode=mode)
 
 
 @app.get("/attorney/ask/stream")
