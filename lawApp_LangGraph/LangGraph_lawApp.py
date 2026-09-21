@@ -238,9 +238,14 @@ def _schema_models():
     )
 
 
-PlanSchema, ReplanCheckSchema, RiskSchema, ElementAssessmentSchema, MidClarifySchema, ConfirmSchema = (
-    _schema_models()
-)
+(
+    PlanSchema,
+    ReplanCheckSchema,
+    RiskSchema,
+    ElementAssessmentSchema,
+    MidClarifySchema,
+    ConfirmSchema,
+) = _schema_models()
 
 
 # CoT 总线: thread_id → Queue; SSE 端点开道, planner/replanner 推 reasoning 增量
@@ -786,24 +791,24 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
         }
 
     template = PLANNER_SYSTEM
-    
+
     if (state.mode or "attorney") == "assistant":
         from lawApp_LangGraph.prompts import PLANNER_ASSISTANT_SUFFIX
 
         template = PLANNER_SYSTEM + PLANNER_ASSISTANT_SUFFIX.format(
             doc_type_label="起诉状" if state.doc_type != "defense" else "答辩状"
         )
-        
+
     prompt = PromptTemplate.from_template(template).format(
         query=query[:3000],
         available_tools=_tools_desc(),
         elements_digest=state.case_elements.digest(),
     )
-    
+
     result, _cot = await _stream_plan(prompt, "planner", config)
-    
+
     plan = _normalize_plan(result)
-    
+
     reasoning = list(result.reasoning or [])
 
     elapsed = time.time() - t0
@@ -1806,7 +1811,9 @@ def build_graph(checkpointer=None, store=None):
     #  (显式 name = 注册名: 函数名带 _node 后缀会与 values 回填的 pending_nodes 对不上)
     builder.add_node("ingest", traced("node", "ingest")(ingest_node))
     builder.add_node("risk_gate", traced("node", "risk_gate")(risk_gate_node))
-    builder.add_node("element_assess", traced("node", "element_assess")(element_assess_node))
+    builder.add_node(
+        "element_assess", traced("node", "element_assess")(element_assess_node)
+    )
     builder.add_node("ask_element", traced("node", "ask_element")(ask_element_node))
     builder.add_node("planner", traced("node", "planner")(planner_node))
     builder.add_node("executor", traced("node", "executor")(executor_node))

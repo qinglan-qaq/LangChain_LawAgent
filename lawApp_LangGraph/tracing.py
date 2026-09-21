@@ -3,12 +3,13 @@
 
 规格: docs/superpowers/specs/2026-09-20-eval-monitoring-spec.md(决策 3-6,9)
 - @traced(span_type) 包 图节点/工具函数: 记录 函数名/时延/前后成果/执行结果;
-  异常原样透传(不吞, 先记 error span)
+异常原样透传(不吞, 先记 error span)
 - LLM 层经 InstrumentedChatOpenAI 拦截 _agenerate/_astream(单点, 不逐函数装饰)
 - run 上下文 = contextvars;未 set 时 span 进游离缓冲(仅内存, 不落库不报错)
 - state 全量快照不在此模块 —— 由 api._run_sse 的 values 流经 attach_state 回填
 - flush_run 落库失败记 ERROR 放行(观测旁路, 决策 8)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +31,7 @@ _ORPHAN_CAP = 200
 
 @dataclass
 class Span:
-    span_type: str   # node | tool | llm | hitl
+    span_type: str  # node | tool | llm | hitl
     name: str
     status: str = "ok"  # ok | error | interrupted
     input: Any = None
@@ -69,7 +70,8 @@ class RunContext:
                 (s.token_usage or {}).get("completion") or 0 for s in self.spans
             ),
             "clarify_rounds": sum(
-                1 for s in self.spans
+                1
+                for s in self.spans
                 if s.span_type == "node" and s.name in ("ask_element", "mid_clarify")
             ),
         }
@@ -122,8 +124,12 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
             @functools.wraps(fn)
             async def awrapper(*args, **kwargs):
                 t0 = time.perf_counter()
-                span = Span(span_type=span_type, name=name or fn.__name__,
-                            input=_pack(args, kwargs), started_at=time.time())
+                span = Span(
+                    span_type=span_type,
+                    name=name or fn.__name__,
+                    input=_pack(args, kwargs),
+                    started_at=time.time(),
+                )
                 try:
                     out = await fn(*args, **kwargs)
                 except Exception as e:
@@ -142,8 +148,12 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             t0 = time.perf_counter()
-            span = Span(span_type=span_type, name=name or fn.__name__,
-                        input=_pack(args, kwargs), started_at=time.time())
+            span = Span(
+                span_type=span_type,
+                name=name or fn.__name__,
+                input=_pack(args, kwargs),
+                started_at=time.time(),
+            )
             try:
                 out = fn(*args, **kwargs)
             except Exception as e:
@@ -202,8 +212,10 @@ def _usage_from(msg: Any) -> Optional[dict]:
     u = getattr(msg, "usage_metadata", None)
     if isinstance(u, dict) and u.get("input_tokens") is not None:
         return {"prompt": u.get("input_tokens"), "completion": u.get("output_tokens")}
-    for holder in (getattr(msg, "response_metadata", None),
-                   getattr(msg, "generation_info", None)):
+    for holder in (
+        getattr(msg, "response_metadata", None),
+        getattr(msg, "generation_info", None),
+    ):
         if isinstance(holder, dict):
             tu = holder.get("token_usage")
             if isinstance(tu, dict):
@@ -214,13 +226,21 @@ def _usage_from(msg: Any) -> Optional[dict]:
     return None
 
 
-def _emit_llm_span(model: str, messages: Any, output_msg: Any,
-                   t0: float, status: str, content: Any = None) -> None:
+def _emit_llm_span(
+    model: str,
+    messages: Any,
+    output_msg: Any,
+    t0: float,
+    status: str,
+    content: Any = None,
+) -> None:
     span = Span(
-        span_type="llm", name=f"llm:{model}",
+        span_type="llm",
+        name=f"llm:{model}",
         input=[_msg_text(m) for m in (messages or [])],
         latency_ms=int((time.perf_counter() - t0) * 1000),
-        started_at=time.time(), status=status,
+        started_at=time.time(),
+        status=status,
     )
     if output_msg is not None or content is not None:
         # output_msg 可能是 AIMessage / AIMessageChunk / ChatGenerationChunk(包装)
@@ -238,17 +258,32 @@ async def flush_run(run: RunContext) -> None:
         from lawApp_LangGraph import db
 
         await db.insert_trace_run(
-            run_id=run.run_id, session_id=run.session_id, run_type=run.run_type,
-            mode=run.mode, status=run.status, query=run.query,
-            final_answer=run.final_answer, metrics=run.metrics(),
-            started_at=run.started_at, ended_at=time.time(),
+            run_id=run.run_id,
+            session_id=run.session_id,
+            run_type=run.run_type,
+            mode=run.mode,
+            status=run.status,
+            query=run.query,
+            final_answer=run.final_answer,
+            metrics=run.metrics(),
+            started_at=run.started_at,
+            ended_at=time.time(),
         )
-        rows = [{
-            "run_id": run.run_id, "span_type": s.span_type, "name": s.name,
-            "status": s.status, "input": s.input, "output": s.output,
-            "state": s.state, "latency_ms": s.latency_ms,
-            "token_usage": s.token_usage, "started_at": s.started_at,
-        } for s in run.spans]
+        rows = [
+            {
+                "run_id": run.run_id,
+                "span_type": s.span_type,
+                "name": s.name,
+                "status": s.status,
+                "input": s.input,
+                "output": s.output,
+                "state": s.state,
+                "latency_ms": s.latency_ms,
+                "token_usage": s.token_usage,
+                "started_at": s.started_at,
+            }
+            for s in run.spans
+        ]
         if rows:
             await db.insert_trace_spans(rows)
     except Exception:
@@ -270,8 +305,9 @@ def _instrument_llm_cls():
                 _emit_llm_span(self.model_name, messages, None, t0, "error")
                 raise
             try:
-                _emit_llm_span(self.model_name, messages,
-                               _gen_message(result), t0, "ok")
+                _emit_llm_span(
+                    self.model_name, messages, _gen_message(result), t0, "ok"
+                )
             except Exception:
                 # 观测旁路: span 记录失败绝不影响 LLM 结果返回
                 logger.error("llm span 记录失败(观测旁路)", exc_info=True)
@@ -297,8 +333,14 @@ def _instrument_llm_cls():
                 raise
             try:
                 # 流式全文聚合(末块 content 常为空, usage 在末块 metadata)
-                _emit_llm_span(self.model_name, messages, last, t0, "ok",
-                               content="".join(parts) or None)
+                _emit_llm_span(
+                    self.model_name,
+                    messages,
+                    last,
+                    t0,
+                    "ok",
+                    content="".join(parts) or None,
+                )
             except Exception:
                 logger.error("llm span 记录失败(观测旁路)", exc_info=True)
 
