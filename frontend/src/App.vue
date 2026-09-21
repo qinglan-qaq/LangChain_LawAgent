@@ -1,7 +1,8 @@
 <script setup>
 import { onMounted } from 'vue'
-import { state, resetTurn, setSession } from './store'
+import { state, resetTurn, setSession, abortController } from './store'
 import { streamConsult, streamResume } from './sse'
+import { getSessionDetail } from './api'
 import ModeSwitch from './components/ModeSwitch.vue'
 import DisclaimerToast from './components/DisclaimerToast.vue'
 import HistorySidebar from './components/HistorySidebar.vue'
@@ -55,6 +56,9 @@ function handleStreamEvent(e, assistant) {
   }
 }
 
+// AbortError = 用户主动取消(切模式/中止), 不显示错误横幅
+const isAbort = (err) => err && err.name === 'AbortError'
+
 async function submit({ text, docType }) {
   resetTurn()
   state.value.busy = true
@@ -66,11 +70,24 @@ async function submit({ text, docType }) {
     ? `/api/attorney/ask/stream?query=${encodeURIComponent(text)}&session_id=${encodeURIComponent(state.value.sessionId || '')}`
     : `/api/assistant/ask/stream?case_details=${encodeURIComponent(text)}&doc_type=${docType || 'complaint'}&session_id=${encodeURIComponent(state.value.sessionId || '')}`
   const assistant = state.value.messages[state.value.messages.length - 1]
+  let sawEvent = false // 校验失败回滚空消息用: 未收到任何流事件前的失败视为请求未成立
+  const controller = new AbortController()
+  abortController.value = controller
   try {
-    await streamConsult(url, (e) => handleStreamEvent(e, assistant))
+    await streamConsult(url, (e) => {
+      sawEvent = true
+      handleStreamEvent(e, assistant)
+    }, controller.signal)
   } catch (err) {
-    state.value.error = String(err)
+    if (isAbort(err)) {
+      // 用户取消: 静默, 保留已生成的部分内容
+    } else {
+      state.value.error = String(err)
+      // 校验/连接失败(checkOk 拒绝或同步抛错): 回滚刚 push 的 user+空气泡
+      if (!sawEvent) state.value.messages.splice(-2)
+    }
   } finally {
+    abortController.value = null
     state.value.busy = false
     state.value.reasoningActive = false
     state.value.status = ''
@@ -79,21 +96,60 @@ async function submit({ text, docType }) {
 }
 
 // HITL 恢复(流式): resume 后的 planner CoT/状态/工具/interrupt/answer 全程实时下发
+// 失败保护(H11): interrupt 不预清, 首个成功流事件后才清; 失败/断流时恢复面板(本地副本优先, 服务端兜底)
 async function resumeHITL(answer) {
-  state.value.interrupt = null
+  const savedInterrupt = state.value.interrupt // 失败恢复用(首个成功流事件前不清)
   state.value.busy = true
   state.value.error = ''
   state.value.messages.push({ role: 'assistant', text: '', done: false })
   const assistant = state.value.messages[state.value.messages.length - 1]
+  let cleared = false // 收到首个成功流事件后置位(同时清旧面板)
+  let sawTerminal = false // 终止帧(interrupt/done): 判定流是否完整走完
+  let aborted = false // 用户取消(切模式): resetTurn 已按意图清面板, 不恢复
+  const controller = new AbortController()
+  abortController.value = controller
+  const onEvent = (e) => {
+    if (!cleared && e.event !== 'error') {
+      cleared = true
+      state.value.interrupt = null // 流已正常建立, 清旧面板(新 interrupt 由事件再挂回)
+    }
+    if (e.event === 'interrupt' || e.event === 'done') sawTerminal = true
+    handleStreamEvent(e, assistant)
+  }
   try {
-    await streamResume(answer, state.value.sessionId, (e) => handleStreamEvent(e, assistant))
+    await streamResume(answer, state.value.sessionId, onEvent, controller.signal)
   } catch (err) {
-    state.value.error = String(err)
+    aborted = isAbort(err)
+    if (!aborted) state.value.error = String(err)
+    // AbortError = 用户取消: 静默, 不显示错误横幅
   } finally {
+    abortController.value = null
     state.value.busy = false
     state.value.reasoningActive = false
     state.value.status = ''
+    // 流未走到终止帧且面板已消失: 恢复 interrupt(本地副本优先, 服务端兜底)
+    if (!sawTerminal && !state.value.interrupt) {
+      if (aborted) {
+        // 用户取消(切模式 resetTurn 已清面板): 不恢复
+      } else if (!cleared && savedInterrupt) {
+        state.value.interrupt = savedInterrupt
+        state.value.messages.pop() // 流未成立: 撤掉空气泡, 面板回来可重答
+      } else {
+        await restoreInterruptFromServer(state.value.sessionId)
+      }
+    }
     if (!state.value.interrupt) assistant.done = true
+  }
+}
+
+// 服务端兜底恢复 HITL 面板: GET /sessions/{sid} 返回 pending interrupt(无则面板不恢复)
+async function restoreInterruptFromServer(sid) {
+  if (!sid) return
+  try {
+    const detail = await getSessionDetail(sid)
+    if (detail && detail.interrupt) state.value.interrupt = detail.interrupt
+  } catch {
+    /* 兜底恢复失败保持现状(失败原因已由上游写入 state.error) */
   }
 }
 </script>

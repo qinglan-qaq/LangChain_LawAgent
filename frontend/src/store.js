@@ -36,6 +36,17 @@ export function resetTurn() {
   })
 }
 
+// 在途 SSE 流的取消器: App.vue 每轮 submit/resume 新建, 流结束置空
+export const abortController = ref(null)
+
+// 终止在途 SSE 流(切模式等场景); 触发的 AbortError 由调用方按"用户取消"静默处理
+export function abortCurrentStream() {
+  if (abortController.value) {
+    abortController.value.abort()
+    abortController.value = null
+  }
+}
+
 // 打字机效果(用户决策): token 流入 full, 显示层逐字追平
 export function useTypewriter(full, shown, cps = 60) {
   let timer = null

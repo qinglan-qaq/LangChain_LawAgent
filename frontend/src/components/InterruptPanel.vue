@@ -38,7 +38,9 @@ const selected = ref('')
 const custom = ref('')
 const busy = computed(() => state.value.busy)
 
-function send(answer, allowEmpty = false) {
+function send(answer, allowEmpty = false, e) {
+  // IME 组合中(上屏候选词 Enter 在 keyup 时 isComposing 已为 false, 故改 keydown 判 isComposing/keyCode 229): 不提交
+  if (e && (e.isComposing || e.keyCode === 229)) return
   if (busy.value) return
   // 文本型空串仅允许跳过路径(PASS_VALUE 传空=跳过反问, 后端按未补充处理)
   if (!allowEmpty && isText.value && !answer) return
@@ -106,7 +108,7 @@ function onPass() {
         v-model="custom"
         class="flex-1 border rounded px-2 py-1 text-sm"
         placeholder="直接输入你的回答/补充内容"
-        @keyup.enter="send(custom)"
+        @keydown.enter="send(custom, false, $event)"
       />
       <ShimmerButton
         :disabled="busy || !custom"

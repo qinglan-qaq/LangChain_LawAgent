@@ -1,5 +1,5 @@
 <script setup>
-import { state, resetTurn } from '../store'
+import { state, resetTurn, abortCurrentStream } from '../store'
 
 const modes = [
   { id: 'attorney', label: '代理律师' },
@@ -8,6 +8,8 @@ const modes = [
 
 function pick(id) {
   if (state.value.mode === id) return
+  // 有流在跑先终止(触发的 AbortError 由 App.vue 按用户取消静默处理), 再重置回合
+  if (state.value.busy) abortCurrentStream()
   state.value.mode = id
   resetTurn()
 }

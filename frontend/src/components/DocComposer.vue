@@ -7,7 +7,9 @@ const emit = defineEmits(['submit'])
 const text = ref('')
 const docType = ref('complaint') // complaint 起诉状 | defense 答辩状
 
-function send() {
+function send(e) {
+  // IME 组合中(keyup 时 isComposing 已为 false, 故改 keydown 判 isComposing/keyCode 229): 不提交
+  if (e && (e.isComposing || e.keyCode === 229)) return
   const t = text.value.trim()
   if (!t || state.value.busy) return
   emit('submit', {
@@ -34,8 +36,8 @@ function send() {
         rows="4"
         class="border rounded-xl px-3 py-2 text-sm w-full resize-y focus:outline-none focus:ring-2 focus:ring-slate-400"
         placeholder="粘贴完整案情(至少 20 字), 将按所选文书类型起草"
-        @keydown.ctrl.enter="send"
-      ></textarea>
+      @keydown.ctrl.enter="send"
+    ></textarea>
     </template>
     <input
       v-else
@@ -43,7 +45,7 @@ function send() {
       class="border rounded-xl px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-slate-400"
       placeholder="输入法律咨询问题, 回车发送"
       maxlength="4000"
-      @keyup.enter="send"
+      @keydown.enter="send($event)"
     />
     <div class="flex justify-end">
       <ShimmerButton :disabled="state.busy" @click="send">
