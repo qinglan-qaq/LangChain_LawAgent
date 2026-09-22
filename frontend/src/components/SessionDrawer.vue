@@ -1,8 +1,10 @@
 <script setup>
-import { computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
 import { X } from 'lucide-vue-next'
 import CitationList from './CitationList.vue'
+import { getDialogue } from '../api'
+import MarkdownView from './MarkdownView.vue'
 
 // 任务4: 会话详情右侧抽屉(HistorySidebar 原内联详情块的替代载体)
 const props = defineProps({
@@ -43,6 +45,43 @@ function onKey(e) {
 }
 onMounted(() => window.addEventListener('keydown', onKey))
 onUnmounted(() => window.removeEventListener('keydown', onKey))
+
+// ── 对话日志(GET /api/sessions/{sid}/dialogue) ──
+// 抽屉打开且带 session_id 时拉取; 换会话先置 null 防串档;
+// 失败/空态(rounds+confirms 全空且无 final)统一归 null → 节内显示空态文案
+const dialogue = ref(null)
+const finalSection = ref(null) // 「最终答复」details 元素, 供终答落点跳转
+
+watch(
+  () => [props.open, props.detail?.session_id],
+  ([open, sid]) => {
+    dialogue.value = null
+    if (!open || !sid) return
+    getDialogue(sid)
+      .then((d) => {
+        const empty =
+          !d ||
+          (!d.rounds?.length && !d.confirms?.length && !d.final)
+        dialogue.value = empty ? null : d
+      })
+      .catch(() => {
+        dialogue.value = null
+      })
+  },
+)
+
+// 被选中的选项: selected_type 为 option 且文本一致才高亮(amber 强调色)
+function isChosen(r, opt) {
+  return r.selected_type === 'option' && opt === r.selected
+}
+
+// 终答落点: 展开「最终答复」节并平滑滚动过去
+function goToFinal() {
+  const el = finalSection.value
+  if (!el) return
+  el.open = true
+  el.scrollIntoView({ behavior: 'smooth' })
+}
 </script>
 
 <template>
@@ -63,14 +102,71 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
         </button>
       </div>
       <div class="flex-1 overflow-y-auto p-4 space-y-3">
-        <!-- 1. 最终答复 -->
-        <details open class="border rounded-lg p-2 bg-slate-50 text-xs">
+        <!-- 0. 对话日志(聚合 API, 回溯主场景, 默认展开) -->
+        <details open id="dialogue-log" class="border rounded-lg p-2 bg-slate-50 text-xs">
+          <summary class="cursor-pointer text-slate-500 mb-1">对话日志</summary>
+          <div v-if="dialogue" class="space-y-2">
+            <!-- 轮次时间线 -->
+            <div v-if="dialogue.rounds?.length" class="space-y-2">
+              <div
+                v-for="r in dialogue.rounds"
+                :key="r.round"
+                class="border-l border-slate-200 pl-2 space-y-1"
+              >
+                <div class="flex gap-1.5 flex-wrap items-baseline">
+                  <span class="font-mono text-slate-500">第{{ r.round }}轮</span>
+                  <span class="text-slate-800">{{ r.question }}</span>
+                </div>
+                <div v-if="r.options?.length" class="flex flex-wrap gap-1">
+                  <span
+                    v-for="opt in r.options"
+                    :key="opt"
+                    class="rounded px-1.5 py-0.5 border text-slate-600"
+                    :class="isChosen(r, opt) ? 'bg-amber-100 border-amber-300 text-amber-800 font-medium' : 'border-slate-200'"
+                  >
+                    {{ opt }}
+                  </span>
+                </div>
+                <div v-if="r.selected === null" class="text-slate-400">未作答(停在追问)</div>
+                <div v-if="r.selected_type === 'free_text'" class="text-slate-600">
+                  自述: {{ r.free_text }}
+                </div>
+                <div v-if="r.element_keys?.length" class="text-slate-400 font-mono">
+                  <span v-for="k in r.element_keys" :key="k" class="mr-1">#{{ k }}</span>
+                </div>
+                <div v-if="r.ts" class="text-slate-300 text-[10px]">{{ r.ts }}</div>
+              </div>
+            </div>
+            <!-- 确认类决策 -->
+            <div v-if="dialogue.confirms?.length" class="space-y-1">
+              <div
+                v-for="(c, i) in dialogue.confirms"
+                :key="i"
+                class="flex gap-1 flex-wrap items-baseline"
+              >
+                <span class="rounded px-1.5 py-0.5 bg-slate-100 text-slate-500">{{ c.type }}</span>
+                <span v-if="c.question" class="text-slate-700">{{ c.question }}</span>
+                <span class="text-slate-400">→</span>
+                <span class="text-slate-800">{{ c.chosen }}</span>
+              </div>
+            </div>
+            <!-- 终答落点 -->
+            <button
+              v-if="dialogue.final"
+              class="text-slate-500 hover:underline cursor-pointer"
+              @click="goToFinal"
+            >
+              已产出终答 · 引用 {{ dialogue.final.citations?.length || 0 }} 条
+            </button>
+          </div>
+          <div v-else class="text-slate-400">暂无对话日志</div>
+        </details>
+
+        <!-- 1. 最终答复(md 渲染) -->
+        <details ref="finalSection" open class="border rounded-lg p-2 bg-slate-50 text-xs">
           <summary class="cursor-pointer text-slate-500 mb-1">最终答复</summary>
-          <div
-            v-if="detail?.final_answer"
-            class="max-h-64 overflow-y-auto text-slate-700 leading-6 whitespace-pre-wrap"
-          >
-            {{ detail.final_answer }}
+          <div v-if="detail?.final_answer" class="max-h-64 overflow-y-auto text-slate-700">
+            <MarkdownView :text="detail.final_answer" />
           </div>
           <div v-else class="text-slate-400">未产出最终回答(可能停在人工确认)</div>
         </details>

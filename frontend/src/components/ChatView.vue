@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
 import { state, useTypewriter, COLLAPSE_LEN } from '../store'
+import MarkdownView from './MarkdownView.vue'
 
 // 流式目标: 最后一条普通 assistant 消息(打字机只对它生效);
 // HITL 追问/回答消息(kind=hitl_*)不参与打字机, 静态整段渲染
@@ -56,12 +57,12 @@ function hitlTag(m) {
           class="max-w-[80%] rounded-2xl px-4 py-2 text-sm leading-6"
           :class="bubbleClass(m)"
         >
-          <!-- HITL 追问(需求3): 类型标签 + 问题文本 + (选择题时)选项列表 -->
+          <!-- HITL 追问(需求3): 类型标签 + 问题文本 + (选择题时)选项列表; 问题文本走 md 渲染 -->
           <template v-if="m.kind === 'hitl_question'">
             <span class="mr-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">
               {{ hitlTag(m) }}
             </span>
-            <span class="whitespace-pre-wrap">{{ m.text }}</span>
+            <MarkdownView :text="m.text" />
             <ul v-if="m.options && m.options.length" class="mt-1 space-y-0.5 text-slate-500">
               <li v-for="(o, oi) in m.options" :key="oi">
                 · {{ typeof o === 'string' ? o : o.label }}
@@ -88,11 +89,10 @@ function hitlTag(m) {
               {{ m.expanded ? '收起' : '展开全文' }}
             </button>
           </template>
-          <!-- assistant 消息: 打字机 + 流式光标 -->
+          <!-- assistant 消息: 流式期打字机原文 + 光标; done 后 md 渲染最终结果 -->
           <template v-else>
-            <span class="whitespace-pre-wrap">{{
-              m === lastAssistant && !m.done ? shown : m.text
-            }}</span>
+            <span v-if="m === lastAssistant && !m.done" class="whitespace-pre-wrap">{{ shown }}</span>
+            <MarkdownView v-else :text="m.text" />
             <span v-if="m === lastAssistant && !m.done" class="animate-pulse">▍</span>
           </template>
         </div>

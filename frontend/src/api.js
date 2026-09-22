@@ -11,5 +11,10 @@ export const listSessions = () => http.get('/sessions').then((r) => r.data)
 export const getSessionDetail = (sid) =>
   http.get(`/sessions/${sid}`).then((r) => r.data)
 
+// 会话对话日志聚合端点(澄清轮次 + 确认决策 + 终答落点),
+// 空会话/PG 掉线后端返回 200 空态, 由调用方归一为 null
+export const getDialogue = (sid) =>
+  http.get(`/sessions/${sid}/dialogue`).then((r) => r.data)
+
 export const fetchDisclaimer = () =>
   http.get('/disclaimer').then((r) => r.data.disclaimer)
