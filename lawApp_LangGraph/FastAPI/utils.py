@@ -25,33 +25,79 @@ _SESSION_PREFIX = {"attorney": "AT", "assistant": "AS"}
 _SESSION_ID_NEW_RE = re.compile(r"^(AT|AS)-\d{8}-\d{6}-\d{1,6}$")
 _SESSION_ID_OLD_RE = re.compile(r"^(AT|AS)-[0-9a-f]{12}$")
 
-#  会话 id 生成(进程内锁 + 每秒计数): 同秒撞号由锁串行化 + 计数递增防住
+#  会话 id 生成(进程内锁 + 按天计数): 编号 = 当日序号, 零点重置
 _SID_LOCK = threading.Lock()
-# prefix → (秒级时间戳键, 已用编号): 秒键变更即重置编号, 字典有界
+# prefix → (日级键 %Y%m%d, 当日已用编号): 日键跨零点变更即重置, 字典有界
 _SID_COUNTER: dict[str, tuple[str, int]] = {}
+# 已从 PG 恢复过基数的 (prefix, 日键): 每 (prefix, day) 只 seed 一次
+_SID_SEEDED: set[tuple[str, str]] = set()
+
+
+def _seed_daily_seq(prefix: str, day_key: str) -> int:
+    """从 PG sessions 表恢复该 prefix 当日已用编号基数(重启后发号不回退).
+
+    短连接同步查询该 prefix 当天已存在的会话数; psycopg 导入失败、
+    连接失败、表不存在等任何异常 → 返回 0(降级为纯进程内计数,
+    HHMMSS 时间段兜底唯一性)。day_key 仅作缓存键, 查询本身以
+    date_trunc('day', now()) 为准。
+    """
+    try:
+        from lawApp_LangGraph.db import build_dsn  # 函数内 lazy import 防循环依赖
+
+        import psycopg
+
+        with psycopg.connect(build_dsn()) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sessions "
+                    "WHERE session_id LIKE %s "
+                    "AND created_at >= date_trunc('day', now())",
+                    (f"{prefix}-%",),
+                )
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    except Exception:
+        return 0
 
 
 def new_session_id(mode: str = "attorney") -> str:
     """生成「模式-时间-编号」格式的会话 id, 形如 AT-20260918-143025-001.
 
-    用户指定恢复 模式-时间-编号 格式(比 uuid 可读、可口头报号);
-    同秒撞号由进程内锁 + 计数防住; 多 worker 部署同秒跨进程撞号为
-    已知残余风险(当前 uvicorn 单 worker). 存量 uuid 会话仍合法可恢复.
+    编号为**当日序号**: 同一天内递增, 零点(日键 %Y%m%d 变更)重置为 001;
+    当日编号可能超 999, %03d 自然展宽为 4 位。进程重启后经 PG sessions
+    表恢复当日基数(COUNT 当天同前缀会话), 编号不回退撞号; PG 掉线/
+    表不可用则降级为纯进程内计数(HHMMSS 时间段兜底唯一性, 重启当日
+    可能重号)。同秒/同进程撞号由进程内锁 + 计数防住; 多 worker 部署
+    跨进程撞号为已知残余风险(当前 uvicorn 单 worker 安全)。
+    存量 uuid 会话仍合法可恢复.
 
     Args:
         mode: 咨询模式("attorney"/"assistant"), 映射前缀 AT/AS.
 
     Returns:
-        形如 "AT-20260918-143025-001" 的 id(编号 3 位, 同秒内递增).
+        形如 "AT-20260918-143025-001" 的 id(编号为当日序号, 3 位起).
     """
     prefix = _SESSION_PREFIX.get(mode, "AT")
+    ts = datetime.now()
+    day_key = f"{ts:%Y%m%d}"
+    # 锁外 seed: DB 慢查询不占进程锁; 每 (prefix, day) 只查一次
+    if (prefix, day_key) not in _SID_SEEDED:
+        try:
+            seed = _seed_daily_seq(prefix, day_key)
+        except Exception:
+            seed = 0  # seed 本身异常(如被替换的实现) → 降级进程内计数
+    else:
+        seed = 0
     with _SID_LOCK:
-        ts_key = f"{datetime.now():%Y%m%d-%H%M%S}"
+        _SID_SEEDED.add((prefix, day_key))
         last_key, seq = _SID_COUNTER.get(prefix, ("", 0))
-        # 秒键跨过 → 编号重置为 1; 同秒内 → 编号继续递增
-        seq = seq + 1 if last_key == ts_key else 1
-        _SID_COUNTER[prefix] = (ts_key, seq)
-    return f"{prefix}-{ts_key}-{seq:03d}"
+        if last_key != day_key:
+            # 日键首次进入计数器(零点跨天): 以 PG 基数恢复起点
+            seq = seed
+        # 同日 → 在当日已用编号上继续递增
+        seq += 1
+        _SID_COUNTER[prefix] = (day_key, seq)
+    return f"{prefix}-{ts:%Y%m%d-%H%M%S}-{seq:03d}"
 
 
 def _validate_session_id(sid: str, mode: str) -> None:
