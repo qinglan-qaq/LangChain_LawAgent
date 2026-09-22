@@ -172,6 +172,18 @@ async def ensure_tables(conn: AsyncConnection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_trace_spans_run ON trace_spans (run_id);
         CREATE INDEX IF NOT EXISTS idx_trace_runs_session ON trace_runs (session_id, started_at);
+        -- 方案c: JSON 会话历史事件流表(写入见 dialogue_log.py, 聚合读取
+        -- GET /sessions/{sid}/dialogue) —— append-only 事件, 会话级文档由聚合拼装
+        CREATE TABLE IF NOT EXISTS session_dialogue_events (
+            session_id  TEXT        NOT NULL,
+            seq         INT         NOT NULL,
+            event_type  TEXT        NOT NULL,
+            payload     JSONB       DEFAULT '{}'::jsonb,
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            PRIMARY KEY (session_id, seq)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dialogue_created
+            ON session_dialogue_events (created_at);
         """
     )
     await conn.commit()

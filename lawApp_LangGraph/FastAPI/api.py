@@ -440,6 +440,38 @@ async def get_session(sid: str):
     return {**response.model_dump(), "interrupt": extract_interrupt(snap)}
 
 
+@app.get("/sessions/{sid}/dialogue")
+async def get_session_dialogue(sid: str):
+    """会话级对话历史(方案c: JSON 事件流聚合)。
+
+    契约(前端并行开发依赖, 不得偏离):
+        {"session_id", "rounds": [...], "confirms": [...], "final": {...}|None}
+    空态(rounds/confirms 空列表、final=None)与 PG 掉线均返回 200 空结构
+    (对齐 GET /sessions 降级先例, 前端好处理); 非法 sid → 400。
+    """
+    from lawApp_LangGraph import dialogue_log
+    from lawApp_LangGraph.FastAPI.utils import (
+        _SESSION_ID_NEW_RE,
+        _SESSION_ID_OLD_RE,
+    )
+
+    sid = (sid or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+    # sid 校验: 复用 utils 的格式规则(带 AT-/AS- 前缀但格式非法 → 400);
+    # 会话历史不区分模式, 不做前缀与端点模式一致性校验(AS- 会话同样可查)
+    if sid.startswith(("AT-", "AS-")) and not (
+        _SESSION_ID_NEW_RE.match(sid) or _SESSION_ID_OLD_RE.match(sid)
+    ):
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+
+    try:
+        return await dialogue_log.aggregate_dialogue(sid)
+    except Exception as e:  # pragma: no cover — aggregate 内部已吞, 此处双保险
+        flow.error("对话历史读取降级", detail=str(e)[:200])
+        return {"session_id": sid, "rounds": [], "confirms": [], "final": None}
+
+
 @app.post("/ask/resume", response_model=QueryResponse)
 async def ask_resume(request: ResumeRequest):
     """HITL 继续: 用户对 interrupt 的回复经 Command(resume=...) 回传,图从暂停点恢复."""
