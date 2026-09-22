@@ -1,5 +1,5 @@
 <script setup>
-import { state, resetTurn, abortCurrentStream, loadSession } from '../store'
+import { state, newSession, abortCurrentStream } from '../store'
 
 const modes = [
   { id: 'attorney', label: '代理律师' },
@@ -8,17 +8,16 @@ const modes = [
 
 function pick(id) {
   if (state.value.mode === id) return
-  // 有流在跑先终止(触发的 AbortError 由 App.vue 按用户取消静默处理), 再重置回合
+  // 有流在跑先终止(触发的 AbortError 由 App.vue 按用户取消静默处理)
   if (state.value.busy) abortCurrentStream()
   state.value.mode = id
-  // M13: 会话 id 按模式分键 —— 切模式后自动切换到对应模式的 sid
-  loadSession()
-  resetTurn()
+  // 任务5: 切模式自动新建会话(不再恢复旧模式 sid; newSession 内含清消息+resetTurn)
+  newSession()
 }
 </script>
 
 <template>
-  <div class="flex rounded-lg border overflow-hidden text-sm">
+  <div id="mode-switch" class="flex rounded-lg border overflow-hidden text-sm">
     <button
       v-for="m in modes"
       :key="m.id"

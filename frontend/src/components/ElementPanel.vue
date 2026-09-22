@@ -9,7 +9,7 @@ const STATUS_UI = {
 </script>
 
 <template>
-  <div v-if="state.elements.length" class="my-2 border rounded-lg p-2 bg-slate-50 text-xs">
+  <div v-if="state.elements.length" id="elements" class="my-2 border rounded-lg p-2 bg-slate-50 text-xs">
     <div class="mb-1 text-slate-500">案件要素</div>
     <ul class="grid grid-cols-2 gap-1">
       <li v-for="e in state.elements" :key="e.key">

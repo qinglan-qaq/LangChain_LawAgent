@@ -87,7 +87,7 @@ function onPass() {
 </script>
 
 <template>
-  <div class="border border-amber-300 rounded-xl p-4 my-2 bg-amber-50">
+  <div id="choose" class="border border-amber-300 rounded-xl p-4 my-2 bg-amber-50">
     <div class="flex items-center gap-2">
       <div class="text-sm font-semibold text-amber-800">
         {{ TYPE_LABEL[interrupt.type] || interrupt.type }}
@@ -110,6 +110,7 @@ function onPass() {
       <ul class="flex flex-col gap-1 my-2">
         <li v-for="(o, i) in mcqOptions" :key="o.value">
           <label
+            :id="o.value === OTHER ? 'choose-opt-other' : 'choose-opt-' + o.value"
             class="flex items-center gap-2 px-3 py-1.5 rounded-lg border cursor-pointer text-sm transition-colors"
             :class="
               selected === o.value
@@ -158,6 +159,7 @@ function onPass() {
     <ul v-else-if="options.length" class="flex flex-col gap-1 my-2">
       <li v-for="o in options" :key="o.value">
         <label
+          :id="'choose-opt-' + o.value"
           class="flex items-center gap-2 px-3 py-1.5 rounded-lg border cursor-pointer text-sm transition-colors"
           :class="
             selected === o.value

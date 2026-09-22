@@ -33,6 +33,7 @@ const hasToolUsage = computed(() => Object.keys(state.value.toolUsage).length > 
 <template>
   <details
     v-if="hasContent"
+    id="cot"
     :open="open"
     class="border rounded-lg p-2 my-1 text-xs bg-slate-50 border-slate-200"
   >
