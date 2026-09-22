@@ -221,7 +221,7 @@ async function restoreInterruptFromServer(sid) {
     <div class="flex-1 flex flex-col z-10">
       <header class="flex items-center gap-3 p-3 border-b bg-white/80">
         <ModeSwitch />
-        <span class="text-sm text-slate-400">会话: {{ state.sessionId || '(新建)' }}</span>
+        <span id="session-id" class="text-sm text-slate-400">会话: {{ state.sessionId || '(新建)' }}</span>
       </header>
       <DisclaimerToast />
       <main class="flex-1 overflow-y-auto p-4">

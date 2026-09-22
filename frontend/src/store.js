@@ -38,6 +38,15 @@ export function setSession(sid) {
   if (sid) localStorage.setItem(sidKey(), sid)
 }
 
+// 新建会话(任务2): 清空当前会话并移除当前模式的 sid 持久化键
+// (loadSession 语义: getItem 读不到 → ''), 同时清消息与回合级状态
+export function newSession() {
+  state.value.sessionId = ''
+  localStorage.removeItem(sidKey())
+  state.value.messages = []
+  resetTurn()
+}
+
 export function markDisclaimerShown() {
   state.value.disclaimerShown = true
   localStorage.setItem('lawapp_disclaimer', '1')

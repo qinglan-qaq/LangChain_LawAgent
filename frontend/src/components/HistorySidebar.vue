@@ -1,8 +1,9 @@
 <script setup>
 import { onMounted, ref, watch } from 'vue'
-import { setSession, sessionsTick } from '../store'
+import { setSession, sessionsTick, newSession } from '../store'
 import { listSessions, getSessionDetail } from '../api'
-import CitationList from './CitationList.vue'
+import { Plus } from 'lucide-vue-next'
+import SessionDrawer from './SessionDrawer.vue'
 
 const sessions = ref([])
 const error = ref('')
@@ -48,21 +49,29 @@ async function open(sid) {
   }
 }
 
-// L9: 列表源 filter(Boolean) 防后端降级/脏数据混入 null 项
-function citationsOf(d) {
-  if (!d) return []
-  return [...(d.law_results || []), ...(d.rag_documents || [])].filter(Boolean)
+// 任务3: 新建会话(清空当前会话, 下次提问由后端发新 session_id 建新会话)
+function onCreate() {
+  newSession()
+  detail.value = null
 }
 </script>
 
 <template>
-  <aside class="p-3 text-xs overflow-y-auto">
+  <aside id="history" class="p-3 text-xs overflow-y-auto">
     <div class="font-semibold text-slate-700 mb-2 text-sm">最近会话</div>
+    <button
+      id="btn-new-session"
+      class="w-full flex items-center gap-1.5 border rounded-lg px-2 py-1.5 text-xs bg-white hover:bg-slate-100 mb-2"
+      @click="onCreate"
+    >
+      <Plus class="w-3.5 h-3.5" />新建会话
+    </button>
     <p v-if="error" class="text-red-500 leading-5">{{ error }}</p>
     <p v-else-if="!sessions.length" class="text-slate-400">暂无历史</p>
-    <ul v-else class="space-y-1">
+    <ul v-else id="history-list" class="space-y-1">
       <li v-for="s in sessions" :key="s.session_id">
         <button
+          :id="'history-item-' + s.session_id"
           class="w-full text-left px-2 py-1 rounded hover:bg-slate-100 font-mono truncate"
           :class="detailOf === s.session_id ? 'bg-slate-100' : ''"
           @click="open(s.session_id)"
@@ -71,29 +80,7 @@ function citationsOf(d) {
         </button>
       </li>
     </ul>
-    <div v-if="detail" class="mt-3 border rounded-lg p-2 bg-slate-50 leading-5">
-      <div class="text-slate-500 mb-1">会话回看</div>
-      <div v-if="detail.final_answer" class="whitespace-pre-wrap max-h-64 overflow-y-auto">
-        {{ detail.final_answer }}
-      </div>
-      <div v-else class="text-slate-400">未产出最终回答(可能停在人工确认)</div>
-      <!-- 澄清记录(需求3): 后端会话详情新增 clarify_history, 旧会话可能缺失 -->
-      <div
-        v-if="detail.clarify_history && detail.clarify_history.length"
-        class="mt-2 border-t pt-1"
-      >
-        <div class="text-slate-500 mb-1">澄清记录</div>
-        <ul class="space-y-1">
-          <li v-for="(c, i) in detail.clarify_history" :key="i" class="text-slate-600">
-            <div>第{{ c.round }}轮 · {{ c.question }}</div>
-            <div v-if="c.options && c.options.length" class="text-slate-500">
-              {{ c.options.map((o) => (typeof o === 'string' ? o : o.label)).join(' / ') }}
-            </div>
-            <div>用户: {{ c.answer }}</div>
-          </li>
-        </ul>
-      </div>
-      <CitationList :sources="citationsOf(detail)" />
-    </div>
+    <!-- 任务3.5: 原内联详情块改为右侧抽屉(点击遮罩/X/Esc 关闭) -->
+    <SessionDrawer :detail="detail" :open="!!detail" @close="detail = null" />
   </aside>
 </template>

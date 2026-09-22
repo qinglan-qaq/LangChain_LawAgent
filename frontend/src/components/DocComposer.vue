@@ -32,6 +32,7 @@ function send(e) {
         </label>
       </div>
       <textarea
+        id="input"
         v-model="text"
         rows="4"
         class="border rounded-xl px-3 py-2 text-sm w-full resize-y focus:outline-none focus:ring-2 focus:ring-slate-400"
@@ -42,6 +43,7 @@ function send(e) {
     </template>
     <input
       v-else
+      id="input"
       v-model="text"
       class="border rounded-xl px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-slate-400"
       placeholder="输入法律咨询问题, 回车发送"

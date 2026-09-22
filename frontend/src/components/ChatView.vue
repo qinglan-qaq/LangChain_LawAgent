@@ -33,7 +33,7 @@ function hitlTag(m) {
 </script>
 
 <template>
-  <div class="space-y-3">
+  <div id="chat" class="space-y-3">
     <!-- 官方 Inspira 无 FadeIn 组件, 消息入场按官方动画底座 motion-v 直写 -->
     <Motion
       v-for="(m, i) in state.messages"
@@ -44,6 +44,15 @@ function hitlTag(m) {
     >
       <div :class="m.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
         <div
+          :id="
+            m.kind === 'hitl_question'
+              ? 'choose-' + i
+              : m.role === 'user'
+                ? 'ask-' + i
+                : m.done
+                  ? 'result_llm-' + i
+                  : 'answer-' + i
+          "
           class="max-w-[80%] rounded-2xl px-4 py-2 text-sm leading-6"
           :class="bubbleClass(m)"
         >
