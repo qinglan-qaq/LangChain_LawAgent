@@ -70,6 +70,7 @@ from lawApp_LangGraph.state import (
     ToolCallRecord,
     default_case_elements,
 )
+from lawApp_LangGraph import dialogue_log  # 方案c: JSON 会话历史事件流落 PG
 from lawApp_LangGraph.tools import ALL_TOOLS
 from lawApp_LangGraph.FastAPI.utils import is_command_word
 
@@ -345,6 +346,16 @@ async def _publish_node_status(config, node: str) -> None:
     await _publish_status(config, f"正在{_NODE_LABELS.get(node, node)}")
 
 
+#  方案c: 会话历史事件流的 session_id 来源 —— LangGraph thread_id(即
+#  graph_config 的 configurable.thread_id)。无 config 的直调场景(测试替身)
+#  返回空串 → log_event 静默跳过, 不报错。
+def _dialogue_sid(config) -> str:
+    try:
+        return ((config or {}).get("configurable") or {}).get("thread_id", "") or ""
+    except Exception:
+        return ""
+
+
 #  HITL 语义确认 — 自由文本不再按关键词硬匹配, 由 Flash LLM 判断
 async def semantic_confirm(request_text: str, answer: str) -> bool:
     """LLM 判断用户对确认请求的回复语义(同意继续/拒绝跳过)。
@@ -430,7 +441,7 @@ def ingest_node(state: AgentState) -> dict:
 # Node 0.5a: Risk Gate — 高风险话题确认 (HITL)
 
 
-async def risk_gate_node(state: AgentState) -> dict:
+async def risk_gate_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """LLM 高风险判定;未确认的高风险 → interrupt 确认,拒绝则热线文案中止.
 
     Args:
@@ -463,15 +474,29 @@ async def risk_gate_node(state: AgentState) -> dict:
         debug.debug("← Risk Gate 通过", result=f"elapsed={time.time() - t0:.2f}s")
         return {}
 
+    risk_msg = (
+        "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险,"
+        "请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗?"
+    )
     confirmed = interrupt(
         {
             "type": "risk_confirm",
-            "message": "您的问题可能涉及人身安全或重大风险。如果您正面临家暴、自伤或紧迫的危险,请立即拨打110或联系当地妇联/救助机构。确认继续进行AI法律咨询吗?",
+            "message": risk_msg,
             "options": [
                 {"value": "确认", "label": "继续咨询"},
                 {"value": "跳过", "label": "中止并查看求助热线"},
             ],
         }
+    )
+    # 方案c: risk_confirm 用户决策落库(resume 消费路径)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "interrupt_confirm",
+        {
+            "type": "risk_confirm",
+            "question": risk_msg,
+            "chosen": "继续咨询" if confirmed else "中止并查看求助热线",
+        },
     )
     if not confirmed:
         return {
@@ -608,7 +633,7 @@ async def element_assess_node(state: AgentState, config: RunnableConfig = None) 
 # Node 0.5c: Ask Element — HITL-2 要素反问(纯记账,resume 重跑幂等)
 
 
-def ask_element_node(state: AgentState) -> dict:
+def ask_element_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """发起要素反问 interrupt;resume 后记录 clarify_history、轮数自增.
 
     纯记账节点不调 LLM;无 pending_questions 时直接返回,保证 resume
@@ -655,6 +680,18 @@ def ask_element_node(state: AgentState) -> dict:
             {"value": chr(ord("A") + i), "label": t} for i, t in enumerate(q_options)
         ]
         payload["allow_other"] = True
+    # 方案c: round_question 落库(interrupt 前)。resume 会从头重跑节点, 该行
+    # 会再次执行 —— dedupe_on 保证同轮同问只写一次(resume 重跑幂等)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "round_question",
+        {
+            "round": state.clarify_rounds + 1,
+            "question": question_text,
+            "options": q_options,
+        },
+        dedupe_on=("round", "question"),
+    )
     answer = interrupt(payload)
 
     answer = str(answer).strip() if answer else ""
@@ -677,6 +714,21 @@ def ask_element_node(state: AgentState) -> dict:
         "← Ask Element 完成",
         detail=f"answer={answer[:80]}",
         result=f"round={state.clarify_rounds + 1}/{settings.max_clarify_rounds}",
+    )
+    # 方案c: round_answer 落库 —— 答案精确命中某选项 label → option,
+    # 否则 free_text(free_text 仅在自由输入时带原文, 选中选项时为 null)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "round_answer",
+        {
+            "round": state.clarify_rounds + 1,
+            "question": question_text,
+            "options": q_options,
+            "selected": answer,
+            "selected_type": "option" if answer in q_options else "free_text",
+            "free_text": None if answer in q_options else answer,
+            "element_keys": keys,
+        },
     )
     return {
         "clarify_rounds": state.clarify_rounds + 1,
@@ -1022,15 +1074,26 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
 
     # HITL-3: PDF 生成前确认(前端单选+确认/跳过; 自由文本由 LLM 语义判断归一为 bool)
     if step.tool_name == "markdown_to_pdf" and not state.pdf_confirmed:
+        pdf_msg = f"即将生成 PDF 报告(步骤: {step.description})。确认生成吗?"
         confirmed = interrupt(
             {
                 "type": "pdf_confirm",
-                "message": f"即将生成 PDF 报告(步骤: {step.description})。确认生成吗?",
+                "message": pdf_msg,
                 "options": [
                     {"value": "确认", "label": "确认生成 PDF"},
                     {"value": "跳过", "label": "跳过该步骤"},
                 ],
             }
+        )
+        # 方案c: pdf_confirm 用户决策落库(resume 消费路径)
+        dialogue_log.log_event(
+            _dialogue_sid(config),
+            "interrupt_confirm",
+            {
+                "type": "pdf_confirm",
+                "question": pdf_msg,
+                "chosen": "确认生成 PDF" if confirmed else "跳过该步骤",
+            },
         )
         if not confirmed:
             done = [
@@ -1443,6 +1506,17 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
             {"value": chr(ord("A") + i), "label": t} for i, t in enumerate(v_options)
         ]
         payload["allow_other"] = True
+    # 方案c: round_question 落库(interrupt 前; dedupe_on 防 resume 重跑重复写)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "round_question",
+        {
+            "round": state.clarify_rounds + 1,
+            "question": v.question,
+            "options": v_options,
+        },
+        dedupe_on=("round", "question"),
+    )
     answer = interrupt(payload)
     answer = str(answer).strip() if answer else ""
     if not answer:
@@ -1458,6 +1532,20 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
         "← Mid Clarify 完成",
         detail=f"answer={answer[:80]}",
         result=f"elapsed={time.time() - t0:.2f}s | → replanner",
+    )
+    # 方案c: round_answer 落库(选项精确匹配 → option, 否则 free_text)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "round_answer",
+        {
+            "round": state.clarify_rounds + 1,
+            "question": v.question,
+            "options": v_options,
+            "selected": answer,
+            "selected_type": "option" if answer in v_options else "free_text",
+            "free_text": None if answer in v_options else answer,
+            "element_keys": [v.element_key],
+        },
     )
     return {
         "mid_clarify_used": True,
@@ -1573,6 +1661,13 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
 
 # Node 7: Finalize — 组装最终回答
 
+# 方案c: final_answer 事件的引用来源列表(law_results 法条 + rag_documents
+# 案例的标题/编号名称, 空则 [])
+def _final_citations(state: AgentState) -> list:
+    cites = [f"{l.law_title} {l.article_number}".strip() for l in (state.law_results or [])]
+    cites += [(d.case_number or d.case_cause or "") for d in (state.rag_documents or [])]
+    return [c for c in cites if c]
+
 
 async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """优先复用已有 final_answer；否则用案例兜底生成 / LLM 直接回答(流式）。"""
@@ -1581,6 +1676,16 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
     debug.debug("→ 进入 Finalize 节点", detail="组装最终回答...")
 
     if state.final_answer:
+        # 方案c: final_answer 落库(答案已由 risk_gate/降级中止等前置节点写好)
+        dialogue_log.log_event(
+            _dialogue_sid(config),
+            "final_answer",
+            {
+                "answer": state.final_answer,
+                "citations": _final_citations(state),
+                "clarify_rounds": state.clarify_rounds,
+            },
+        )
         debug.info(
             "← Finalize 完成 (已有答案)",
             detail=f"answer_len={len(state.final_answer)}",
@@ -1628,6 +1733,16 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             detail=f"doc_type={state.doc_type or 'complaint'}, answer_len={len(answer)}",
             result=f"elapsed={time.time() - t0:.2f}s",
         )
+        # 方案c: final_answer 落库(文书起草)
+        dialogue_log.log_event(
+            _dialogue_sid(config),
+            "final_answer",
+            {
+                "answer": answer,
+                "citations": _final_citations(state),
+                "clarify_rounds": state.clarify_rounds,
+            },
+        )
         return {"final_answer": answer}
 
     if state.rag_documents:
@@ -1644,6 +1759,16 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             detail=f"answer_len={len(answer)}",
             result=f"elapsed={time.time() - t0:.2f}s",
         )
+        # 方案c: final_answer 落库(案例兜底)
+        dialogue_log.log_event(
+            _dialogue_sid(config),
+            "final_answer",
+            {
+                "answer": answer,
+                "citations": _final_citations(state),
+                "clarify_rounds": state.clarify_rounds,
+            },
+        )
         return {"final_answer": answer}
 
     chain = FINALIZE_DIRECT_PROMPT | get_executor_llm()
@@ -1658,13 +1783,23 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         detail=f"answer_len={len(answer)}",
         result=f"elapsed={time.time() - t0:.2f}s",
     )
+    # 方案c: final_answer 落库(LLM 直接回答)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "final_answer",
+        {
+            "answer": answer,
+            "citations": _final_citations(state),
+            "clarify_rounds": state.clarify_rounds,
+        },
+    )
     return {"final_answer": answer}
 
 
 # Node 8.5: HITL Degrade — HITL-4 工具连续失败降级询问
 
 
-def hitl_degrade_node(state: AgentState) -> dict:
+def hitl_degrade_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """interrupt: 重试/跳过/终止. resume 值由 API normalize_resume 归一为
     'retry'/'skip'/'abort'.
 
@@ -1702,6 +1837,22 @@ def hitl_degrade_node(state: AgentState) -> dict:
     # H3: 子串匹配降级为纯指令词 fast-path(与 utils.is_command_word 共用),
     # 自由文本已由 API normalize_resume 经 LLM 语义归一("retry"/"skip"/"abort")
     cmd = is_command_word(choice) or ""
+    # 方案c: degrade_confirm 用户决策落库(resume 消费路径, 用户选择已知处)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "interrupt_confirm",
+        {
+            "type": "degrade_confirm",
+            "question": DEGRADE_CONFIRM_MSG.format(failed_tool=failed_tool),
+            "chosen": (
+                "重新规划调用"
+                if cmd == "retry"
+                else "结束本次咨询"
+                if cmd in ("abort", "finish")
+                else "跳过并继续后续步骤"
+            ),
+        },
+    )
     # L15: 降级询问由一次性 degrade_used 改计数 —— 每询问一次门槛翻倍
     # (路由按 error_streak >= 阈值*(degrade_ask_count+1) 判定),
     # 允许再次询问但越来越难, 不再首次询问后永久关闭
@@ -1753,7 +1904,7 @@ def hitl_degrade_node(state: AgentState) -> dict:
 # Node 8.6: HITL Budget — HITL-6 重规划预算耗尽询问
 
 
-def hitl_budget_node(state: AgentState) -> dict:
+def hitl_budget_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """interrupt: 补充(原文) / 收尾(finish). resume 值经 normalize_resume:
     空或纯收尾指令词 → 'finish'; 其余非空文本 → 原文.
 
@@ -1793,6 +1944,21 @@ def hitl_budget_node(state: AgentState) -> dict:
         }
     )
     answer = str(answer).strip() if answer else ""
+
+    # 方案c: budget_confirm 用户决策落库(resume 消费路径, 用户选择已知处)
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "interrupt_confirm",
+        {
+            "type": "budget_confirm",
+            "question": BUDGET_CONFIRM_MSG.format(missing=missing),
+            "chosen": (
+                "基于现有材料收尾"
+                if (not answer or is_command_word(answer) == "finish")
+                else answer
+            ),
+        },
+    )
 
     # H3: 子串匹配降级为纯指令词 fast-path ——「婚姻关系已于2020年结束」
     # 这类正常补充不再被误判成收尾;自由文本走补充分支
