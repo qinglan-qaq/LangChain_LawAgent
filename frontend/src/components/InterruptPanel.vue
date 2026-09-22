@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import { state } from '../store'
 import ShimmerButton from './inspira/ShimmerButton.vue'
+import MarkdownView from './MarkdownView.vue'
 
 // 六类 interrupt 的精确字符串(与后端 normalize_resume 对齐, 不可改动);
 // v4: 选项改为后端载荷下发 [{value,label}], 本表仅存显示标签
@@ -100,9 +101,9 @@ function onPass() {
         第 {{ interrupt.round }} 轮
       </span>
     </div>
-    <p class="text-sm my-2">
-      {{ interrupt.question || interrupt.message || '请补充信息' }}
-    </p>
+    <div class="text-sm my-2">
+      <MarkdownView :text="interrupt.question || interrupt.message || '请补充信息'" />
+    </div>
 
     <!-- 选择题模式(需求1): 文本型 + options 载荷 → 单选(字母徽标) + 「其他」补充输入;
          样式沿原生 input + Tailwind 直写(官方 Inspira 无 radio 组件) -->
