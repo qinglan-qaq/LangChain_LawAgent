@@ -98,6 +98,13 @@
    ```
 4. 风险与注意：写日志失败降级 warning 不阻断主流程（`_safe_audit` 先例）；DDL 进 db.py 启动建表段；与 trace 表分工 —— trace 管观测（token/耗时），本表管业务回溯（问答内容）
 
+### Task 6 执行记录（2026-09-23 追加：用户批准后实施，方案 c 全量落地）
+
+- 提交：`f86f6c5`（前端 md 渲染 + 抽屉对话日志节）→ `59e3b8e`（合并 main 前端部分）→ `aa072e5`（后端事件流表 + 12 写入点 + 聚合 API）→ `be338ca`（合并 main）
+- 落地明细：`session_dialogue_events` 表（db.py 幂等建表段）；`dialogue_log.py`（log_event 同步短连接、失败降级 warning、round_question dedupe 幂等守卫防 resume 重跑重复落库；fetch/aggregate 走 async 池）；图内 12 写入点（ask_element/mid_clarify 问答对、risk/pdf/degrade/budget 四类确认 resume、finalize 四出口终答含引用）；`GET /sessions/{sid}/dialogue`（双前缀格式校验、空态/PG 掉线 200 空结构）；前端 SessionDrawer 首节「对话日志」（分轮时间线 + 选中项 amber 高亮 + 终答锚点，老会话靠 clarify_history 兜底）；LLM 输出全面 md 渲染（MarkdownView + 四处接入）
+- 测试：tests/test_dialogue_events.py 9 用例真实 PG 全绿；干净全量回归 **14 文件 14 PASS / 0 SKIPPED / 0 FAIL**（2026-09-23，PG 在连）
+- 偏差存档：sid 校验改用同源正则（`_validate_session_id` 会按端点模式误伤跨前缀查询）；log_event 用同步短连接（三个写入点是 sync 节点无法 await，对齐 `_seed_daily_seq` 先例）；state 无 token 字段故 final_answer 未带 tokens；ts 为 UTC ISO 带偏移
+
 ## 测试与验证
 
 - 后端：tests/test_session_daily_counter.py 新增 + 快速批回归（test_mcp 慢档单跑）；存量 M6/HITL 断言格式不变预计全绿
