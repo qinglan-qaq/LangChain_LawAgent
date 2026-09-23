@@ -1198,10 +1198,19 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
         from lawApp_LangGraph.doc_templates import load_fields
 
         doc_type = state.doc_type or "complaint"
-        try:
-            doc_fields = await _extract_doc_fields(state, doc_type)
-        except Exception as e:
-            debug.warning("docx 字段抽取失败", detail=str(e)[:120])
+        # M-3(spec §7): 抽取失败 retry 一次(对齐 executor LLM 提参"严格重试一次"),
+        # 两次全败才走步骤 failed
+        doc_fields = None
+        for attempt in (1, 2):
+            try:
+                doc_fields = await _extract_doc_fields(state, doc_type)
+                break
+            except Exception as e:
+                debug.warning(
+                    "docx 字段抽取失败",
+                    detail=f"attempt={attempt} {str(e)[:120]}",
+                )
+        if doc_fields is None:
             errored = [
                 s.model_copy(update={"status": "failed", "retry_count": s.retry_count + 1})
                 if i == idx else s for i, s in enumerate(plan)
@@ -1273,6 +1282,20 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
 
     # generate_docx 确认后直调: 参数完全确定, 跳过 LLM 提参(镜像 analyze_legal_issue 注入)
     if step.tool_name == "generate_docx":
+        # I-2 守卫: 抽取失败路径置 docx_confirmed=True 且 doc_fields={} 时,
+        # replanner 重规划再出 generate_docx 步会绕过 HITL 直渲染全"待补充"
+        # 空白文书(违 D3 生成与否由律师判断)→ 无确认字段按跳过处理:
+        # 不调工具、不落库 docx_generated
+        if not confirmed_fields:
+            done = [
+                s.model_copy(update={"status": "done"}) if i == idx else s
+                for i, s in enumerate(plan)
+            ]
+            debug.info(
+                "← Executor docx 字段缺失, 步骤按跳过处理", detail=f"step={idx + 1}"
+            )
+            return {"plan": done, "current_step_index": idx + 1, "docx_confirmed": True}
+
         sid = _dialogue_sid(config) or "session"
         # H9 同款清洗: 会话 id 非白名单字符 → 下划线(f-string 表达式内禁反斜杠, 先算好)
         safe_sid = re.sub(r"[^\w\-.\u4e00-\u9fff]", "_", sid)

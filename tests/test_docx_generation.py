@@ -484,3 +484,76 @@ def test_docx_confirm_yes_resume_generates_file(monkeypatch, tmp_path):
         assert os.path.basename(result["docx_path"]).startswith("起诉状_")
     finally:
         _docx_cleanup()
+
+
+# ---- R1: 抽取失败 retry 一次(M-3) + 直调空字段守卫(I-2) ----
+
+
+def test_docx_extract_double_failure_marks_step_failed(monkeypatch, tmp_path):
+    """M-3(spec §7): 抽取两次全失败 → 步骤 failed(retry_count+1), 无 docx
+    落盘、无 docx_confirm/docx_generated 事件, 图正常收尾(终答仍出)。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    from unittest.mock import AsyncMock
+
+    import lawApp_LangGraph.LangGraph_lawApp as app
+
+    g = _build_docx_graph(monkeypatch)
+    # 两次抽取全抛(AsyncMock side_effect 顺序消费)
+    monkeypatch.setattr(
+        app,
+        "_extract_doc_fields",
+        AsyncMock(side_effect=[RuntimeError("抽取失败1"), RuntimeError("抽取失败2")]),
+    )
+    sid = _DOCX_T_PREFIX + "-fail2"
+    cfg = {"configurable": {"thread_id": sid}, "recursion_limit": 40}
+
+    async def run():
+        # 抽取在 interrupt 之前失败 → 单次 ainvoke 直接跑完, 无需 resume
+        result = await g.ainvoke(_docx_invoke_input(), config=cfg)
+        assert result.get("final_answer") == "文书终答测试", "图应正常收尾"
+        assert result["plan"][0].status == "failed", "两次失败后步骤必须标 failed"
+        assert result["plan"][0].retry_count == 1
+        assert result.get("error"), "应写入步骤 error"
+        assert result.get("docx_confirmed") is True, "失败路径确认位落定(防再问)"
+        assert result.get("docx_path") is None
+
+    try:
+        asyncio.run(run())
+        assert not list(tmp_path.glob("*.docx")), "失败路径不得落盘 docx"
+        assert _count_events(sid, "docx_generated") == 0
+        assert _count_events(sid, "docx_confirm") == 0, "未到 interrupt, 无确认事件"
+    finally:
+        _docx_cleanup()
+
+
+def test_docx_direct_call_empty_fields_guarded(monkeypatch):
+    """I-2: 抽取失败遗留状态(docx_confirmed=True + doc_fields={})再进直调
+    分支(replanner 重出 generate_docx 步) → 守卫生效: 不产 tool_calls,
+    步骤按跳过标 done 推进, 不渲染空白文书(违 D3)。"""
+    import lawApp_LangGraph.LangGraph_lawApp as app
+    from lawApp_LangGraph.state import AgentState, PlanStep
+
+    state = AgentState(
+        query="我要起诉离婚, 请帮我生成起诉状",
+        mode="assistant",
+        doc_type="complaint",
+        plan=[
+            PlanStep(
+                step_id=1,
+                description="按起诉状模板生成 Word 文书",
+                tool_name="generate_docx",
+            )
+        ],
+        current_step_index=0,
+        # 抽取失败路径的遗留状态: 确认位已置但无字段
+        doc_fields={},
+        docx_confirmed=True,
+    )
+    out = asyncio.run(app.executor_node(state, None))
+
+    assert "messages" not in out, "不得产 AIMessage tool_calls(不调工具)"
+    assert out["plan"][0].status == "done", "步骤按跳过标 done"
+    assert out["current_step_index"] == 1, "步骤索引推进"
+    assert out["docx_confirmed"] is True
