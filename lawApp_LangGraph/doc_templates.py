@@ -41,7 +41,8 @@ def _validate_dir(dir_path: Path) -> Tuple[bool, List[str]]:
     if not (yaml_p.exists() and doc_p.exists()):
         return False, ["fields.yaml 或 template.docx 缺失"]
     spec = yaml.safe_load(yaml_p.read_text(encoding="utf-8"))
-    xml = zipfile.ZipFile(doc_p).read("word/document.xml").decode("utf-8")
+    with zipfile.ZipFile(doc_p) as zf:
+        xml = zf.read("word/document.xml").decode("utf-8")
     missing = []
     for f in spec.get("fields") or []:
         if f.get("type") == "choice" or f.get("_merge_into"):
@@ -58,10 +59,10 @@ def _validate_dir(dir_path: Path) -> Tuple[bool, List[str]]:
 
 
 @lru_cache(maxsize=8)
-def validate_template(doc_type: str) -> Tuple[bool, Tuple[str, ...]]:
-    """对账入口(进程内缓存); 返回 (ok, missing_tags)。"""
+def validate_template(doc_type: str) -> Tuple[bool, List[str]]:
+    """对账入口(进程内缓存); 返回 (ok, missing_tags), missing 为缺失标签列表。"""
     ok, missing = _validate_dir(_TEMPLATE_ROOT / doc_type)
-    return ok, tuple(missing)
+    return ok, missing
 
 
 def template_available(doc_type: str) -> bool:
