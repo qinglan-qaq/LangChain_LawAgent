@@ -4,7 +4,9 @@
 # occurrence: 同一 anchor 第几次命中(0 基, 按文档顺序), 缺省 0。
 # replacement: 缺省时 text/date 类型自动为"命中文本 + {{ f.KEY }}"; choice 类型必须手写。
 #         replacement 中的换行表示"锚点段之后逐段落覆盖": 首行替换锚点段内命中文本,
-#         其余各行依序整段覆盖锚点段之后的连续段落(Word 的 w:t 不接受换行, 拆段实现)。
+#         其余各行依序对应锚点段之后的连续段落; 单独一个 "~" 表示跳过该段(保持原文,
+#         留给后续字段编辑——用于选项段不相邻的排布, 如代理人有/无); 空串表示清空该段
+#         (Word 的 w:t 不接受换行, 拆段实现)。
 # _merge_into: 同锚点一次替换的附带字段, 其 {{ f.* }} 标签写在宿主字段的 replacement 里。
 doc_type: complaint
 template: template.docx
@@ -32,8 +34,8 @@ fields:
      anchor: '经常居住地：', occurrence: 0}
   # ---- 委托诉讼代理人 ----
   - {key: agent_has, label: 有无委托代理人, type: choice, options: [有, 无],
-     anchor: '<w:t>有</w:t>', anchor_mode: xml, occurrence: 0,
-     replacement: '<w:t>{{ c.agent_has_yes }}有</w:t>'}
+     anchor: '^有$', occurrence: 0,
+     replacement: "{{ c.agent_has_yes }}有\n~\n~\n~\n{{ c.agent_has_no }}无"}
   - {key: agent_name, label: 代理人姓名, type: text,
      anchor: '姓名：', occurrence: 1}
   - {key: agent_org, label: 代理人单位, type: text,
@@ -54,11 +56,11 @@ fields:
      replacement: '电话：{{ f.service_receiver_phone }}'}
   - {key: e_service, label: 是否接受电子送达, type: choice, options: [是, 否],
      anchor: '是\s*方式：', occurrence: 0,
-     replacement: '{{ c.e_service_yes }}是  方式：'}
+     replacement: "{{ c.e_service_yes }}是  方式：\n~\n{{ c.e_service_no }}否"}
   - {key: e_service_method, label: 电子送达方式, type: choice,
      options: [短信, 微信, 传真, 邮箱, 其他],
      anchor: '短信\s*微信\s*传真\s*邮箱', occurrence: 0,
-     replacement: '{{ c.e_service_method_sms }}短信  {{ c.e_service_method_wechat }}微信  {{ c.e_service_method_fax }}传真  {{ c.e_service_method_email }}邮箱'}
+     replacement: "{{ c.e_service_method_sms }}短信  {{ c.e_service_method_wechat }}微信  {{ c.e_service_method_fax }}传真  {{ c.e_service_method_email }}邮箱\n{{ c.e_service_method_other }}其他"}
   # ---- 当事人信息: 被告 ----
   - {key: defendant_name, label: 被告姓名, type: text, critical: true,
      anchor: '姓名：', occurrence: 2}
@@ -85,7 +87,7 @@ fields:
      replacement: "1.解除婚姻关系\n{{ f.claim_divorce }}"}
   - {key: property_has, label: 有无共同财产, type: choice, options: [无财产, 有财产],
      anchor: '无财产', occurrence: 0,
-     replacement: '{{ c.property_has_none }}无财产'}
+     replacement: "{{ c.property_has_none }}无财产\n{{ c.property_has_has }}有财产："}
   - {key: property_house, label: 房屋明细, type: text,
      anchor: '（1）房屋明细：归属：\s*原告\s*/被告/其他', occurrence: 0,
      replacement: '（1）房屋明细：{{ f.property_house }} 归属：{{ c.property_house_owner_plaintiff }}原告 {{ c.property_house_owner_defendant }}/被告{{ c.property_house_owner_other }}/其他'}
@@ -100,7 +102,7 @@ fields:
      replacement: '（4）其他：{{ f.property_other }}'}
   - {key: debt_has, label: 有无共同债务, type: choice, options: [无债务, 有债务],
      anchor: '无债务', occurrence: 0,
-     replacement: '{{ c.debt_has_none }}无债务'}
+     replacement: "{{ c.debt_has_none }}无债务\n{{ c.debt_has_has }}有债务"}
   - {key: debt1, label: 债务1, type: text,
      anchor: '（1）债务1：\s*承担主体：\s*原告\s*/被告/其他', occurrence: 0,
      replacement: '（1）债务1：{{ f.debt1 }} 承担主体：{{ c.debt1_owner_plaintiff }}原告 {{ c.debt1_owner_defendant }}/被告{{ c.debt1_owner_other }}/其他'}

@@ -18,7 +18,9 @@ template.docx 供 docxtpl 渲染(勾选值由渲染层给 ☑/☐, 缺失文本�
 - occurrence 计数一律基于原始冻结文本, 与字段处理顺序解耦(先替换的字段不再影响
   后续字段的命中序号);
 - replacement 中的换行表示"锚点段之后逐段落覆盖": 首行替换锚点段内命中文本,
-  其余各行依序整段覆盖锚点段之后的连续段落(w:t 不接受换行, 拆段实现);
+  其余各行依序对应锚点段之后的连续段落; 其中单独一个 "~" 表示跳过该段
+  (保持原文, 让后续字段编辑)——用于"有/无"等选项段不相邻的排布;
+  空串表示清空该段文本(w:t 不接受换行, 拆段实现);
 - 产出前对账: 所有手写 {{ c.* }} 与全部 {{ f.* }} 标签必须落在模板内, 缺一即构建失败。
 """
 
@@ -141,10 +143,13 @@ def build_template(xml: str, spec: dict) -> str:
         if "\n" not in repl:
             add_span_edit(edits, tail_texts, idx, m.start(), m.end(), repl, key)
         else:
-            # 多段: 首行替换锚点段内命中文本, 其余各行依序整段覆盖后续段落
+            # 多段: 首行替换锚点段内命中文本, 其余各行依序对应后续段落
+            # ("~" 跳过该段保持原文, 空串清空该段)
             parts = repl.split("\n")
             add_span_edit(edits, tail_texts, idx, m.start(), m.end(), parts[0], key)
             for k, part in enumerate(parts[1:], start=1):
+                if part == "~":
+                    continue  # 跳过占位段: 不登记, 留给后续字段编辑
                 t_idx = idx + k
                 if t_idx >= len(paras):
                     raise ValueError(f"字段 {key} 尾段越界: 段落 #{t_idx} 不存在")

@@ -36,7 +36,10 @@ def test_template_contains_checkbox_tags():
     """抽查代表性勾选键(YAML 手写集的子集)。"""
     xml = _document_xml()
     for tag in ("c.plaintiff_gender_male", "c.defendant_gender_female",
-                "c.property_has_none", "c.agent_scope_general",
+                "c.property_has_none", "c.property_has_has",
+                "c.debt_has_has", "c.agent_has_yes", "c.agent_has_no",
+                "c.e_service_no", "c.e_service_method_other",
+                "c.agent_scope_general",
                 "c.compensation_damage", "c.visit_subject_plaintiff"):
         assert "{{ " + tag + " }}" in xml, f"缺勾选标签 {tag}"
 
