@@ -56,3 +56,46 @@ def test_template_contains_all_handwritten_checkbox_tags():
         if f.get("type") == "choice":
             assert re.search(r"\{\{ c\." + re.escape(f["key"]) + r"_[A-Za-z0-9_]+ \}\}", xml), \
                 f"choice 字段 {f['key']} 无任何勾选标签"
+
+
+# ---- Task 2: doc_templates 加载/对账 ----
+
+
+def test_load_fields_complaint():
+    from lawApp_LangGraph.doc_templates import load_fields
+    fields = load_fields("complaint")
+    assert fields, "complaint 模板应可加载"
+    keys = {f["key"] for f in fields}
+    assert {"plaintiff_name", "defendant_name", "fact_divorce_reason"} <= keys
+
+
+def test_load_fields_missing_returns_empty():
+    from lawApp_LangGraph.doc_templates import load_fields
+    assert load_fields("defense") == []  # 本期无答辩状模板 → 空表(不抛)
+
+
+def test_validate_template_complaint_ok():
+    from lawApp_LangGraph.doc_templates import validate_template
+    ok, missing = validate_template("complaint")
+    assert ok, f"对账不应有缺口: {missing}"
+
+
+def test_validate_template_detects_missing_tag(tmp_path):
+    import lawApp_LangGraph.doc_templates as dt
+    # 破坏副本: 复制 complaint 目录到 tmp, 删掉一个文本标签, 指向副本校验
+    src = dt._TEMPLATE_ROOT / "complaint"
+    dst = tmp_path / "broken"
+    shutil.copytree(src, dst)
+    doc = dst / "template.docx"
+    # 先整体读入(避免同文件边读边写被 "w" 截断), 再重写破坏版
+    with zipfile.ZipFile(doc) as zin:
+        xml = zin.read("word/document.xml").decode("utf-8")
+        payload = [(i.filename, zin.read(i.filename)) for i in zin.infolist()]
+    xml = xml.replace("{{ f.plaintiff_name }}", "", 1)
+    with zipfile.ZipFile(doc, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in payload:
+            if name == "word/document.xml":
+                data = xml.encode("utf-8")
+            zout.writestr(name, data)
+    ok, missing = dt._validate_dir(dst)
+    assert not ok and "f.plaintiff_name" in missing
