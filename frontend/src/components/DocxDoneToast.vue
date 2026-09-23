@@ -1,12 +1,20 @@
 <script setup>
-import { onBeforeUnmount, onMounted } from 'vue'
+import { onBeforeUnmount, watch } from 'vue'
 import { state } from '../store'
 // 常驻挂载方案: App 挂一次, state.docxToast 控制显隐;
-// 8s 计时从组件挂载起算, 到点自动收通知(用户点下载也收)
+// 8s 计时改为 watch 起算——onMounted 只在页面加载跑一次, 那时 toast 还没出现,
+// 定时器早已触发; 每次 docxToast 置 true 时清旧定时器重起 8s, 到点自动收通知
 let timer = null
-onMounted(() => {
-  timer = setTimeout(() => (state.value.docxToast = false), 8000)
-})
+watch(
+  () => state.value.docxToast,
+  (v) => {
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (v) timer = setTimeout(() => (state.value.docxToast = false), 8000)
+  }
+)
 onBeforeUnmount(() => timer && clearTimeout(timer))
 </script>
 <template>
