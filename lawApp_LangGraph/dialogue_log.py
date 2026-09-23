@@ -133,15 +133,18 @@ async def aggregate_dialogue(session_id: str) -> dict:
           只有问没答的(用户停在 interrupt / 跳过)单独成条 selected=null
         - interrupt_confirm 逐条入 confirms
         - final_answer 取最后一条入 final(多轮对话以最新终答为准)
+        - docx_generated 取最后一条入 docx(多次生成以最新文书为准;
+          无 docx 事件的会话为 None, 前端据此隐藏下载入口)
 
     Returns:
-        dict: {"session_id", "rounds": [], "confirms": [], "final": None} 形状,
-        空态合法(rounds/confirms 空列表, final None)。
+        dict: {"session_id", "rounds": [], "confirms": [], "final": None,
+        "docx": None} 形状, 空态合法(rounds/confirms 空列表, final/docx None)。
     """
     events = await fetch_dialogue(session_id)
     rounds: list[dict] = []
     confirms: list[dict] = []
     final: Optional[dict] = None
+    docx: Optional[dict] = None
     consumed: set[int] = set()  # 已配对的 round_answer seq(防跨轮重复消费)
 
     for ev in events:
@@ -204,10 +207,18 @@ async def aggregate_dialogue(session_id: str) -> dict:
                 "clarify_rounds": p.get("clarify_rounds"),
                 "ts": ts,
             }
+        elif et == "docx_generated":
+            # seq 升序遍历, 后者覆盖前者 → 自然取最后一条(最新文书)
+            docx = {
+                "path": p.get("docx_path"),
+                "filled": p.get("filled"),
+                "pending": p.get("pending"),
+            }
 
     return {
         "session_id": session_id,
         "rounds": rounds,
         "confirms": confirms,
         "final": final,
+        "docx": docx,
     }

@@ -557,3 +557,158 @@ def test_docx_direct_call_empty_fields_guarded(monkeypatch):
     assert out["plan"][0].status == "done", "步骤按跳过标 done"
     assert out["current_step_index"] == 1, "步骤索引推进"
     assert out["docx_confirmed"] is True
+
+
+# ---- Task 5: API 层(normalize 集合 / 交付端点 / dialogue docx 键) ----
+# 端点测试走 TestClient(仓库惯例, 路由无 /api 前缀), 造数用 dialogue_log.log_event
+# 直插 session_dialogue_events(对齐 test_dialogue_events 的既有造数模式)。
+
+_DOCX_MIME = (
+    "application/vnd.openxmlformats-officedocument"
+    ".wordprocessingml.document"
+)
+
+
+def test_docx_confirm_normalize_short_words():
+    """docx_confirm 进归一化集合: 短词直接命中(不走 LLM, 无网络)。"""
+    from lawApp_LangGraph.FastAPI.utils import normalize_resume
+
+    assert asyncio.run(
+        normalize_resume("docx_confirm", "确认", "生成文书?")
+    ) is True
+    assert asyncio.run(
+        normalize_resume("docx_confirm", "跳过", "生成文书?")
+    ) is False
+
+
+def test_docx_latest_endpoint_404_when_none():
+    """无 docx_generated 事件的会话 → 404(三态之一)。"""
+    _skip_if_no_pg()
+    from fastapi.testclient import TestClient
+
+    from lawApp_LangGraph.FastAPI.api import app
+
+    with TestClient(app) as client:
+        # 格式合法但从不存在的会话 → 404 而非 500
+        r = client.get("/sessions/AT-20990101-000000-999/docx/latest")
+        assert r.status_code == 404
+        assert "尚未生成" in r.json()["detail"]
+
+
+def test_docx_latest_endpoint_serves_file(tmp_path, monkeypatch):
+    """真实链路: 造 docx_generated 事件 + 落盘文件 → 200 + docx MIME + 文件流。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    from lawApp_LangGraph import dialogue_log
+
+    sid = _DOCX_T_PREFIX + "-api-latest"
+    f = tmp_path / "起诉状_test.docx"
+    f.write_bytes(b"PK\x03\x04fake-docx-payload")
+    dialogue_log.log_event(
+        sid, "docx_generated",
+        {"docx_path": str(f), "filled": 6, "pending": 1},
+    )
+    try:
+        from fastapi.testclient import TestClient
+
+        from lawApp_LangGraph.FastAPI.api import app
+
+        with TestClient(app) as client:
+            r = client.get(f"/sessions/{sid}/docx/latest")
+            assert r.status_code == 200, r.text
+            assert r.headers["content-type"].startswith(_DOCX_MIME)
+            assert r.content[:2] == b"PK"
+            assert r.content == b"PK\x03\x04fake-docx-payload"
+    finally:
+        _docx_cleanup()
+
+
+def test_docx_latest_rejects_path_escape(tmp_path, monkeypatch):
+    """docx_generated 事件里 path 指向 DOCX_OUTPUT_DIR 外 → 404(白名单校验)。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path / "out"))
+    from lawApp_LangGraph import dialogue_log
+
+    sid = _DOCX_T_PREFIX + "-api-escape"
+    outside = tmp_path / "evil.docx"  # 在 DOCX_OUTPUT_DIR 之外
+    outside.write_bytes(b"PK\x03\x04secret")
+    dialogue_log.log_event(
+        sid, "docx_generated",
+        {"docx_path": str(outside), "filled": 1, "pending": 0},
+    )
+    try:
+        from fastapi.testclient import TestClient
+
+        from lawApp_LangGraph.FastAPI.api import app
+
+        with TestClient(app) as client:
+            r = client.get(f"/sessions/{sid}/docx/latest")
+            assert r.status_code == 404, "路径越界必须被白名单拒绝"
+            assert "路径非法" in r.json()["detail"] or "不存在" in r.json()["detail"]
+    finally:
+        _docx_cleanup()
+
+
+def test_docx_latest_404_when_file_missing(tmp_path, monkeypatch):
+    """事件指向的文件已被清理(磁盘丢失) → 404(三态之一)。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    from lawApp_LangGraph import dialogue_log
+
+    sid = _DOCX_T_PREFIX + "-api-missing"
+    # 只造事件不落盘文件(模拟产物被运维清理)
+    dialogue_log.log_event(
+        sid, "docx_generated",
+        {"docx_path": str(tmp_path / "起诉状_gone.docx"), "filled": 3, "pending": 0},
+    )
+    try:
+        from fastapi.testclient import TestClient
+
+        from lawApp_LangGraph.FastAPI.api import app
+
+        with TestClient(app) as client:
+            r = client.get(f"/sessions/{sid}/docx/latest")
+            assert r.status_code == 404
+    finally:
+        _docx_cleanup()
+
+
+def test_dialogue_aggregate_includes_docx_key(tmp_path):
+    """dialogue aggregate: docx_generated → docx 键取最后一条; 无事件 → None。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    from lawApp_LangGraph import dialogue_log
+
+    sid = _DOCX_T_PREFIX + "-agg-docx"
+    f = tmp_path / "起诉状_agg.docx"
+    f.write_bytes(b"PK")
+    dialogue_log.log_event(
+        sid, "docx_generated",
+        {"docx_path": str(tmp_path / "old.docx"), "filled": 1, "pending": 9},
+    )
+    dialogue_log.log_event(
+        sid, "docx_generated",
+        {"docx_path": str(f), "filled": 6, "pending": 1},
+    )
+
+    async def _run():
+        from lawApp_LangGraph.db import close_pool
+
+        doc = await dialogue_log.aggregate_dialogue(sid)
+        empty = await dialogue_log.aggregate_dialogue(_DOCX_T_PREFIX + "-agg-none")
+        await close_pool()
+        return doc, empty
+
+    try:
+        doc, empty = asyncio.run(_run())
+        # 多条 docx_generated → 取最后一条(seq 最大)
+        assert doc["docx"] == {
+            "path": str(f), "filled": 6, "pending": 1,
+        }
+        # 无 docx 事件的会话 → docx=None(前端据此隐藏下载入口)
+        assert empty["docx"] is None
+    finally:
+        _docx_cleanup()
