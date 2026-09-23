@@ -295,15 +295,17 @@ async def generate_docx(fields_json: str, doc_type: str = "complaint", filename:
     c_ctx: dict = {}
     filled = pending = 0
     for fd in all_fields:
-        if fd.get("_merge_into"):
-            continue
         key = fd["key"]
         val = str(fields.get(key) or "").strip()
         if fd["type"] == "choice":
             for opt, ckey in _choice_ctags(fd).items():
                 c_ctx[ckey] = "☑" if (val and val == opt) else "☐"
         else:
+            # _merge_into 附带字段同路径渲染(其 {{ f.KEY }} 标签写在宿主 replacement
+            # 内), 缺失同样给"待补充"(spec D4); 仅下方计数跳过(挂在宿主那一项)
             f_ctx[key] = val or "待补充"
+        if fd.get("_merge_into"):
+            continue
         # 计数口径: 每个非 _merge_into 字段算一项, 值非空=filled, 空=pending
         if val:
             filled += 1

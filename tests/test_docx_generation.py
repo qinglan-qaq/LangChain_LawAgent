@@ -170,6 +170,23 @@ def test_generate_docx_filename_sanitized(tmp_path, monkeypatch):
     assert os.path.dirname(os.path.abspath(r["docx_path"])) == str(tmp_path.resolve())
 
 
+def test_generate_docx_merge_into_fields_rendered(tmp_path, monkeypatch):
+    """I-1(R1): _merge_into 附带字段值须渲染(标签在宿主 replacement 内),
+    缺失给"待补充"(spec D4); 仅 filled/pending 计数跳过。"""
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    # 传附带字段值: 渲染产物须含各值
+    r = _run_tool({"plaintiff_work": "某公司", "plaintiff_duty": "经理",
+                   "plaintiff_phone": "13800000000", "preservation_court": "海淀法院"})
+    assert r["status"] == "success"
+    text = _doc_text(r["docx_path"])
+    for needle in ("经理", "13800000000", "海淀法院"):
+        assert needle in text, f"附带字段值未被渲染: {needle}"
+    # 只传宿主: 附带字段空位 = "待补充"(D4)
+    r2 = _run_tool({"plaintiff_work": "某公司"})
+    assert r2["status"] == "success"
+    assert "职务：待补充" in _doc_text(r2["docx_path"])
+
+
 def test_generate_docx_unknown_doctype_error(tmp_path, monkeypatch):
     monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
     r = _run_tool({"a": "b"}, doc_type="defense")
