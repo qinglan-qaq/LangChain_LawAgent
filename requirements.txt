@@ -40,3 +40,6 @@ markdown>=3.7
 pdfkit>=1.0.0
 python-dotenv>=1.0.0
 serpapi>=0.1.0              # langchain-community 0.4 的 SerpAPIWrapper 依赖新包名
+
+# ── 文书生成 (docx) ──
+docxtpl>=0.20               # 法院表格式文书模板渲染(jinja2 标签嵌入 docx)
