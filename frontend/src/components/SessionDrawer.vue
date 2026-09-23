@@ -169,6 +169,13 @@ function goToFinal() {
             <MarkdownView :text="detail.final_answer" />
           </div>
           <div v-else class="text-slate-400">未产出最终回答(可能停在人工确认)</div>
+          <!-- docx 产物入口(getDialogue 聚合键 dialogue.docx 存在时; sid 取本抽屉会话而非当前活跃会话) -->
+          <a
+            v-if="dialogue?.docx"
+            class="inline-block mt-1 px-3 py-1 rounded bg-amber-600 text-white"
+            :href="'/api/sessions/' + encodeURIComponent(detail?.session_id || '') + '/docx/latest'"
+            download
+          >下载 Word 文书</a>
         </details>
 
         <!-- 2. 澄清记录(沿用原内联三行结构) -->

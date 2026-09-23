@@ -24,6 +24,9 @@ export const state = ref({
   promptsLog: '',            // 提示词记录(prompts_record/final_prompts 事件, 单行截断 200 字符)
   elements: [],              // 要素面板
   interrupt: null,           // 当前 HITL 载荷
+  docxGenerating: false,     // docx 确认后渲染中(全局弹窗)
+  docxToast: false,          // docx 完成通知(左上角, 自管 8s 消失)
+  docxPath: '',              // 本轮生成的文书路径(终答区下载按钮显隐)
   busy: false,
   error: '',
 })
@@ -58,6 +61,7 @@ export function resetTurn() {
     planText: '', status: '', toolUsage: {},
     tools: [], steps: [], promptsLog: '',
     elements: [], interrupt: null, error: '',
+    docxGenerating: false, docxToast: false, docxPath: '',
   })
 }
 

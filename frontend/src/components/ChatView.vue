@@ -98,5 +98,15 @@ function hitlTag(m) {
         </div>
       </div>
     </Motion>
+
+    <!-- docx 产物下载入口(终答后, docxPath 由 docx_done 帧写入) -->
+    <div v-if="state.docxPath" class="flex justify-start">
+      <a
+        id="btn-download-docx"
+        class="inline-block px-4 py-1.5 rounded-lg bg-amber-600 text-white text-sm"
+        :href="'/api/sessions/' + encodeURIComponent(state.sessionId) + '/docx/latest'"
+        download
+      >下载 Word 文书</a>
+    </div>
   </div>
 </template>
