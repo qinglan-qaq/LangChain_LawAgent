@@ -88,7 +88,7 @@ assistant 模式 + doc_type=complaint(模板可用)时:
 
 镜像现有写入点, 加两类:
 
-- `docx_confirm` — interrupt 消费路径, payload `{question, chosen: 确认生成|跳过, field_preview 摘要}`。
+- `docx_confirm` — interrupt 消费路径, payload `{question, chosen: 确认生成|跳过, filled, pending, critical_missing}`(计数 + critical 缺失清单; 不落全量字段值, 与 interrupt payload 的完整 `field_preview` 区分)。
 - `docx_generated` — 确认且渲染成功后写(final_answer 前), payload `{docx_path, filled, pending}`; 跳过或失败不写。
 
 ### §7 错误处理(全部不阻断图)
