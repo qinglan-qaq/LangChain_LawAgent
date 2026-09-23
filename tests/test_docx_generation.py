@@ -211,3 +211,276 @@ def test_build_docx_template_reproducible(tmp_path):
     with zipfile.ZipFile(out) as z:
         rebuilt = z.read("word/document.xml")
     assert rebuilt == _document_xml().encode("utf-8")
+
+
+# ---- Task 4: 图内流(docx_confirm interrupt 载荷 / 跳过 resume / 确认落盘) ----
+# 驱动模式参照 tests/test_smoke.py 的 interrupt→Command(resume) 夹具:
+# MemorySaver checkpointer + LLM 全替身(_stream_plan/_structured/finalize astream),
+# _extract_doc_fields 打 AsyncMock; generate_docx 走真实 ToolNode 渲染。
+
+import asyncio  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+import types  # noqa: E402
+
+if sys.platform == "win32":
+    # psycopg async 在 Windows 需 SelectorEventLoop(对齐 test_dialogue_events)
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+_DOCX_T_PREFIX = "T-docx-test"
+
+# _extract_doc_fields 打桩字段: 5 项已填 + 1 项空(待补充), 覆盖文本/choice
+_DOCX_STUB_FIELDS = {
+    "plaintiff_name": "张三",
+    "defendant_name": "李四",
+    "plaintiff_gender": "男",
+    "defendant_gender": "女",
+    "fact_divorce_reason": "感情破裂分居两年",
+    "plaintiff_birth_date": "",  # 空 → field_preview pending/待补充
+}
+
+
+def _pg_ok() -> bool:
+    """独立短连接探测 PG(不碰全局池, 对齐 test_dialogue_events)。"""
+
+    async def _probe():
+        from psycopg import AsyncConnection
+
+        from lawApp_LangGraph.db import build_dsn
+
+        conn = await AsyncConnection.connect(build_dsn(), autocommit=True)
+        try:
+            await conn.execute("SELECT 1")
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.run(_probe())
+        return True
+    except Exception:
+        return False
+
+
+def _skip_if_no_pg():
+    if not _pg_ok():
+        import pytest
+
+        pytest.skip("PG 不可用, 显式跳过(不 mock)")
+
+
+def _docx_cleanup() -> None:
+    """清理测试会话事件行(独立短连接)。"""
+
+    async def _run():
+        from psycopg import AsyncConnection
+
+        from lawApp_LangGraph.db import build_dsn
+
+        conn = await AsyncConnection.connect(build_dsn(), autocommit=True)
+        try:
+            await conn.execute(
+                "DELETE FROM session_dialogue_events WHERE session_id LIKE %s",
+                (_DOCX_T_PREFIX + "%",),
+            )
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.run(_run())
+    except Exception:
+        pass  # PG 不可用 → 后续用例各自 SKIP
+
+
+def _count_events(sid: str, event_type: str) -> int:
+    """查 session_dialogue_events 指定会话 + 类型行数。"""
+
+    async def _run():
+        from psycopg import AsyncConnection
+
+        from lawApp_LangGraph.db import build_dsn
+
+        conn = await AsyncConnection.connect(build_dsn(), autocommit=True)
+        try:
+            cur = await conn.execute(
+                "SELECT count(*) FROM session_dialogue_events "
+                "WHERE session_id = %s AND event_type = %s",
+                (sid, event_type),
+            )
+            return (await cur.fetchone())[0]
+        finally:
+            await conn.close()
+
+    return asyncio.run(_run())
+
+
+def _build_docx_graph(monkeypatch):
+    """装配图内流测试替身并 build_graph(MemorySaver)。
+
+    LLM 全替身: risk/assess/replan_check 放行、finalize 出固定文本;
+    planner 经 _stream_plan 返回单步 generate_docx 计划; 抽取打 AsyncMock。
+    """
+    from unittest.mock import AsyncMock
+
+    import lawApp_LangGraph.LangGraph_lawApp as app
+    from langchain_core.runnables import Runnable
+    from langgraph.checkpoint.memory import MemorySaver
+
+    verdict = types.SimpleNamespace(
+        high_risk=False, question_category="marriage_legal", applicable=True,
+        element_updates=[], na_keys=[], promote_keys=[], questions=[], done=True,
+        needs_replan=False, reason="", insufficient_reason="none",
+    )
+
+    class _Chain(Runnable):
+        """`PromptTemplate | _structured(...)` 决策链替身。"""
+
+        def invoke(self, _inp, config=None, **_kw):
+            return verdict
+
+        async def ainvoke(self, _inp, config=None, **_kw):
+            return verdict
+
+    class _StubLLM(Runnable):
+        """executor/finalize LLM 替身: 结构化链回固定 verdict, astream 出终答文本。"""
+
+        def with_structured_output(self, _schema, **_kw):
+            return _Chain()
+
+        def bind_tools(self, _tools):
+            return self
+
+        def invoke(self, _msgs, config=None, **_kw):
+            return verdict
+
+        async def ainvoke(self, _msgs, config=None, **_kw):
+            return verdict
+
+        async def astream(self, _prompt, config=None, **_kw):
+            yield types.SimpleNamespace(content="文书终答测试")
+
+    async def _fake_stream_plan(_prompt_text, _source, _config):
+        plan = app.PlanSchema.model_validate(
+            {
+                "reasoning": ["文书起草"],
+                "plan": [
+                    {
+                        "step_id": 1,
+                        "description": "按起诉状模板生成 Word 文书",
+                        "tool_name": "generate_docx",
+                    }
+                ],
+            }
+        )
+        return plan, []
+
+    monkeypatch.setattr(app, "get_executor_llm", lambda: _StubLLM())
+    monkeypatch.setattr(app, "get_planner_llm", lambda: _StubLLM())
+    monkeypatch.setattr(app, "_stream_plan", _fake_stream_plan)
+    monkeypatch.setattr(
+        app, "_extract_doc_fields", AsyncMock(return_value=dict(_DOCX_STUB_FIELDS))
+    )
+    return app.build_graph(checkpointer=MemorySaver())
+
+
+def _docx_invoke_input() -> dict:
+    return {
+        "query": "我要起诉离婚, 请帮我生成起诉状",
+        "mode": "assistant",
+        "doc_type": "complaint",
+    }
+
+
+def test_docx_confirm_interrupt_payload(monkeypatch):
+    """executor docx 步骤: 触发 docx_confirm, 载荷含 field_preview 与二选选项。"""
+    g = _build_docx_graph(monkeypatch)
+    cfg = {"configurable": {"thread_id": _DOCX_T_PREFIX + "-payload"},
+           "recursion_limit": 40}
+
+    async def run():
+        result = await g.ainvoke(_docx_invoke_input(), config=cfg)
+        assert not result.get("final_answer"), "interrupt 前不得出终答"
+
+        snap = await g.aget_state(cfg)
+        assert snap.next, "应停在 docx_confirm interrupt"
+        intr = next(iter(snap.interrupts), None)
+        assert intr is not None, "pending interrupts 应含 docx_confirm"
+        p = intr.value
+        assert p["type"] == "docx_confirm"
+        assert "确认生成吗" in p["message"]
+        assert "已填 5 项" in p["message"] and "待补充 1 项" in p["message"]
+        assert p["options"] == [
+            {"value": "确认", "label": "确认生成 Word 文书"},
+            {"value": "跳过", "label": "跳过该步骤"},
+        ]
+        prev = {item["key"]: item for item in p["field_preview"]}
+        assert prev["plaintiff_name"] == {
+            "key": "plaintiff_name", "label": "原告姓名", "value": "张三",
+            "critical": True, "status": "filled",
+        }
+        assert prev["plaintiff_birth_date"]["status"] == "pending"
+        assert prev["plaintiff_birth_date"]["value"] == "待补充"
+
+    asyncio.run(run())
+
+
+def test_docx_confirm_skip_resume_no_docx(monkeypatch, tmp_path):
+    """resume 跳过: finalize 正常收尾, state 无 docx_path, 无 docx_generated 事件。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    g = _build_docx_graph(monkeypatch)
+    sid = _DOCX_T_PREFIX + "-skip"
+    cfg = {"configurable": {"thread_id": sid}, "recursion_limit": 40}
+
+    async def run():
+        from langgraph.types import Command
+
+        await g.ainvoke(_docx_invoke_input(), config=cfg)  # 停在 docx_confirm
+        result = await g.ainvoke(Command(resume=False), config=cfg)
+        assert result.get("final_answer") == "文书终答测试"
+        assert result.get("docx_path") is None, "跳过不得生成 docx"
+        assert result.get("docx_confirmed") is True, "跳过后确认位落定(防再问)"
+        assert not list(tmp_path.glob("*.docx")), "跳过不得落盘任何 docx"
+
+    try:
+        asyncio.run(run())
+        # 落库: docx_confirm(跳过)一行, docx_generated 零行
+        assert _count_events(sid, "docx_confirm") == 1
+        assert _count_events(sid, "docx_generated") == 0
+    finally:
+        _docx_cleanup()
+
+
+def test_docx_confirm_yes_resume_generates_file(monkeypatch, tmp_path):
+    """resume 确认: generate_docx 真实渲染(docxtpl), docx_path 进 state,
+    docx_confirm + docx_generated 两事件落库(PG 查 session_dialogue_events)。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    g = _build_docx_graph(monkeypatch)
+    sid = _DOCX_T_PREFIX + "-yes"
+    cfg = {"configurable": {"thread_id": sid}, "recursion_limit": 40}
+
+    async def run():
+        from langgraph.types import Command
+
+        await g.ainvoke(_docx_invoke_input(), config=cfg)  # 停在 docx_confirm
+        result = await g.ainvoke(Command(resume=True), config=cfg)
+        assert result.get("final_answer") == "文书终答测试"
+        assert result.get("docx_path"), "确认后 docx_path 应进 state"
+        assert os.path.exists(result["docx_path"]), "docx 必须真实落盘"
+        assert result.get("docx_confirmed") is True
+        # 渲染内容抽查: 抽取字段真实进了 Word
+        text = _doc_text(result["docx_path"])
+        assert "张三" in text and "李四" in text
+        assert "感情破裂分居两年" in text
+        return result
+
+    try:
+        result = asyncio.run(run())
+        # 落库: docx_confirm(确认) + docx_generated 各至少一行
+        assert _count_events(sid, "docx_confirm") == 1
+        assert _count_events(sid, "docx_generated") == 1
+        assert os.path.basename(result["docx_path"]).startswith("起诉状_")
+    finally:
+        _docx_cleanup()

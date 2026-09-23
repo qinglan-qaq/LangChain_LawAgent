@@ -43,6 +43,7 @@ v2 变更 (upgrade-v1):
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from datetime import datetime
@@ -177,6 +178,9 @@ _STATE_KEYS = {
     "final_prompts",
     "web_search_results",
     "pdf_path",
+    "doc_fields",
+    "docx_path",
+    "docx_confirmed",
     "law_results",
     "prompts_record",
 }
@@ -414,6 +418,10 @@ def ingest_node(state: AgentState) -> dict:
         "rag_documents": [],
         "evaluation": EvaluationResult(),
         "pdf_path": None,
+        # docx 文书生成三件套一并归位(D1-D5)
+        "doc_fields": {},
+        "docx_path": None,
+        "docx_confirmed": False,
         "error": None,
         "risk_confirmed": False,
         "pdf_confirmed": False,
@@ -789,8 +797,22 @@ async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dic
 
 
 # 拼工具清单摘要(名字+描述前 120 字)喂 planner 提示词
+# generate_docx 用固定文案: 可用性由 planner 提示词控制(仅 assistant 模式
+# 且模板可用时规划 docx 步骤), 不取 docstring 摘要
+_TOOL_DESC_OVERRIDES = {
+    "generate_docx": (
+        "按法院表格模板把案件字段渲染成 Word 文书(起诉状)。"
+        "仅在工具清单标注\"模板可用\"时规划此步骤。"
+    ),
+}
+
+
 def _tools_desc() -> str:
-    return "\n".join(f"- {t.name}: {(t.description or '')[:120]}" for t in ALL_TOOLS())
+    lines = []
+    for t in ALL_TOOLS():
+        desc = _TOOL_DESC_OVERRIDES.get(t.name) or (t.description or "")[:120]
+        lines.append(f"- {t.name}: {desc}")
+    return "\n".join(lines)
 
 
 # 结构化计划 → PlanStep 列表, 未知工具名置 None 交 executor 自行处理
@@ -953,10 +975,21 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
     template = PLANNER_SYSTEM
 
     if (state.mode or "attorney") == "assistant":
-        from lawApp_LangGraph.prompts import PLANNER_ASSISTANT_SUFFIX
+        from lawApp_LangGraph.doc_templates import template_available
+        from lawApp_LangGraph.prompts import (
+            PLANNER_ASSISTANT_DOCX_STEP,
+            PLANNER_ASSISTANT_SUFFIX,
+        )
 
+        # 模板可用 → docx 末步规划提示; 无模板 → 提示词显式不出 docx 步骤(D2)
+        docx_step_hint = (
+            PLANNER_ASSISTANT_DOCX_STEP
+            if template_available(state.doc_type or "complaint")
+            else "(无 Word 模板时不出 docx 步骤)"
+        )
         template = PLANNER_SYSTEM + PLANNER_ASSISTANT_SUFFIX.format(
-            doc_type_label="起诉状" if state.doc_type != "defense" else "答辩状"
+            doc_type_label="起诉状" if state.doc_type != "defense" else "答辩状",
+            docx_step_hint=docx_step_hint,
         )
 
     prompt = PromptTemplate.from_template(template).format(
@@ -1031,6 +1064,52 @@ def _step_summaries(state: AgentState) -> dict[str, str]:
         "web_summary": web_summary,
         "law_summary": law_summary,
     }
+
+
+async def _extract_doc_fields(state: "AgentState", doc_type: str) -> dict:
+    """flash LLM 按模板字段结构化抽取: 输入案情+问诊+法条, 输出 key→值/选项。
+
+    模板字段全集进 schema(含 _merge_into 附带 13 项, spec §3); 不可判定
+    字段返回空串(渲染层归一为待补充/全☐); 失败抛, 由调用方走步骤 failed。
+
+    Args:
+        state (AgentState): 图状态, 读取 query/user_supplements/case_elements/
+            law_results 组装抽取上下文。
+        doc_type (str): 模板目录名(本期 complaint)。
+
+    Returns:
+        dict: 字段 key → 抽取值(文本或 choice 选项, 空串=未抽取到)。
+    """
+    from pydantic import create_model
+
+    from lawApp_LangGraph.doc_templates import load_fields
+
+    fields_defs = load_fields(doc_type)
+    # 模板字段全集动态 schema(74 项, 含 _merge_into 附带字段)
+    anns = {fd["key"]: (str, "") for fd in fields_defs}
+    schema = create_model("DocFields", **anns)
+
+    laws_digest = "\n".join(
+        f"{l.law_title} {l.article_number}: {l.content[:80]}"
+        for l in (state.law_results or [])[:5]
+    )
+    prompt = f"""你是资深婚姻家事律师助理。从下列案情中为《民事起诉状》抽取字段值。
+规则: 只依据案情文本; 案情未提及的字段返回空字符串; choice 类字段必须取给定选项之一或空串。
+可选选项参照(常见): 性别[男,女]; 有无财产[无财产,有财产]; 抚养归属[原告,被告]; 代理权限[一般授权,特别授权]。
+"诉请依据"字段: 引用法条原文标题与条号(可参考下方检索到的法条)。
+
+【案情】
+{_query_with_supplements(state, 4000)}
+
+【已问诊要素】
+{state.case_elements.digest()}
+
+【检索法条】
+{laws_digest or '无'}
+"""
+    # flash 结构化输出链(_structured 内部对真实 ChatOpenAI 走 method="json_mode")
+    result = await _structured(schema).ainvoke([SystemMessage(content=prompt)])
+    return result.model_dump() if hasattr(result, "model_dump") else dict(result)
 
 
 async def executor_node(state: AgentState, config: RunnableConfig = None) -> dict:
@@ -1112,6 +1191,107 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
                 },
             }
         # 确认 → 继续 LLM 参数提取
+
+    # HITL-4: docx 生成前确认(镜像 pdf_confirm; 先抽取字段供预览, 确认后参数直注)
+    confirmed_fields = state.doc_fields or {}
+    if step.tool_name == "generate_docx" and not state.docx_confirmed:
+        from lawApp_LangGraph.doc_templates import load_fields
+
+        doc_type = state.doc_type or "complaint"
+        try:
+            doc_fields = await _extract_doc_fields(state, doc_type)
+        except Exception as e:
+            debug.warning("docx 字段抽取失败", detail=str(e)[:120])
+            errored = [
+                s.model_copy(update={"status": "failed", "retry_count": s.retry_count + 1})
+                if i == idx else s for i, s in enumerate(plan)
+            ]
+            return {"plan": errored, "current_step_index": idx + 1,
+                    "error": f"步骤{step.step_id} 字段抽取失败",
+                    "error_streak": state.error_streak + 1,
+                    "messages": [AIMessage(content="")], "docx_confirmed": True}
+
+        fields_defs = {fd["key"]: fd for fd in load_fields(doc_type)}
+        preview, critical_missing = [], []
+        for k, v in doc_fields.items():
+            fd = fields_defs.get(k, {})
+            val = str(v or "").strip()
+            if val:
+                preview.append({"key": k, "label": fd.get("label", k), "value": val,
+                                "critical": bool(fd.get("critical")), "status": "filled"})
+            else:
+                preview.append({"key": k, "label": fd.get("label", k), "value": "待补充",
+                                "critical": bool(fd.get("critical")), "status": "pending"})
+                if fd.get("critical"):
+                    critical_missing.append(fd.get("label", k))
+        n_filled = sum(1 for p in preview if p["status"] == "filled")
+        n_pending = len(preview) - n_filled
+        docx_msg = (
+            f"即将生成 Word 文书(民事起诉状)。已填 {n_filled} 项, "
+            f"待补充 {n_pending} 项"
+            + (f", 关键缺失: {'、'.join(critical_missing[:5])}" if critical_missing else "")
+            + "。确认生成吗?"
+        )
+        confirmed = interrupt(
+            {
+                "type": "docx_confirm",
+                "message": docx_msg,
+                "options": [
+                    {"value": "确认", "label": "确认生成 Word 文书"},
+                    {"value": "跳过", "label": "跳过该步骤"},
+                ],
+                "field_preview": preview,
+            }
+        )
+        # 方案c: docx_confirm 用户决策落库(resume 消费路径)
+        dialogue_log.log_event(
+            _dialogue_sid(config),
+            "docx_confirm",
+            {
+                "question": docx_msg,
+                "chosen": "确认生成 Word 文书" if confirmed else "跳过该步骤",
+                "filled": n_filled,
+                "pending": n_pending,
+                "critical_missing": critical_missing,
+            },
+        )
+        if not confirmed:
+            done = [
+                s.model_copy(update={"status": "done"}) if i == idx else s
+                for i, s in enumerate(plan)
+            ]
+            debug.info("← Executor docx 步骤被用户跳过", detail=f"step={idx + 1}")
+            return {
+                "plan": done, "current_step_index": idx + 1,
+                "docx_confirmed": True, "doc_fields": doc_fields,
+                "hitl_event": {"type": "docx_confirm", "confirmed": False,
+                               "at": datetime.now().isoformat()},
+            }
+        # 确认 → 字段进 state, 落到下方直调分支
+        state = state.model_copy(update={"doc_fields": doc_fields})
+        confirmed_fields = doc_fields
+
+    # generate_docx 确认后直调: 参数完全确定, 跳过 LLM 提参(镜像 analyze_legal_issue 注入)
+    if step.tool_name == "generate_docx":
+        sid = _dialogue_sid(config) or "session"
+        # H9 同款清洗: 会话 id 非白名单字符 → 下划线(f-string 表达式内禁反斜杠, 先算好)
+        safe_sid = re.sub(r"[^\w\-.\u4e00-\u9fff]", "_", sid)
+        tc = {
+            "name": "generate_docx",
+            "args": {
+                "fields_json": json.dumps(confirmed_fields, ensure_ascii=False),
+                "doc_type": state.doc_type or "complaint",
+                "filename": f"起诉状_{safe_sid}.docx",
+            },
+            "id": f"docx_{idx}",
+        }
+        ai_msg = AIMessage(content="", tool_calls=[tc])
+        doing = [
+            s.model_copy(update={"status": "doing"}) if i == idx else s
+            for i, s in enumerate(plan)
+        ]
+        return {"plan": doing, "messages": [ai_msg], "docx_confirmed": True,
+                "doc_fields": confirmed_fields}
 
     tool = _tool_by_name(step.tool_name)
     if tool is None:
@@ -1283,6 +1463,22 @@ async def merge_node(state: AgentState, config: RunnableConfig = None) -> dict:
             if k in _STATE_KEYS:
                 # web/law 为 append reducer → 只传增量
                 updates[k] = v
+
+    # 方案c: docx 渲染成功 → docx_generated 事件落库(跳过/失败不写, spec §6)
+    if (
+        step.tool_name == "generate_docx"
+        and isinstance(output, dict)
+        and output.get("docx_path")
+    ):
+        dialogue_log.log_event(
+            _dialogue_sid(config),
+            "docx_generated",
+            {
+                "docx_path": output["docx_path"],
+                "filled": output.get("filled", 0),
+                "pending": output.get("pending", 0),
+            },
+        )
 
     # tool_calls / ToolCallRecord 增量追加
     if step.tool_name:

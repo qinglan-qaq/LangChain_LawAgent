@@ -386,6 +386,9 @@ class AgentState(BaseModel):
     law_results: Annotated[List[LawsResult], append_list] = Field(default_factory=list)
 
     # 以下为路由控制判断
-
     pdf_path: Optional[str] = None
+    # docx 文书生成(D1-D5): 抽取字段/产物路径/确认位
+    doc_fields: dict = Field(default_factory=dict)
+    docx_path: Optional[str] = None
+    docx_confirmed: bool = False
     error: Optional[str] = None

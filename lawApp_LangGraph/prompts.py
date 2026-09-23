@@ -389,7 +389,13 @@ def get_analysis_prompt() -> PromptTemplate:
 PLANNER_ASSISTANT_SUFFIX = """
 本次是【律师助理-文书起草】任务(婚姻家事类): 用户提交了完整案件详情, 目标是起草
 {doc_type_label}。规划时优先: (1)从案件详情提取文书要素(当事人/诉求/事实/证据)
-(2)检索婚姻家事法条与类案 (3)评估材料缺口(缺则反问) (4)文书结构化起草。
+(2)检索婚姻家事法条(不检索类案, 文书起草用不到) (3)评估材料缺口(缺则反问)
+(4)文书结构化起草{docx_step_hint}
+"""
+
+# docx 末步规划提示(模板可用时由 planner_node 注入 docx_step_hint 占位)
+PLANNER_ASSISTANT_DOCX_STEP = """(5)若工具列表含 generate_docx, 最后一步固定规划:
+    tool_name=generate_docx, description="按起诉状模板生成 Word 文书"(参数由系统注入, 无需规划参数)。
 """
 
 DISCLAIMER_TEXT = (

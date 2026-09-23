@@ -1,4 +1,5 @@
 from lawApp_LangGraph.tools.tools import (
+    generate_docx,
     get_google_search,
     markdown_to_pdf,
 )
@@ -20,6 +21,7 @@ LOCAL_TOOLS = [
     fetch_laws,
     get_google_search,
     markdown_to_pdf,
+    generate_docx,
     retrieve_legal_knowledge,
     evaluate_case_relevance,
     analyze_legal_issue,
