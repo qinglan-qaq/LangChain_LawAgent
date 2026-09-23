@@ -94,6 +94,8 @@ function handleStreamEvent(e, assistant) {
     assistant.done = true
     state.value.reasoningActive = false
     state.value.status = ''
+    // 渲染降级走 done 收尾(工具层失败不发 error 帧), 须在此关生成中弹窗
+    state.value.docxGenerating = false
     // 终止帧: 全部步骤标记完成(执行进度收尾)
     state.value.steps.forEach((s) => {
       s.done = true
@@ -200,6 +202,8 @@ async function resumeHITL(answer) {
     state.value.busy = false
     state.value.reasoningActive = false
     state.value.status = ''
+    // 流级兜底: 任何路径(含降级 done 收尾异常)最终关生成中弹窗, 防遮罩卡死
+    state.value.docxGenerating = false
     // 流未走到终止帧且面板已消失: 恢复 interrupt(本地副本优先, 服务端兜底)
     if (!sawTerminal && !state.value.interrupt) {
       if (aborted) {

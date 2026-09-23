@@ -144,10 +144,23 @@ function goToFinal() {
                 :key="i"
                 class="flex gap-1 flex-wrap items-baseline"
               >
-                <span class="rounded px-1.5 py-0.5 bg-slate-100 text-slate-500">{{ c.type }}</span>
-                <span v-if="c.question" class="text-slate-700">{{ c.question }}</span>
-                <span class="text-slate-400">→</span>
-                <span class="text-slate-800">{{ c.chosen }}</span>
+                <!-- docx 确认决策行(SF-3, spec §5): amber 高亮律师所选, 附已填/待补充计数与关键缺失警示 -->
+                <template v-if="c.type === 'docx_confirm'">
+                  <span class="rounded px-1.5 py-0.5 bg-amber-100 text-amber-700">文书确认</span>
+                  <span v-if="c.question" class="text-slate-700">{{ c.question }}</span>
+                  <span class="text-slate-400">→</span>
+                  <span class="rounded px-1.5 py-0.5 bg-amber-100 border-amber-300 text-amber-800 font-medium">{{ c.chosen }}</span>
+                  <span v-if="c.filled != null" class="text-slate-500">已填 {{ c.filled }} 项 / 待补充 {{ c.pending }} 项</span>
+                  <span v-if="c.critical_missing?.length" class="text-amber-700">
+                    ⚠ 关键缺失: {{ c.critical_missing.join('、') }}
+                  </span>
+                </template>
+                <template v-else>
+                  <span class="rounded px-1.5 py-0.5 bg-slate-100 text-slate-500">{{ c.type }}</span>
+                  <span v-if="c.question" class="text-slate-700">{{ c.question }}</span>
+                  <span class="text-slate-400">→</span>
+                  <span class="text-slate-800">{{ c.chosen }}</span>
+                </template>
               </div>
             </div>
             <!-- 终答落点 -->

@@ -131,7 +131,8 @@ async def aggregate_dialogue(session_id: str) -> dict:
         - round_question 与 round_answer 按 payload.round 配对(seq 顺序:
           每个 question 取其后首个未被消费的相同 round 的 answer),
           只有问没答的(用户停在 interrupt / 跳过)单独成条 selected=null
-        - interrupt_confirm 逐条入 confirms
+        - interrupt_confirm 逐条入 confirms(docx_confirm 同构映射, 结构化键
+          多透 filled/pending/critical_missing 供前端拼决策行)
         - final_answer 取最后一条入 final(多轮对话以最新终答为准)
         - docx_generated 取最后一条入 docx(多次生成以最新文书为准;
           无 docx 事件的会话为 None, 前端据此隐藏下载入口)
@@ -197,6 +198,20 @@ async def aggregate_dialogue(session_id: str) -> dict:
                     "type": p.get("type"),
                     "question": p.get("question"),
                     "chosen": p.get("chosen"),
+                    "ts": ts,
+                }
+            )
+        elif et == "docx_confirm":
+            # SF-3(spec §5 缺口): docx 确认决策同构映射入 confirms(结构化键直透,
+            # 展示文本由前端拼), 律师确认/跳过决策在时间线可见
+            confirms.append(
+                {
+                    "type": "docx_confirm",
+                    "question": p.get("question"),
+                    "chosen": p.get("chosen"),
+                    "filled": p.get("filled"),
+                    "pending": p.get("pending"),
+                    "critical_missing": p.get("critical_missing") or [],
                     "ts": ts,
                 }
             )

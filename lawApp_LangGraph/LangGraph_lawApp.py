@@ -1272,7 +1272,9 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             debug.info("← Executor docx 步骤被用户跳过", detail=f"step={idx + 1}")
             return {
                 "plan": done, "current_step_index": idx + 1,
-                "docx_confirmed": True, "doc_fields": doc_fields,
+                # 跳过路径仅落 docx_confirmed=True, 不落 doc_fields(残留在同轮 replanner
+                # 补出 generate_docx 步时会绕过 HITL 静默渲染; 空守卫由直调分支拦截)
+                "docx_confirmed": True,
                 "hitl_event": {"type": "docx_confirm", "confirmed": False,
                                "at": datetime.now().isoformat()},
             }

@@ -149,7 +149,7 @@ c67142d 计划 → 9c52504+1c1e8bb(T1 模板资产) → 4bb7ac6+f0e360e(T2 doc_t
 5. **owner 12 个委托权限勾选恒 ☐**: 表单无对应案情字段驱动(表格第一段"受托人权限"□____),填空文本框亦无字段;留待律师 Word 内自勾。
 6. **docx_done 帧设计**: 事件从 merge 节点 state 更新流(updates)派生而非独立总线,与现有 SSE 架构一致。
 7. **前端三处小偏差**(T6,审查认定合理): SessionDrawer 下载用 detail.session_id;resume catch 流级失败兜底关弹窗;DocxDoneToast 自消定时器从 onMounted 改 watch 起算(原实现 8s 自消失效,M-1 修复 a90ed5d)。
-8. **跳过路径残留 state**: 用户选"跳过"后 doc_fields 已写入 state 且 docx_confirmed 未置 True——若律师续问触发 replan 且 planner 再排 generate_docx,会重新出确认卡(非静默渲染);属可接受的二次确认,非空白文书风险(直调分支守卫在)。
+8. **跳过路径 state 残留**(终审 SF-1 修复): 跳过路径仅落 docx_confirmed=True,不落 doc_fields——同轮 replanner 再排 generate_docx 步时,直调分支 confirmed_fields 为空被 I-2 空守卫拦下按跳过处理,不会静默渲染;ingest 重置兜底续问场景。(修复前该 return 同时落 doc_fields,会导致直调分支绕过守卫不经 HITL 静默渲染——已按终审裁定去掉。)
 
 ### 收官后遗留 Minor(ledger 存档,不阻断)
 

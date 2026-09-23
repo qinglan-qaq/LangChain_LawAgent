@@ -187,6 +187,18 @@ def test_generate_docx_merge_into_fields_rendered(tmp_path, monkeypatch):
     assert "职务：待补充" in _doc_text(r2["docx_path"])
 
 
+def test_generate_docx_xml_special_chars_escaped(tmp_path, monkeypatch):
+    """SF-2: 字段值含 XML 特殊字符(&/<)时 autoescape 转实体渲染, 不打崩 XML 解析,
+    产物文本仍为原字符。"""
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    r = _run_tool({"plaintiff_name": "A&B <甲>", "defendant_name": "李<四>&王"},
+                  filename="起诉状_SF2.docx")
+    assert r["status"] == "success" and r["docx_path"]
+    text = _doc_text(r["docx_path"])
+    assert "A&B <甲>" in text
+    assert "李<四>&王" in text
+
+
 def test_generate_docx_unknown_doctype_error(tmp_path, monkeypatch):
     monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
     r = _run_tool({"a": "b"}, doc_type="defense")
@@ -710,5 +722,40 @@ def test_dialogue_aggregate_includes_docx_key(tmp_path):
         }
         # 无 docx 事件的会话 → docx=None(前端据此隐藏下载入口)
         assert empty["docx"] is None
+    finally:
+        _docx_cleanup()
+
+
+def test_dialogue_aggregate_includes_docx_confirm(tmp_path):
+    """SF-3(spec §5): docx_confirm 事件 → aggregate 出 confirms 决策行
+    (含 chosen/filled/pending/critical_missing 结构化键, 前端拼展示文本)。"""
+    _skip_if_no_pg()
+    _docx_cleanup()
+    from lawApp_LangGraph import dialogue_log
+
+    sid = _DOCX_T_PREFIX + "-agg-confirm"
+    dialogue_log.log_event(
+        sid, "docx_confirm",
+        {"question": "即将生成 Word 文书(民事起诉状)。已填 5 项, 待补充 2 项, "
+                     "关键缺失: 原告姓名。确认生成吗?",
+         "chosen": "跳过该步骤", "filled": 5, "pending": 2,
+         "critical_missing": ["原告姓名"]},
+    )
+
+    async def _run():
+        from lawApp_LangGraph.db import close_pool
+
+        doc = await dialogue_log.aggregate_dialogue(sid)
+        await close_pool()
+        return doc
+
+    try:
+        doc = asyncio.run(_run())
+        (c,) = [x for x in doc["confirms"] if x.get("type") == "docx_confirm"]
+        assert c["chosen"] == "跳过该步骤"
+        assert c["filled"] == 5 and c["pending"] == 2
+        assert c["critical_missing"] == ["原告姓名"]
+        assert c["question"].startswith("即将生成 Word 文书")
+        assert isinstance(c["ts"], str)
     finally:
         _docx_cleanup()

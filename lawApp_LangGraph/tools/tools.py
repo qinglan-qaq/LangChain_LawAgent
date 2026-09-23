@@ -324,7 +324,9 @@ async def generate_docx(fields_json: str, doc_type: str = "complaint", filename:
         from docxtpl import DocxTemplate
 
         tpl = DocxTemplate(template_path(doc_type))
-        tpl.render({"f": f_ctx, "c": c_ctx})
+        # autoescape=True: 字段值含 &/< 等 XML 特殊字符时转实体渲染, 防打崩 XML
+        # 解析(渲染失败), 亦防良构标签注入文档结构; Word 显示仍为原字符
+        tpl.render({"f": f_ctx, "c": c_ctx}, autoescape=True)
         tpl.save(file_path)
 
     try:
