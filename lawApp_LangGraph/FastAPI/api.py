@@ -199,7 +199,7 @@ async def _normalize_resume_with_degrade(
         )
         ans = (answer or "").strip()
         lowered = ans.lower()
-        if interrupt_type in ("risk_confirm", "pdf_confirm"):
+        if interrupt_type in ("risk_confirm", "pdf_confirm", "docx_confirm"):
             if lowered in _YES:
                 return True
             if lowered in _NO:
@@ -469,7 +469,13 @@ async def get_session_dialogue(sid: str):
         return await dialogue_log.aggregate_dialogue(sid)
     except Exception as e:  # pragma: no cover — aggregate 内部已吞, 此处双保险
         flow.error("对话历史读取降级", detail=str(e)[:200])
-        return {"session_id": sid, "rounds": [], "confirms": [], "final": None}
+        return {
+            "session_id": sid,
+            "rounds": [],
+            "confirms": [],
+            "final": None,
+            "docx": None,
+        }
 
 
 @app.post("/ask/resume", response_model=QueryResponse)
@@ -590,6 +596,13 @@ async def ask_stream(query: str = "", session_id: str | None = None):
                                 step = plan[idx]
                                 yield sse_event("tool_call", step.tool_name or "无")
                         if node_name == "merge":
+                            # docx 渲染完成(docx_path 经 merge 回填 state)→
+                            # 前端 toast/下载入口(Task 5 契约帧)
+                            if updates.get("docx_path"):
+                                yield sse_event(
+                                    "docx_done",
+                                    {"path": updates["docx_path"]},
+                                )
                             for k in (
                                 "rag_documents",
                                 "web_search_results",
@@ -768,6 +781,16 @@ def _run_sse(
                                         ("tool_call", step.tool_name or "无")
                                     )
                             if node_name == "merge":
+                                # docx 渲染完成(docx_path 经 merge 回填 state)→
+                                # 前端 toast/下载入口(Task 5 契约帧;
+                                # sse_event 对 dict data 直接 JSON 序列化)
+                                if updates.get("docx_path"):
+                                    await out_q.put(
+                                        (
+                                            "docx_done",
+                                            {"path": updates["docx_path"]},
+                                        )
+                                    )
                                 for k in (
                                     "rag_documents",
                                     "web_search_results",
@@ -1007,6 +1030,57 @@ async def ask_pdf(request: QueryRequest):
         path=pdf_path,
         filename=os.path.basename(pdf_path),
         media_type="application/pdf",
+    )
+
+
+@app.get("/sessions/{session_id}/docx/latest")
+async def session_docx_latest(session_id: str):
+    """会话最新 Word 文书下载(Task 5: 读 docx_generated 事件 → 路径白名单 → FileResponse)。
+
+    404 三态: 本会话无 docx_generated 事件 / 事件指向的文件已不存在 /
+    事件里的路径越出 DOCX_OUTPUT_DIR(事件被篡改或迁移残留, spec §7 双防线第二道)。
+    """
+    from lawApp_LangGraph.db import get_pool
+    from lawApp_LangGraph.FastAPI.utils import (
+        _SESSION_ID_NEW_RE,
+        _SESSION_ID_OLD_RE,
+    )
+
+    # sid 校验复用 dialogue 端点同款规则(带 AT-/AS- 前缀但格式非法 → 400;
+    # 无前缀历史 sid 放行; 不做模式一致性校验)
+    sid = (session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+    if sid.startswith(("AT-", "AS-")) and not (
+        _SESSION_ID_NEW_RE.match(sid) or _SESSION_ID_OLD_RE.match(sid)
+    ):
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT payload FROM session_dialogue_events "
+            "WHERE session_id = %s AND event_type = 'docx_generated' "
+            "ORDER BY seq DESC LIMIT 1",
+            (sid,),
+        )
+        row = await cur.fetchone()
+    if not row or not (row[0] or {}).get("docx_path"):
+        raise HTTPException(status_code=404, detail="本会话尚未生成 Word 文书")
+    path = row[0]["docx_path"]
+    # 路径白名单: 事件路径必须落在 DOCX_OUTPUT_DIR 之内(防穿越)
+    base = os.path.abspath(os.getenv("DOCX_OUTPUT_DIR", "./docx_outputs"))
+    if not os.path.abspath(path).startswith(base + os.sep):
+        raise HTTPException(status_code=404, detail="文书文件不存在或路径非法")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="文书文件不存在或路径非法")
+    return FileResponse(
+        path=path,
+        filename=os.path.basename(path),
+        media_type=(
+            "application/vnd.openxmlformats-officedocument"
+            ".wordprocessingml.document"
+        ),
     )
 
 

@@ -120,3 +120,37 @@ assistant 模式 + doc_type=complaint(模板可用)时:
 ## 开放问题
 
 无 — 5+1 项澄清全部确认, 设计 8 节逐节过完。
+
+## 执行记录(2026-09-23, feat/docx-generation)
+
+### 提交链
+
+c67142d 计划 → 9c52504+1c1e8bb(T1 模板资产) → 4bb7ac6+f0e360e(T2 doc_templates) → c2c2f30+7be036c(T3 generate_docx 工具) → 9e9e556+b277814(T4 图内链路) → 2159c50(T5 API 层) → fce92cc+a90ed5d(T6 前端) → 本提交(T7 收官)。7 任务全部按 subagent-driven-development 实跑+任务审查,5 轮修复回环(T1/T2/T3/T4/M-1)。
+
+### 落地明细
+
+- **模板资产**: data/doc_templates/complaint/ 三件套(source/fields.yaml/template),74 字段(54 text/17 choice/3 date,13 个 `_merge_into` 融合型);scripts/build_docx_template.py 可重建,anchor 未命中构建期报错。
+- **配置层**: doc_templates.py(load_fields/template_path/validate_template/template_available),YAML↔docx 标签双向对账,模板缺失整体降级 warning 不阻断(planner 末步随之消失,回退纯咨询)。
+- **工具层**: generate_docx(fields_json, doc_type, filename) — docxtpl 线程池渲染,文本缺→"待补充"、勾选缺→全☐,文件名清洗防穿越,输出 DOCX_OUTPUT_DIR(默认 ./docx_outputs)。
+- **图内链路**: state 三键(doc_fields/docx_path/docx_confirmed)+ _STATE_KEYS 透传;planner AS 后缀改"留法条检索、去类案检索"(D6),模板可用时末步固定 generate_docx;_extract_doc_fields flash 动态 74 键 schema 一次抽取,失败 retry 一次,再失败 failed 不出文书;executor docx_confirm interrupt(field_preview 74 行载荷,选项 确认/跳过),确认后 tool_calls 直注执行;merge_node 写 docx_generated 落库。抽离失败 replan 时守卫防绕过 HITL 渲染空白文书。
+- **API 层**: docx_confirm 入两处归一化集合;SSE 新帧 `docx_done`(data {"path":...},GET 流+resume 流两处循环);GET /sessions/{sid}/docx/latest(FileResponse+DOCX_OUTPUT_DIR abspath 白名单+404 三态: 无事件/文件已删/路径越界);QueryResponse.docx_path;dialogue aggregate 新键 `docx`({path,filled,pending}|null)。对话日志新事件 docx_confirm(question/chosen/filled/pending/critical_missing)+ docx_generated(docx_path/filled/pending)。
+- **前端**: store 三键+resetTurn 清理;InterruptPanel docx_confirm 分支(标签/跳过值/字段预览表两列+critical 缺失 amber 警示);DocxGenModal 全局生成中弹窗;DocxDoneToast 左上角完成通知(内嵌下载,watch 起算 8s 自消);ChatView/SessionDrawer 下载入口(后者用 detail.session_id 防历史会话串档);App 接线(resume 确认开弹窗,docx_done 收弹窗开 toast,流级 catch 兜底关弹窗)。
+
+### 测试结果
+
+全量回归 155 passed / 0 failed / 0 skipped(真实 PG,97s);test_docx_generation.py 26 用例(模板 4+配置 2+工具 6+图内 5+retry/守卫 2+API 6+聚合同步)。vite build 2.10s 零错误(js 415.48 kB gzip 151.30)。
+
+### 偏差存档(实现与 spec 的出入)
+
+1. **字段二次抽取**(架构性,存档不改): LangGraph interrupt() 在 resume 时从头重执行 executor 节点,_extract_doc_fields 会跑两次——预览载荷与最终渲染可能来自两次独立抽取,LLM 输出不确定时字段值有轻微出入概率。spec §3"不二次抽取"在不改图拓扑前提下无法达成(D7 已锁定工具层镜像方案),风险=预览与产物个别字段不同,兜底=律师下载后 Word 内自改。
+2. **validate_template 返回 Tuple[bool, List[str]]** 而非计划 Interfaces 的 List[str](审查 I-1 裁定 Interfaces 为准后统一为 tuple 形态,调用方全同步)。
+3. **`_merge_into` 13 字段**: 值进 f_ctx 参与渲染(缺→"待补充")但跳过 filled/pending 计数——与 D4"待补充"语义对齐(T3 I-1 修复,原实现完全丢弃值是错的)。
+4. **模板 anchor 调整**(T1 修复): 5 个 choice 项 YAML 补手写 c 键,引入 `~` 跳段占位与文本模式 anchor(有/无 跨 run 可见文本定位),多段覆盖用尾段整段重写。
+5. **owner 12 个委托权限勾选恒 ☐**: 表单无对应案情字段驱动(表格第一段"受托人权限"□____),填空文本框亦无字段;留待律师 Word 内自勾。
+6. **docx_done 帧设计**: 事件从 merge 节点 state 更新流(updates)派生而非独立总线,与现有 SSE 架构一致。
+7. **前端三处小偏差**(T6,审查认定合理): SessionDrawer 下载用 detail.session_id;resume catch 流级失败兜底关弹窗;DocxDoneToast 自消定时器从 onMounted 改 watch 起算(原实现 8s 自消失效,M-1 修复 a90ed5d)。
+8. **跳过路径 state 残留**(终审 SF-1 修复): 跳过路径仅落 docx_confirmed=True,不落 doc_fields——同轮 replanner 再排 generate_docx 步时,直调分支 confirmed_fields 为空被 I-2 空守卫拦下按跳过处理,不会静默渲染;ingest 重置兜底续问场景。(修复前该 return 同时落 doc_fields,会导致直调分支绕过守卫不经 HITL 静默渲染——已按终审裁定去掉。)
+
+### 收官后遗留 Minor(ledger 存档,不阻断)
+
+T1: 段落重建丢 tab/br、数字字符引用、退出码 1 vs 2;T2: YAML 畸形无 try、warning 不缓存、标签空格敏感;T3: report 措辞、默认文件名前缀;T4: 二次抽取(=偏差1)、跳过路径 state 残留(=偏差8);T5: docx_done 帧无独立集成测试(图内+前端联调覆盖)、/home 端点清单未加新路由、白名单 normcase/CWD 相对路径运维项。

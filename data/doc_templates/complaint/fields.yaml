@@ -1,0 +1,199 @@
+# 离婚民事起诉状 — 字段结构定义
+# anchor: 定位正则。text 模式(缺省)按"段落可见文本"匹配(段落内所有 w:t 跨 run 合并,
+#         规避 Word 把一行拆成多个 w:t 的情况); xml 模式按 document.xml 原始字符串匹配。
+# occurrence: 同一 anchor 第几次命中(0 基, 按文档顺序), 缺省 0。
+# replacement: 缺省时 text/date 类型自动为"命中文本 + {{ f.KEY }}"; choice 类型必须手写。
+#         replacement 中的换行表示"锚点段之后逐段落覆盖": 首行替换锚点段内命中文本,
+#         其余各行依序对应锚点段之后的连续段落; 单独一个 "~" 表示跳过该段(保持原文,
+#         留给后续字段编辑——用于选项段不相邻的排布, 如代理人有/无); 空串表示清空该段
+#         (Word 的 w:t 不接受换行, 拆段实现)。
+# _merge_into: 同锚点一次替换的附带字段, 其 {{ f.* }} 标签写在宿主字段的 replacement 里。
+doc_type: complaint
+template: template.docx
+label: 民事起诉状（离婚纠纷）
+fields:
+  # ---- 当事人信息: 原告 ----
+  - {key: plaintiff_name, label: 原告姓名, type: text, critical: true,
+     anchor: '姓名：', occurrence: 0}
+  - {key: plaintiff_gender, label: 原告性别, type: choice, options: [男, 女], critical: true,
+     anchor: '性别：男\s*女', occurrence: 0,
+     replacement: '性别：{{ c.plaintiff_gender_male }}男 {{ c.plaintiff_gender_female }}女'}
+  - {key: plaintiff_birth_date, label: 原告出生日期, type: date,
+     anchor: '出生日期：\s*年\s*月\s*日', occurrence: 0,
+     replacement: '出生日期：{{ f.plaintiff_birth_date }}'}
+  - {key: plaintiff_ethnic, label: 原告民族, type: text,
+     anchor: '民族：', occurrence: 0}
+  - {key: plaintiff_work, label: 原告工作单位, type: text,
+     anchor: '工作单位：\s*职务：\s*联系电话：', occurrence: 0,
+     replacement: '工作单位：{{ f.plaintiff_work }}  职务：{{ f.plaintiff_duty }}  联系电话：{{ f.plaintiff_phone }}'}
+  - {key: plaintiff_duty, label: 原告职务, type: text, _merge_into: plaintiff_work}
+  - {key: plaintiff_phone, label: 原告联系电话, type: text, _merge_into: plaintiff_work}
+  - {key: plaintiff_domicile, label: 原告户籍地, type: text,
+     anchor: '住所地（户籍所在地）：', occurrence: 0}
+  - {key: plaintiff_residence, label: 原告经常居住地, type: text,
+     anchor: '经常居住地：', occurrence: 0}
+  # ---- 委托诉讼代理人 ----
+  - {key: agent_has, label: 有无委托代理人, type: choice, options: [有, 无],
+     anchor: '^有$', occurrence: 0,
+     replacement: "{{ c.agent_has_yes }}有\n~\n~\n~\n{{ c.agent_has_no }}无"}
+  - {key: agent_name, label: 代理人姓名, type: text,
+     anchor: '姓名：', occurrence: 1}
+  - {key: agent_org, label: 代理人单位, type: text,
+     anchor: '(?<!工作)单位：\s*职务：\s*联系电话：', occurrence: 0,
+     replacement: '单位：{{ f.agent_org }}  职务：{{ f.agent_duty }}  联系电话：{{ f.agent_phone }}'}
+  - {key: agent_duty, label: 代理人职务, type: text, _merge_into: agent_org}
+  - {key: agent_phone, label: 代理人电话, type: text, _merge_into: agent_org}
+  - {key: agent_scope, label: 代理权限, type: choice, options: [一般授权, 特别授权],
+     anchor: '代理权限：一般授权\s*特别授权', occurrence: 0,
+     replacement: '代理权限：{{ c.agent_scope_general }}一般授权  {{ c.agent_scope_special }}特别授权'}
+  # ---- 送达地址 ----
+  - {key: service_addr, label: 送达地址, type: text,
+     anchor: '地址：', occurrence: 0}
+  - {key: service_receiver, label: 送达收件人, type: text,
+     anchor: '收件人：', occurrence: 0}
+  - {key: service_receiver_phone, label: 送达收件电话, type: text,
+     anchor: '(?<!联系)电话：', occurrence: 0,
+     replacement: '电话：{{ f.service_receiver_phone }}'}
+  - {key: e_service, label: 是否接受电子送达, type: choice, options: [是, 否],
+     anchor: '是\s*方式：', occurrence: 0,
+     replacement: "{{ c.e_service_yes }}是  方式：\n~\n{{ c.e_service_no }}否"}
+  - {key: e_service_method, label: 电子送达方式, type: choice,
+     options: [短信, 微信, 传真, 邮箱, 其他],
+     anchor: '短信\s*微信\s*传真\s*邮箱', occurrence: 0,
+     replacement: "{{ c.e_service_method_sms }}短信  {{ c.e_service_method_wechat }}微信  {{ c.e_service_method_fax }}传真  {{ c.e_service_method_email }}邮箱\n{{ c.e_service_method_other }}其他"}
+  # ---- 当事人信息: 被告 ----
+  - {key: defendant_name, label: 被告姓名, type: text, critical: true,
+     anchor: '姓名：', occurrence: 2}
+  - {key: defendant_gender, label: 被告性别, type: choice, options: [男, 女], critical: true,
+     anchor: '性别：男\s*女', occurrence: 1,
+     replacement: '性别：{{ c.defendant_gender_male }}男 {{ c.defendant_gender_female }}女'}
+  - {key: defendant_birth_date, label: 被告出生日期, type: date,
+     anchor: '出生日期：\s*年\s*月\s*日', occurrence: 1,
+     replacement: '出生日期：{{ f.defendant_birth_date }}'}
+  - {key: defendant_ethnic, label: 被告民族, type: text,
+     anchor: '民族：', occurrence: 1}
+  - {key: defendant_work, label: 被告工作单位, type: text,
+     anchor: '工作单位：\s*职务：\s*联系电话：', occurrence: 1,
+     replacement: '工作单位：{{ f.defendant_work }}  职务：{{ f.defendant_duty }}  联系电话：{{ f.defendant_phone }}'}
+  - {key: defendant_duty, label: 被告职务, type: text, _merge_into: defendant_work}
+  - {key: defendant_phone, label: 被告联系电话, type: text, _merge_into: defendant_work}
+  - {key: defendant_domicile, label: 被告户籍地, type: text,
+     anchor: '住所地（户籍所在地）：', occurrence: 1}
+  - {key: defendant_residence, label: 被告经常居住地, type: text,
+     anchor: '经常居住地：', occurrence: 1}
+  # ---- 诉讼请求 ----
+  - {key: claim_divorce, label: 解除婚姻关系具体主张, type: text, critical: true,
+     anchor: '1.解除婚姻关系', occurrence: 0,
+     replacement: "1.解除婚姻关系\n{{ f.claim_divorce }}"}
+  - {key: property_has, label: 有无共同财产, type: choice, options: [无财产, 有财产],
+     anchor: '无财产', occurrence: 0,
+     replacement: "{{ c.property_has_none }}无财产\n{{ c.property_has_has }}有财产："}
+  - {key: property_house, label: 房屋明细, type: text,
+     anchor: '（1）房屋明细：归属：\s*原告\s*/被告/其他', occurrence: 0,
+     replacement: '（1）房屋明细：{{ f.property_house }} 归属：{{ c.property_house_owner_plaintiff }}原告 {{ c.property_house_owner_defendant }}/被告{{ c.property_house_owner_other }}/其他'}
+  - {key: property_car, label: 汽车明细, type: text,
+     anchor: '（2）汽车明细：归属：\s*原告\s*/被告/其他', occurrence: 0,
+     replacement: '（2）汽车明细：{{ f.property_car }} 归属：{{ c.property_car_owner_plaintiff }}原告 {{ c.property_car_owner_defendant }}/被告{{ c.property_car_owner_other }}/其他'}
+  - {key: property_deposit, label: 存款明细, type: text,
+     anchor: '（3）存款明细：归属：\s*原告\s*/被告/其他', occurrence: 0,
+     replacement: '（3）存款明细：{{ f.property_deposit }} 归属：{{ c.property_deposit_owner_plaintiff }}原告 {{ c.property_deposit_owner_defendant }}/被告{{ c.property_deposit_owner_other }}/其他'}
+  - {key: property_other, label: 其他财产, type: text,
+     anchor: '（4）其他（按照上述样式列明）', occurrence: 0,
+     replacement: '（4）其他：{{ f.property_other }}'}
+  - {key: debt_has, label: 有无共同债务, type: choice, options: [无债务, 有债务],
+     anchor: '无债务', occurrence: 0,
+     replacement: "{{ c.debt_has_none }}无债务\n{{ c.debt_has_has }}有债务"}
+  - {key: debt1, label: 债务1, type: text,
+     anchor: '（1）债务1：\s*承担主体：\s*原告\s*/被告/其他', occurrence: 0,
+     replacement: '（1）债务1：{{ f.debt1 }} 承担主体：{{ c.debt1_owner_plaintiff }}原告 {{ c.debt1_owner_defendant }}/被告{{ c.debt1_owner_other }}/其他'}
+  - {key: custody_has, label: 有无子女抚养问题, type: choice, options: [无此问题, 有此问题],
+     anchor: '4.子女直接抚养', occurrence: 0,
+     replacement: "4.子女直接抚养\n{{ c.custody_has_none }}无此问题\n{{ c.custody_has_has }}有此问题"}
+  - {key: custody_child1, label: 子女1归属, type: choice, options: [原告, 被告],
+     anchor: '子女1：\s*归属：\s*原告\s*/被告', occurrence: 0,
+     replacement: '子女1：{{ f.custody_child1_note }} 归属：{{ c.custody_child1_plaintiff }}原告 {{ c.custody_child1_defendant }}/被告'}
+  - {key: custody_child1_note, label: 子女1说明, type: text, _merge_into: custody_child1}
+  - {key: alimony_has, label: 有无抚养费问题, type: choice, options: [无此问题, 有此问题],
+     anchor: '5.子女抚养费', occurrence: 0,
+     replacement: "5.子女抚养费\n{{ c.alimony_has_none }}无此问题\n{{ c.alimony_has_has }}有此问题"}
+  - {key: alimony_payer, label: 抚养费承担主体, type: choice, options: [原告, 被告],
+     anchor: '抚养费承担主体：\s*原告\s*/被告', occurrence: 0,
+     replacement: '抚养费承担主体：{{ c.alimony_payer_plaintiff }}原告 {{ c.alimony_payer_defendant }}/被告'}
+  - {key: alimony_amount, label: 抚养费金额及明细, type: text,
+     anchor: '金额及明细：', occurrence: 0}
+  - {key: alimony_pay_method, label: 抚养费支付方式, type: text,
+     anchor: '支付方式：', occurrence: 0}
+  - {key: visit_has, label: 有无探望权问题, type: choice, options: [无此问题, 有此问题],
+     anchor: '6.探望权', occurrence: 0,
+     replacement: "6.探望权\n{{ c.visit_has_none }}无此问题\n{{ c.visit_has_has }}有此问题"}
+  - {key: visit_subject, label: 探望权行使主体, type: choice, options: [原告, 被告],
+     anchor: '探望权行使主体：\s*原告\s*/被告', occurrence: 0,
+     replacement: '探望权行使主体：{{ c.visit_subject_plaintiff }}原告 {{ c.visit_subject_defendant }}/被告'}
+  - {key: visit_method, label: 探望权行使方式, type: text,
+     anchor: '行使方式：', occurrence: 0}
+  - {key: compensation, label: 赔偿/补偿/经济帮助, type: choice,
+     options: [无此问题, 离婚损害赔偿, 离婚经济补偿, 离婚经济帮助],
+     anchor: '7.离婚损害赔偿／离婚经济补偿／离婚经济帮助', occurrence: 0,
+     replacement: "7.离婚损害赔偿／离婚经济补偿／离婚经济帮助\n{{ c.compensation_none }}无此问题\n{{ c.compensation_damage }}离婚损害赔偿\n金额：{{ f.comp_damage_amount }}\n{{ c.compensation_econ }}离婚经济补偿\n金额：{{ f.comp_econ_amount }}\n{{ c.compensation_help }}离婚经济帮助\n金额：{{ f.comp_help_amount }}"}
+  - {key: comp_damage_amount, label: 损害赔偿金额, type: text, _merge_into: compensation}
+  - {key: comp_econ_amount, label: 经济补偿金额, type: text, _merge_into: compensation}
+  - {key: comp_help_amount, label: 经济帮助金额, type: text, _merge_into: compensation}
+  - {key: court_fee, label: 诉讼费用, type: text,
+     anchor: '8.诉讼费用', occurrence: 0,
+     replacement: "8.诉讼费用\n{{ f.court_fee }}"}
+  - {key: claim_other, label: 其他请求, type: text,
+     anchor: '9.本表未列明的其他请求', occurrence: 0,
+     replacement: "9.本表未列明的其他请求\n{{ f.claim_other }}"}
+  # ---- 约定管辖和诉讼保全 ----
+  - {key: jurisdiction_has, label: 有无管辖约定, type: choice, options: [有, 无],
+     anchor: '1.有无仲裁、法院管辖约定', occurrence: 0,
+     replacement: "1.有无仲裁、法院管辖约定\n{{ c.jurisdiction_has_yes }}有  合同条款及内容：{{ f.jurisdiction_clause }}\n{{ c.jurisdiction_has_no }}无"}
+  - {key: jurisdiction_clause, label: 管辖条款, type: text, _merge_into: jurisdiction_has}
+  - {key: preservation, label: 财产保全, type: choice, options: [诉前保全, 诉讼保全, 无],
+     anchor: '2.是否申请财产保全措施', occurrence: 0,
+     replacement: "2.是否申请财产保全措施\n\n{{ c.preservation_pre }}已经诉前保全：保全法院：{{ f.preservation_court }} 保全时间：{{ f.preservation_time }}\n{{ c.preservation_sue }}申请诉讼保全\n{{ c.preservation_none }}否\n"}
+  - {key: preservation_court, label: 保全法院, type: text, _merge_into: preservation}
+  - {key: preservation_time, label: 保全时间, type: text, _merge_into: preservation}
+  # ---- 事实和理由 ----
+  - {key: fact_marriage_time, label: 结婚时间, type: text,
+     anchor: '结婚时间：', occurrence: 0}
+  - {key: fact_children, label: 生育子女情况, type: text,
+     anchor: '生育子女情况：', occurrence: 0}
+  - {key: fact_life, label: 双方生活情况, type: text,
+     anchor: '双方生活情况：', occurrence: 0}
+  - {key: fact_divorce_reason, label: 离婚事由, type: text, critical: true,
+     anchor: '离婚事由：', occurrence: 0}
+  - {key: fact_prior_suit, label: 之前有无离婚诉讼, type: text,
+     anchor: '之前有无提起过离婚诉讼：', occurrence: 0}
+  - {key: fact_property, label: 财产事实理由, type: text,
+     anchor: '2.夫妻共同财产情况', occurrence: 0,
+     replacement: "2.夫妻共同财产情况\n{{ f.fact_property }}"}
+  - {key: fact_debt, label: 债务事实理由, type: text,
+     anchor: '3.夫妻共同债务情况', occurrence: 0,
+     replacement: "3.夫妻共同债务情况\n{{ f.fact_debt }}"}
+  - {key: fact_custody, label: 抚养事实理由, type: text,
+     anchor: '4.子女直接抚养情况', occurrence: 0,
+     replacement: "4.子女直接抚养情况\n{{ f.fact_custody }}"}
+  - {key: fact_alimony, label: 抚养费事实理由, type: text,
+     anchor: '5.子女抚养费情况', occurrence: 0,
+     replacement: "5.子女抚养费情况\n{{ f.fact_alimony }}"}
+  - {key: fact_visit, label: 探望权事实理由, type: text,
+     anchor: '6.子女探望权情况', occurrence: 0,
+     replacement: "6.子女探望权情况\n{{ f.fact_visit }}"}
+  - {key: fact_comp, label: 赔偿相关情况, type: text,
+     anchor: '7.赔偿/补偿/经济帮助相关情况', occurrence: 0,
+     replacement: "7.赔偿/补偿/经济帮助相关情况\n{{ f.fact_comp }}"}
+  - {key: fact_other, label: 其他事实, type: text,
+     anchor: '8.其他', occurrence: 0,
+     replacement: "8.其他\n{{ f.fact_other }}"}
+  - {key: fact_basis, label: 诉请依据(法条), type: text, critical: true,
+     anchor: '9.诉请依据', occurrence: 0,
+     replacement: "9.诉请依据\n{{ f.fact_basis }}"}
+  - {key: evidence_list, label: 证据清单, type: text,
+     anchor: '10.证据清单（可另附页）', occurrence: 0,
+     replacement: "10.证据清单（可另附页）\n{{ f.evidence_list }}"}
+  # ---- 落款 ----
+  - {key: signer, label: 具状人, type: text,
+     anchor: '具状人（签字、盖章）：', occurrence: 0}
+  - {key: sign_date, label: 落款日期, type: date,
+     anchor: '(?<!出生)日期：', occurrence: 0}

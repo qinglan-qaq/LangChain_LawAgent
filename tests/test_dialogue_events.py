@@ -264,6 +264,7 @@ def test_aggregate_dialogue_empty_session():
             "rounds": [],
             "confirms": [],
             "final": None,
+            "docx": None,
         }
 
     asyncio.run(_run())
@@ -385,6 +386,7 @@ def test_dialogue_endpoint_returns_contract():
                 "rounds": [],
                 "confirms": [],
                 "final": None,
+                "docx": None,
             }
     finally:
         _cleanup()
@@ -425,5 +427,6 @@ def test_dialogue_endpoint_degrades_when_pg_down(monkeypatch):
         "rounds": [],
         "confirms": [],
         "final": None,
+        "docx": None,
     }
     assert any("读取降级" in m for m in cap.records), "降级必须留下 ERROR 日志痕迹"

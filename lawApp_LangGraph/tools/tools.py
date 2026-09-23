@@ -4,6 +4,7 @@ Agent 工具集 — 网络搜索与 PDF 生成
 工具列表:
     get_google_search   — SerpAPI 谷歌搜索,返回结构化结果(含 URL / 标题 / 摘要)
     markdown_to_pdf     — Markdown 转 PDF 文件(阻塞渲染放线程池)
+    generate_docx       — docxtpl 按模板渲染 Word 文书(阻塞渲染放线程池)
 """
 
 import asyncio
@@ -213,3 +214,137 @@ async def markdown_to_pdf(markdown_text: str, filename: str = "") -> dict:
         result=f"elapsed={time.time() - t0:.2f}s",
     )
     return {"status": "success", "pdf_path": file_path, "is_pdf_output": True}
+
+
+# _choice_ctags — 从 choice 字段 YAML replacement 解析 选项→c 键名 映射
+def _choice_ctags(fd: dict) -> dict:
+    """从 choice 字段 YAML replacement 解析 选项→c 键名 映射。
+
+    覆盖 fields.yaml 的实际写法:
+    - 紧邻式 "{{ c.KEY }}选项"(性别/有无等多数字段);
+    - 分隔式 "{{ c.KEY }}/被告" 与短引语前缀 "{{ c.KEY }}已经诉前保全"
+      (c 键与选项文本之间允许 ≤3 个非换行/非花括号字符);
+    - 仍有未命中选项且剩余 c 键数与之相等时按出现顺序配对兜底
+      (preservation 的"无"在 replacement 里写作"否")。
+    """
+    repl = fd.get("replacement") or ""
+    opts = fd.get("options") or []
+    ckeys = re.findall(r"\{\{\s*c\.([A-Za-z0-9_]+)\s*\}\}", repl)
+    out: dict = {}
+    for opt in opts:
+        m = re.search(
+            r"\{\{\s*c\.([A-Za-z0-9_]+)\s*\}\}[^\n{}]{0,3}" + re.escape(opt), repl
+        )
+        if m and m.group(1) not in out.values():
+            out[opt] = m.group(1)
+    unmatched = [o for o in opts if o not in out]
+    rest = [k for k in ckeys if k not in out.values()]
+    if unmatched and len(unmatched) == len(rest):
+        out.update(zip(unmatched, rest))
+    return out
+
+
+# generate_docx — docxtpl 按模板渲染 Word 文书(assistant 模式),
+# 阻塞渲染放线程池执行; 字段缺失: 文本→"待补充", 勾选→全 ☐
+@tool
+@traced("tool")
+async def generate_docx(fields_json: str, doc_type: str = "complaint", filename: str = "") -> dict:
+    """按 data/doc_templates 下的模板把抽取字段渲染成 docx 文书.
+
+    参数:
+    fields_json: JSON 字符串, 键为 fields.yaml 的 key, 值为文本或选项
+    doc_type: complaint(起诉状) 等模板目录名
+    filename: 输出文件名(不含路径), 默认 起诉状_{时间戳}.docx
+
+    返回:
+    dict, 含 status/docx_path/filled/pending
+    """
+    import json as _json
+
+    from lawApp_LangGraph.doc_templates import (
+        load_fields,
+        template_available,
+        template_path,
+    )
+
+    t0 = time.time()
+    filename = (filename or "").strip()
+    if not filename:
+        filename = f"起诉状_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+    # H9 同款清洗: basename 防穿越 + 非白名单字符(中英文/数字/点/横杠/下划线)→下划线
+    filename = re.sub(r"[^\w\-.\u4e00-\u9fff]", "_", os.path.basename(filename))
+    if not filename or filename.startswith("."):
+        tool_log.error(
+            "← 工具异常: generate_docx",
+            detail=f"文件名非法: {filename!r}",
+        )
+        return {"status": "error", "message": "文件名非法", "docx_path": None}
+
+    if not template_available(doc_type):
+        return {"status": "error", "message": f"模板不可用: {doc_type}", "docx_path": None}
+
+    try:
+        fields = _json.loads(fields_json) if fields_json else {}
+    except Exception as e:
+        return {"status": "error", "message": f"fields_json 非法: {str(e)[:120]}", "docx_path": None}
+
+    # 构造渲染上下文: f.* 文本(缺→"待补充", date 同), c.* 勾选符号;
+    # _merge_into 附带字段随宿主 replacement, 不单独计数
+    all_fields = load_fields(doc_type)
+    f_ctx: dict = {}
+    c_ctx: dict = {}
+    filled = pending = 0
+    for fd in all_fields:
+        key = fd["key"]
+        val = str(fields.get(key) or "").strip()
+        if fd["type"] == "choice":
+            for opt, ckey in _choice_ctags(fd).items():
+                c_ctx[ckey] = "☑" if (val and val == opt) else "☐"
+        else:
+            # _merge_into 附带字段同路径渲染(其 {{ f.KEY }} 标签写在宿主 replacement
+            # 内), 缺失同样给"待补充"(spec D4); 仅下方计数跳过(挂在宿主那一项)
+            f_ctx[key] = val or "待补充"
+        if fd.get("_merge_into"):
+            continue
+        # 计数口径: 每个非 _merge_into 字段算一项, 值非空=filled, 空=pending
+        if val:
+            filled += 1
+        else:
+            pending += 1
+    # 未被 choice 命中的手写勾选键(text 字段 replacement 内的归属三选一等)统一缺省 ☐
+    for fd in all_fields:
+        for ckey in re.findall(r"\{\{\s*c\.([A-Za-z0-9_]+)\s*\}\}", fd.get("replacement") or ""):
+            c_ctx.setdefault(ckey, "☐")
+
+    output_dir = os.getenv("DOCX_OUTPUT_DIR", "./docx_outputs")
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, filename)
+
+    def _render() -> None:
+        from docxtpl import DocxTemplate
+
+        tpl = DocxTemplate(template_path(doc_type))
+        # autoescape=True: 字段值含 &/< 等 XML 特殊字符时转实体渲染, 防打崩 XML
+        # 解析(渲染失败), 亦防良构标签注入文档结构; Word 显示仍为原字符
+        tpl.render({"f": f_ctx, "c": c_ctx}, autoescape=True)
+        tpl.save(file_path)
+
+    try:
+        tool_log.info(
+            "→ 调用工具: generate_docx",
+            detail=f"doc_type={doc_type} | filled={filled} | pending={pending}",
+        )
+        await asyncio.to_thread(_render)
+    except Exception as e:
+        tool_log.error(
+            "← 工具异常: generate_docx",
+            detail=f"渲染失败: {str(e)[:120]}",
+        )
+        return {"status": "error", "message": f"docx 生成失败: {str(e)[:200]}", "docx_path": None}
+
+    tool_log.info(
+        "← 工具返回: generate_docx",
+        detail=f"file={filename}",
+        result=f"elapsed={time.time() - t0:.2f}s",
+    )
+    return {"status": "success", "docx_path": file_path, "filled": filled, "pending": pending}

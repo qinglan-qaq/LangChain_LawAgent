@@ -97,3 +97,5 @@ class QueryResponse(BaseModel):
     clarify_history: Optional[List[Dict[str, Any]]] = None
     # 工具使用 JSON 记录: {tool_name: [结果摘要, ...]}(用户决策 v4)
     tool_usage: Dict[str, List[Any]] = Field(default_factory=dict)
+    # Word 文书产物路径(assistant 模式 docx 确认生成后非空)
+    docx_path: Optional[str] = None

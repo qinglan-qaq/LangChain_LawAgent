@@ -12,6 +12,8 @@ import ElementPanel from './components/ElementPanel.vue'
 import CitationList from './components/CitationList.vue'
 import InterruptPanel from './components/InterruptPanel.vue'
 import DocComposer from './components/DocComposer.vue'
+import DocxGenModal from './components/DocxGenModal.vue'
+import DocxDoneToast from './components/DocxDoneToast.vue'
 import { PatternBackground } from './components/inspira/pattern-background'
 import TypewriterText from './components/inspira/TypewriterText.vue'
 
@@ -79,13 +81,21 @@ function handleStreamEvent(e, assistant) {
     setSession(e.data)
     sessionsTick.value++ // L11: 新会话建立后刷新会话列表
   } else if (e.event === 'tool_usage') state.value.toolUsage = e.data
-  else if (e.event === 'error') {
+  else if (e.event === 'docx_done') {
+    // docx 生成完成帧: 收生成中弹窗, 开左上角 toast(8s 自消), 记路径供终答区下载
+    state.value.docxGenerating = false
+    state.value.docxToast = true
+    state.value.docxPath = (e.data && e.data.path) || ''
+  } else if (e.event === 'error') {
+    state.value.docxGenerating = false // 出错关生成中弹窗(避免永久遮罩)
     state.value.error = String(e.data)
     state.value.reasoningError = true
   } else if (e.event === 'done') {
     assistant.done = true
     state.value.reasoningActive = false
     state.value.status = ''
+    // 渲染降级走 done 收尾(工具层失败不发 error 帧), 须在此关生成中弹窗
+    state.value.docxGenerating = false
     // 终止帧: 全部步骤标记完成(执行进度收尾)
     state.value.steps.forEach((s) => {
       s.done = true
@@ -148,6 +158,10 @@ async function submit({ text, docType }) {
 // 失败保护(H11): interrupt 不预清, 首个成功流事件后才清; 失败/断流时恢复面板(本地副本优先, 服务端兜底)
 async function resumeHITL(answer) {
   const savedInterrupt = state.value.interrupt // 失败恢复用(首个成功流事件前不清)
+  // docx 确认: 选「确认」后生成耗时较长, 先开全局生成中弹窗(docx_done/error 帧收)
+  if (savedInterrupt?.type === 'docx_confirm' && answer === '确认') {
+    state.value.docxGenerating = true
+  }
   // HITL 问答记录(需求3): 用户回答入消息流(跳过时记「(跳过)」), 头部带所答问题摘要
   state.value.messages.push({
     role: 'user',
@@ -177,13 +191,19 @@ async function resumeHITL(answer) {
     await streamResume(answer, state.value.sessionId, onEvent, controller.signal)
   } catch (err) {
     aborted = isAbort(err)
-    if (!aborted) state.value.error = String(err)
+    if (!aborted) {
+      state.value.error = String(err)
+      // 流级失败(无 error 帧): 同样关生成中弹窗, 避免遮罩永久卡死
+      state.value.docxGenerating = false
+    }
     // AbortError = 用户取消: 静默, 不显示错误横幅
   } finally {
     abortController.value = null
     state.value.busy = false
     state.value.reasoningActive = false
     state.value.status = ''
+    // 流级兜底: 任何路径(含降级 done 收尾异常)最终关生成中弹窗, 防遮罩卡死
+    state.value.docxGenerating = false
     // 流未走到终止帧且面板已消失: 恢复 interrupt(本地副本优先, 服务端兜底)
     if (!sawTerminal && !state.value.interrupt) {
       if (aborted) {
@@ -224,6 +244,8 @@ async function restoreInterruptFromServer(sid) {
         <span id="session-id" class="text-sm text-slate-400">会话: {{ state.sessionId || '(新建)' }}</span>
       </header>
       <DisclaimerToast />
+      <DocxGenModal />
+      <DocxDoneToast />
       <main class="flex-1 overflow-y-auto p-4">
         <div v-if="!state.messages.length" class="text-slate-500 text-sm mt-8 text-center">
           <TypewriterText

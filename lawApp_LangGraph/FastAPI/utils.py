@@ -200,13 +200,13 @@ async def normalize_resume(
 
     Args:
         interrupt_type: interrupt 载荷的 type 标签,取值为
-            risk_confirm / pdf_confirm / degrade_confirm /
+            risk_confirm / pdf_confirm / docx_confirm / degrade_confirm /
             budget_confirm / clarify / mid_clarify。
         answer: 用户的原始回复文本(可能为空)。
         request_text: interrupt 载荷的确认文案/问题文本,语义判断的上下文。
 
     Returns:
-        risk_confirm / pdf_confirm: bool。显式确认词/拒绝词直接映射;
+        risk_confirm / pdf_confirm / docx_confirm: bool。显式确认词/拒绝词直接映射;
             其他自由文本交 semantic_confirm(LLM 语义判断);
         degrade_confirm: "retry" / "skip" / "abort" 之一;纯指令词直接命中,
             其余自由文本走 semantic_confirm(同意继续=retry,否则=abort);
@@ -219,7 +219,7 @@ async def normalize_resume(
     ans = (answer or "").strip()
     lowered = ans.lower()
 
-    if interrupt_type in ("risk_confirm", "pdf_confirm"):
+    if interrupt_type in ("risk_confirm", "pdf_confirm", "docx_confirm"):
         if lowered in _YES:
             return True
         if lowered in _NO:
@@ -373,6 +373,9 @@ def build_response(state: dict, session_id: str) -> QueryResponse:
         elements=elements,
         clarify_history=clarify_history,
         tool_usage=build_tool_usage(state),
+        # Word 文书产物路径(assistant 模式 docx 确认生成后非空; 阻塞端点,
+        # 流式端点走 SSE docx_done 帧)
+        docx_path=state.get("docx_path"),
     )
 
 

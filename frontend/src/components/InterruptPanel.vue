@@ -13,6 +13,7 @@ const TYPE_LABEL = {
   pdf_confirm: 'PDF 导出',
   degrade_confirm: '工具降级',
   budget_confirm: '预算确认',
+  docx_confirm: 'Word 文书生成',
 }
 // 开放文本型(要素反问/检索追问): 保留自由输入
 const TEXT_KINDS = new Set(['clarify', 'mid_clarify'])
@@ -22,6 +23,7 @@ const PASS_VALUE = {
   pdf_confirm: '跳过',
   degrade_confirm: '跳过',
   budget_confirm: '收尾',
+  docx_confirm: '跳过',
 }
 
 const props = defineProps({ interrupt: { type: Object, required: true } })
@@ -103,6 +105,32 @@ function onPass() {
     </div>
     <div class="text-sm my-2">
       <MarkdownView :text="interrupt.question || interrupt.message || '请补充信息'" />
+    </div>
+
+    <!-- docx 确认: 字段预览卡(已填/待补充 两列, critical 缺失 amber 警示) -->
+    <div
+      v-if="interrupt.type === 'docx_confirm' && interrupt.field_preview"
+      class="my-2 max-h-48 overflow-y-auto border border-slate-200 rounded-lg bg-white"
+    >
+      <table class="w-full text-xs">
+        <tbody>
+          <tr
+            v-for="(fp, fi) in interrupt.field_preview"
+            :id="'docx-preview-' + fi"
+            :key="fp.key"
+            :class="fp.status === 'pending' ? 'text-slate-400' : 'text-slate-700'"
+          >
+            <td class="px-2 py-0.5 border-b border-slate-100 w-32">{{ fp.label }}</td>
+            <td class="px-2 py-0.5 border-b border-slate-100">
+              {{ fp.value }}
+              <span
+                v-if="fp.status === 'pending' && fp.critical"
+                class="ml-1 text-amber-600 font-semibold"
+                >⚠ 待补充</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <!-- 选择题模式(需求1): 文本型 + options 载荷 → 单选(字母徽标) + 「其他」补充输入;
