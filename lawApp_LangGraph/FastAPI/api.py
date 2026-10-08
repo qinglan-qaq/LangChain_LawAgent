@@ -19,6 +19,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from dotenv import load_dotenv
@@ -40,6 +41,12 @@ from lawApp_LangGraph.FastAPI.model import (
     AssistantStreamRequest,
     AttorneyAskRequest,
     FeedbackRequest,
+    MonitorEval,
+    MonitorOverview,
+    MonitorRunDetail,
+    MonitorRunItem,
+    MonitorSpan,
+    MonitorStage,
     QueryRequest,
     QueryResponse,
     ResumeRequest,
@@ -1135,6 +1142,174 @@ async def home():
             "home": "GET /home",
         },
     }
+
+
+#  监控页端点(D-spec §五): PG 断连降级空态 + flow.error, 不 500
+@app.get("/monitor/overview", response_model=MonitorOverview)
+async def monitor_overview():
+    from lawApp_LangGraph.db import get_pool
+
+    by_status: dict = {}
+    running = limit_hit = 0
+    fails: list = []
+    dist: dict = {}
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT status, COUNT(*) FROM trace_runs "
+                "WHERE started_at > NOW() - INTERVAL '24 hours' "
+                "GROUP BY status"
+            )
+            by_status = {r[0]: r[1] for r in await cur.fetchall()}
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM stage_chain WHERE ended_at IS NULL"
+            )
+            running = (await cur.fetchone())[0]
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM trace_runs "
+                "WHERE metrics->>'limit_hit' = 'true'"
+            )
+            limit_hit = (await cur.fetchone())[0]
+            cur = await conn.execute(
+                "SELECT node_name, COUNT(*) FROM stage_chain "
+                "WHERE status = 'error' "
+                "AND started_at > NOW() - INTERVAL '24 hours' "
+                "GROUP BY node_name ORDER BY 2 DESC LIMIT 5"
+            )
+            fails = [{"node_name": r[0], "errors": r[1]}
+                     for r in await cur.fetchall()]
+            # 分数分布: [0,34) / [34,67) / [67,100] 三桶
+            cur = await conn.execute(
+                "SELECT width_bucket("
+                "  (metrics->>'composite_score')::numeric, 0, 101, 3) AS b,"
+                "  COUNT(*) FROM trace_runs "
+                "WHERE metrics ? 'composite_score' GROUP BY b"
+            )
+            dist = {f"bucket_{r[0]}": r[1] for r in await cur.fetchall()}
+    except Exception as e:
+        flow.error("monitor overview 降级", detail=str(e))
+        return MonitorOverview()
+    return MonitorOverview(runs_by_status=by_status, running_stages=running,
+                           limit_hit_runs=limit_hit, node_fail_top=fails,
+                           score_distribution=dist)
+
+
+@app.get("/monitor/runs", response_model=list[MonitorRunItem])
+async def monitor_runs(limit: int = 50, status: Optional[str] = None,
+                       session_id: Optional[str] = None):
+    from lawApp_LangGraph.db import get_pool
+
+    conds, params = ["1=1"], []
+    if status:
+        conds.append("r.status = %s")
+        params.append(status)
+    if session_id:
+        conds.append("r.session_id = %s")
+        params.append(session_id)
+    sql = (
+        "SELECT r.run_id, r.session_id, r.run_type, r.mode, r.status, "
+        "r.started_at, r.ended_at, r.metrics, "
+        "(SELECT COUNT(*) FROM stage_chain s WHERE s.run_id = r.run_id), "
+        "(SELECT COUNT(*) FROM stage_chain s WHERE s.run_id = r.run_id "
+        " AND s.status = 'ok'), "
+        "(SELECT COUNT(*) FROM stage_chain s WHERE s.run_id = r.run_id "
+        " AND s.ended_at IS NULL) "
+        "FROM trace_runs r WHERE " + " AND ".join(conds) + " "
+        "ORDER BY r.started_at DESC LIMIT %s"
+    )
+    params.append(min(limit, 500))
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(sql, tuple(params))
+            rows = await cur.fetchall()
+    except Exception as e:
+        flow.error("monitor runs 降级", detail=str(e))
+        return []
+    return [
+        MonitorRunItem(
+            run_id=r[0], session_id=r[1], run_type=r[2], mode=r[3],
+            status=r[4], started_at=str(r[5]) if r[5] else None,
+            ended_at=str(r[6]) if r[6] else None,
+            stage_total=r[8] or 0, stage_ok=r[9] or 0,
+            stage_running=r[10] or 0, metrics=r[7] or {},
+        )
+        for r in rows
+    ]
+
+
+@app.get("/monitor/runs/{run_id}/stages", response_model=MonitorRunDetail)
+async def monitor_run_detail(run_id: str):
+    from lawApp_LangGraph.db import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT run_id, session_id, run_type, mode, status, "
+                "started_at, ended_at, metrics FROM trace_runs "
+                "WHERE run_id = %s", (run_id,))
+            r = await cur.fetchone()
+            if not r:
+                raise HTTPException(status_code=404,
+                                    detail=f"run {run_id} 不存在")
+            cur = await conn.execute(
+                "SELECT node_name, seq, status, started_at, ended_at, "
+                "latency_ms, detail FROM stage_chain WHERE run_id = %s "
+                "ORDER BY started_at, seq", (run_id,))
+            stages = await cur.fetchall()
+            cur = await conn.execute(
+                "SELECT span_type, name, status, input, output, state, "
+                "latency_ms, token_usage, started_at FROM trace_spans "
+                "WHERE run_id = %s ORDER BY started_at", (run_id,))
+            spans = await cur.fetchall()
+    except HTTPException:
+        raise
+    except Exception as e:
+        flow.error("monitor detail 降级", detail=str(e))
+        raise HTTPException(status_code=503, detail="监控数据暂不可用")
+    return MonitorRunDetail(
+        run_id=r[0], session_id=r[1], run_type=r[2], mode=r[3],
+        status=r[4], started_at=str(r[5]) if r[5] else None,
+        ended_at=str(r[6]) if r[6] else None, metrics=r[7] or {},
+        stages=[
+            MonitorStage(node_name=s[0], seq=s[1], status=s[2],
+                         started_at=str(s[3]),
+                         ended_at=str(s[4]) if s[4] else None,
+                         latency_ms=s[5], detail=s[6] or {})
+            for s in stages
+        ],
+        spans=[
+            MonitorSpan(span_type=s[0], name=s[1], status=s[2], input=s[3],
+                        output=s[4], state=s[5], latency_ms=s[6],
+                        token_usage=s[7],
+                        started_at=str(s[8]) if s[8] else None)
+            for s in spans
+        ],
+    )
+
+
+@app.get("/monitor/evals", response_model=list[MonitorEval])
+async def monitor_evals(limit: int = 20):
+    from lawApp_LangGraph.db import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT id, dataset, label, metrics, created_at "
+                "FROM eval_runs ORDER BY created_at DESC LIMIT %s",
+                (min(limit, 100),))
+            rows = await cur.fetchall()
+    except Exception as e:
+        flow.error("monitor evals 降级", detail=str(e))
+        return []
+    return [
+        MonitorEval(id=r[0], dataset=r[1], label=r[2], metrics=r[3] or {},
+                    created_at=str(r[4]) if r[4] else None)
+        for r in rows
+    ]
 
 
 if __name__ == "__main__":

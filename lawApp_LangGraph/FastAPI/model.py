@@ -99,3 +99,75 @@ class QueryResponse(BaseModel):
     tool_usage: Dict[str, List[Any]] = Field(default_factory=dict)
     # Word 文书产物路径(assistant 模式 docx 确认生成后非空)
     docx_path: Optional[str] = None
+
+
+#  监控页响应(D-spec §五, /monitor 4 端点契约)
+
+
+class MonitorStage(BaseModel):
+    """拉链表 stage_chain 单行(节点一次执行)。"""
+
+    node_name: str
+    seq: int
+    status: str  # running|ok|error|interrupted|cancelled
+    started_at: str
+    ended_at: Optional[str] = None
+    latency_ms: Optional[int] = None
+    detail: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MonitorSpan(BaseModel):
+    """trace_spans 单行(节点/工具/LLM 全量明细, 事后查看)。"""
+
+    span_type: str
+    name: str
+    status: Optional[str] = None
+    input: Any = None
+    output: Any = None
+    state: Any = None
+    latency_ms: Optional[int] = None
+    token_usage: Any = None
+    started_at: Optional[str] = None
+
+
+class MonitorRunItem(BaseModel):
+    """runs 列表行 — 拉链表聚合的 stage 三计数进此层。"""
+
+    run_id: str
+    session_id: Optional[str] = None
+    run_type: str
+    mode: Optional[str] = None
+    status: str
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    stage_total: int = 0
+    stage_ok: int = 0
+    stage_running: int = 0
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MonitorRunDetail(MonitorRunItem):
+    """run 详情 = 列表行 + 拉链 stages + spans 全量。"""
+
+    stages: List[MonitorStage] = Field(default_factory=list)
+    spans: List[MonitorSpan] = Field(default_factory=list)
+
+
+class MonitorOverview(BaseModel):
+    """总览卡: 24h run 状态分布 / 实时开行数 / 限次命中 / 节点失败 Top / 分数分布。"""
+
+    runs_by_status: Dict[str, int] = Field(default_factory=dict)
+    running_stages: int = 0
+    limit_hit_runs: int = 0
+    node_fail_top: List[Dict[str, Any]] = Field(default_factory=list)
+    score_distribution: Dict[str, int] = Field(default_factory=dict)
+
+
+class MonitorEval(BaseModel):
+    """评测批次行(eval_runs: P2 golden set 批跑指标)。"""
+
+    id: int
+    dataset: str
+    label: str
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[str] = None
