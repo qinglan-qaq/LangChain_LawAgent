@@ -18,3 +18,16 @@ export const getDialogue = (sid) =>
 
 export const fetchDisclaimer = () =>
   http.get('/disclaimer').then((r) => r.data.disclaimer)
+
+// ========== 监控页(D-spec §五, Task 6 端点) ==========
+export const getMonitorOverview = () =>
+  http.get('/monitor/overview').then((r) => r.data)
+
+export const getMonitorRuns = (limit = 50) =>
+  http.get('/monitor/runs', { params: { limit } }).then((r) => r.data)
+
+export const getMonitorRunDetail = (runId) =>
+  http.get(`/monitor/runs/${runId}/stages`).then((r) => r.data)
+
+export const getMonitorEvals = () =>
+  http.get('/monitor/evals').then((r) => r.data)
