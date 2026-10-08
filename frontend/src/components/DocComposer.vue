@@ -1,16 +1,28 @@
 <script setup>
-import { ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import { state } from '../store'
 import ShimmerButton from './inspira/ShimmerButton.vue'
 
 const emit = defineEmits(['submit'])
 const text = ref('')
 const docType = ref('complaint') // complaint 起诉状 | defense 答辩状
+const inputEl = ref(null) // 自动增高锚点(attorney 单行框)
 
 const DOC_TYPES = [
   { value: 'complaint', label: '起诉状' },
   { value: 'defense', label: '答辩状' },
 ]
+
+// 自动换行+增高: textarea rows=1 起, 长文自动撑高(上限 160px 后内滚)
+function autosize() {
+  const el = inputEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+}
+
+// 发送后清空/恢复模式切换时回缩到单行高
+watch(text, () => nextTick(autosize))
 
 function send(e) {
   // IME 组合中(keyup 时 isComposing 已为 false, 故改 keydown 判 isComposing/keyCode 229): 不提交
@@ -22,6 +34,14 @@ function send(e) {
     docType: state.value.mode === 'assistant' ? docType.value : '',
   })
   text.value = ''
+}
+
+// Enter 发送, Shift+Enter 换行(textarea 默认行为)
+function onEnter(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  if (e.shiftKey) return
+  e.preventDefault()
+  send(e)
 }
 </script>
 
@@ -70,20 +90,24 @@ function send(e) {
       </div>
     </template>
     <template v-else>
-      <div class="flex items-center gap-2">
-        <input
+      <div class="flex items-end gap-2">
+        <textarea
           id="input"
+          ref="inputEl"
           v-model="text"
-          class="flex-1 rounded-xl px-3 py-2 text-sm focus:outline-none"
+          rows="1"
+          class="flex-1 resize-none rounded-xl px-3 py-2 text-sm leading-6 focus:outline-none max-h-40 overflow-y-auto"
           placeholder="输入法律咨询问题, 回车发送"
           maxlength="4000"
-          @keydown.enter="send($event)"
-        />
+          @keydown.enter="onEnter"
+        ></textarea>
         <ShimmerButton :disabled="state.busy" @click="send">
           {{ state.busy ? '处理中…' : '发送' }}
         </ShimmerButton>
       </div>
-      <div class="composer-hint mt-1 px-1 text-[10px] text-slate-400">Enter 发送 · 最多 4000 字</div>
+      <div class="composer-hint mt-1 px-1 text-[10px] text-slate-400">
+        Enter 发送 · Shift+Enter 换行 · 最多 4000 字
+      </div>
     </template>
   </div>
 </template>
