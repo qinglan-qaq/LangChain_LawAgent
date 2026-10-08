@@ -192,7 +192,7 @@ def test_traced_node_writes_zipper():
 
         await fake_node({"x": 1})   # 第 1 次
         await fake_node({"x": 2})   # 第 2 次(回环重跑)
-        await asyncio.sleep(0.3)     # 等 fire-and-forget 任务跑完
+        await asyncio.sleep(0.5)     # 等 fire-and-forget 任务跑完
 
         pool = await db.get_pool()
         async with pool.connection() as conn:
@@ -228,7 +228,7 @@ def test_traced_error_node_writes_error_row():
 
         with pytest.raises(ValueError):
             await boom({})
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
 
         pool = await db.get_pool()
         async with pool.connection() as conn:
@@ -261,7 +261,7 @@ def test_traced_tool_span_skips_zipper():
             return {"status": "success"}
 
         await fake_tool("q")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.5)
 
         pool = await db.get_pool()
         async with pool.connection() as conn:
