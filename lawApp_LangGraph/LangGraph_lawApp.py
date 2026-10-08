@@ -785,7 +785,10 @@ async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dic
 
     chain = PromptTemplate.from_template(CHITCHAT_PROMPT) | get_executor_llm()
     parts: list[str] = []
-    async for chunk in chain.astream({"query": state.query[:1000]}):
+    # L13: 闲聊也走统一查询视图(带最近对话历史, 能回应「刚才问了什么」类指代)
+    async for chunk in chain.astream(
+        {"query": _query_with_supplements(state, 1000)}
+    ):
         parts.append(chunk.content or "")
     answer = "".join(parts).strip()
 
@@ -794,7 +797,10 @@ async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dic
         detail=f"answer_len={len(answer)}",
         result=f"elapsed={time.time() - t0:.2f}s",
     )
-    return {"final_answer": answer}
+    # L13: 闲聊回应同样入对话历史(chitchat 直接 END, 不经 finalize)
+    out = {"final_answer": answer}
+    out.update(_assistant_message_update(state, answer))
+    return out
 
 
 # Node 1: The Planner — Pro LLM 制定计划 + 思考链
@@ -843,12 +849,75 @@ def _normalize_plan(schema) -> list[PlanStep]:
 _SUPPLEMENT_PER_ITEM_LIMIT = 500
 _SUPPLEMENT_TOTAL_LIMIT = 2000
 
+# L13: 短期记忆(对话历史闭环) — 写侧 API 输入带 user 消息 + finalize 追加
+# assistant 消息(add_messages reducer 跨轮持久); 读侧 _recent_history 取
+# 最近几轮拼进统一查询视图, 使 planner/executor/finalize 能回忆上下文
+_HISTORY_MSG_LIMIT = 6        # 最近 6 条消息(约 3 轮问答)
+_HISTORY_PER_MSG_LIMIT = 300  # 单条截断
+_HISTORY_TOTAL_LIMIT = 1200   # 历史段总量上限
+
+
+def _recent_history(state: AgentState) -> str:
+    """state.messages → 最近对话历史段; 无历史返回 ''。
+
+    - 过滤空 AIMessage 占位(图内错误分支为 token 流回写留的 content="" 壳);
+    - 剔除尾部与当前 query 相同的 user 条(本轮问题由视图主段落单独承载,
+      只在作为最近一条时剔除, 上一轮未答的重复提问仍保留);
+    - 只留最近 _HISTORY_MSG_LIMIT 条, 单条/总量截断防 prompt 超长。
+    """
+    msgs = getattr(state, "messages", None) or []
+    lines: list[tuple[str, str]] = []
+    for m in msgs:
+        content = getattr(m, "content", "") or ""
+        if not content:
+            continue
+        speaker = "助手" if type(m).__name__ == "AIMessage" else "用户"
+        lines.append((speaker, content))
+    while lines and lines[-1][0] == "用户" and lines[-1][1] == (state.query or ""):
+        lines.pop()
+    if not lines:
+        return ""
+    out: list[str] = []
+    total = 0
+    for speaker, content in lines[-_HISTORY_MSG_LIMIT:]:
+        piece = content[:_HISTORY_PER_MSG_LIMIT]
+        # 计入行前缀(「用户: 」/「助手: 」), 保证整段不破总量上限
+        if total + len(piece) + 3 > _HISTORY_TOTAL_LIMIT:
+            piece = piece[: max(0, _HISTORY_TOTAL_LIMIT - total - 3)]
+            if piece:
+                out.append(f"{speaker}: {piece}")
+            break
+        out.append(f"{speaker}: {piece}")
+        total += len(piece) + 3
+    return "[最近对话历史]\n" + "\n".join(out)
+
+
+def _assistant_message_update(state: AgentState, answer: str) -> dict:
+    """finalize 追加 assistant 消息的更新载荷; 尾部已有同文 assistant 条
+    (重复进 finalize 等)时返回 {} 幂等防重。"""
+    for m in reversed(getattr(state, "messages", None) or []):
+        content = getattr(m, "content", "") or ""
+        if not content:
+            continue
+        if type(m).__name__ == "AIMessage" and content == answer:
+            return {}
+        break
+    return {"messages": [AIMessage(content=answer)]}
+
 
 def _query_with_supplements(state: AgentState, limit: int = 0) -> str:
-    """原 query(可选截断) + 用户补充信息的拼接视图(planner/replanner/
-    executor/replan_check 的 prompt 统一走此视图)。"""
+    """最近对话历史 + 原 query(可选截断) + 用户补充信息的拼接视图
+    (planner/replanner/executor/replan_check/finalize 的 prompt 统一走此视图)。
+
+    history 段在前, 当前问题居中, 补充信息在后; 无历史(首轮)时行为不变。
+    """
     base = (state.query or "")[:limit] if limit else (state.query or "")
-    parts = [base] if base else []
+    parts = []
+    hist = _recent_history(state)
+    if hist:
+        parts.append(hist)
+    if base:
+        parts.append(base)
     total = 0
     for s in getattr(state, "user_supplements", None) or []:
         piece = (s or "")[:_SUPPLEMENT_PER_ITEM_LIMIT]
@@ -1940,7 +2009,8 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             detail=f"answer_len={len(state.final_answer)}",
             result=f"elapsed={time.time() - t0:.2f}s",
         )
-        return {}
+        # L13: 已有答案同样入对话历史(幂等防重)
+        return _assistant_message_update(state, state.final_answer)
 
     if (state.mode or "attorney") == "assistant":
         from lawApp_LangGraph.prompts import (
@@ -1992,7 +2062,10 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
                 "clarify_rounds": state.clarify_rounds,
             },
         )
-        return {"final_answer": answer}
+        # L13: 答案入对话历史
+        out = {"final_answer": answer}
+        out.update(_assistant_message_update(state, answer))
+        return out
 
     if state.rag_documents:
         docs = "\n".join(f"- {d.chunk_text[:300]}" for d in state.rag_documents[:3])
@@ -2018,7 +2091,10 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
                 "clarify_rounds": state.clarify_rounds,
             },
         )
-        return {"final_answer": answer}
+        # L13: 答案入对话历史
+        out = {"final_answer": answer}
+        out.update(_assistant_message_update(state, answer))
+        return out
 
     chain = FINALIZE_DIRECT_PROMPT | get_executor_llm()
     parts = []
@@ -2042,7 +2118,10 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             "clarify_rounds": state.clarify_rounds,
         },
     )
-    return {"final_answer": answer}
+    # L13: 答案入对话历史
+    out = {"final_answer": answer}
+    out.update(_assistant_message_update(state, answer))
+    return out
 
 
 # Node 8.5: HITL Degrade — HITL-4 工具连续失败降级询问

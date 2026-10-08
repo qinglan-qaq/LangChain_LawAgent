@@ -284,7 +284,7 @@ FINALIZE_CASE_PROMPT = PromptTemplate.from_template(
     + """
 
 ## 任务
-基于以下案例,简要回答用户问题.引用关键裁判思路,末尾附一行:「以上内容由 AI 生成,仅供参考」
+基于以下案例,简要回答用户问题.引用关键裁判思路
 
 ## 案例
 {docs}
@@ -300,8 +300,7 @@ FINALIZE_DIRECT_PROMPT = PromptTemplate.from_template(
     + """
 
 ## 任务
-根据你的法律知识回答用户问题.用大白话,先结论后展开,末尾附一行:
-「以上内容由 AI 生成,仅供参考,不构成正式法律意见。」
+根据你的法律知识回答用户问题.用大白话,先结论后展开
 
 ## 问题
 {query}
@@ -324,7 +323,6 @@ LEGAL_ANALYSIS_PROMPT_KIM = PromptTemplate.from_template(
 6. 区分确定与不确定:明确哪些结论有充分依据,哪些还需核实.
 7. 完整 Markdown 格式输出,结构清晰.
 8. 末尾列出参考了哪些资料(如「参考了3条案例和2条法条」)及编号或标题.
-9. 内容末尾附一行:「以上内容由 AI 生成,仅供参考,不构成正式法律意见。」
 
 ## 参考材料
 {context}

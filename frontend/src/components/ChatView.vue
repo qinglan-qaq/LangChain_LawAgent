@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
 import { state, useTypewriter, COLLAPSE_LEN } from '../store'
 import MarkdownView from './MarkdownView.vue'
+import MessageThinking from './MessageThinking.vue'
 
 // 流式目标: 最后一条普通 assistant 消息(打字机只对它生效);
 // HITL 追问/回答消息(kind=hitl_*)不参与打字机, 静态整段渲染
@@ -97,6 +98,14 @@ function hitlTag(m) {
           </template>
         </div>
       </div>
+      <!-- 思考过程跟消息走(需求1/2): 流式期自动展开, 完成后折叠可回看 -->
+      <template v-if="m.role === 'assistant' && !m.kind">
+        <MessageThinking :thinking="m.thinking" :active="m === lastAssistant && !m.done" />
+        <!-- 固定免责小字(需求3): LLM 不再生成尾行, 前端每条完成态回答固定展示 -->
+        <div v-if="m.done && m.text" class="disclaimer-line text-[10px] text-slate-400 mt-0.5 ml-1">
+          以上内容由 AI 生成，仅供参考，不构成正式法律意见。
+        </div>
+      </template>
     </Motion>
 
     <!-- docx 产物下载入口(终答后, docxPath 由 docx_done 帧写入) -->

@@ -304,7 +304,11 @@ async def ask(request: QueryRequest):
     config = graph_config(sid)
     t0 = time.time()
     try:
-        state = await graph.ainvoke({"query": request.query}, config=config)
+        state = await graph.ainvoke(
+            {"query": request.query,
+             "messages": [{"role": "user", "content": request.query}]},
+            config=config,
+        )
     except Exception as e:
         flow.error("流程异常", summary="Graph 执行失败", detail=str(e))
         raise HTTPException(status_code=500, detail=f"Graph 执行失败: {e}")
@@ -333,7 +337,9 @@ async def attorney_ask(request: AttorneyAskRequest):
     t0 = time.time()
     try:
         state = await graph.ainvoke(
-            {"query": request.query, "mode": "attorney"}, config=graph_config(sid)
+            {"query": request.query, "mode": "attorney",
+             "messages": [{"role": "user", "content": request.query}]},
+            config=graph_config(sid),
         )
     except Exception as e:
         flow.error("流程异常", summary="Graph 执行失败", detail=str(e))
@@ -370,6 +376,7 @@ async def assistant_ask(request: AssistantAskRequest):
                 "query": request.case_details,
                 "mode": "assistant",
                 "doc_type": request.doc_type,
+                "messages": [{"role": "user", "content": request.case_details}],
             },
             config=graph_config(sid),
         )
@@ -597,11 +604,9 @@ async def ask_stream(query: str = "", session_id: str | None = None):
                                         f"[{s.step_id}/{len(updates['plan'])}] {s.description}",
                                     )
                         if node_name == "executor" and "plan" in updates:
-                            plan = updates.get("plan") or []
-                            idx = updates.get("current_step_index")
-                            if idx is not None and idx < len(plan):
-                                step = plan[idx]
-                                yield sse_event("tool_call", step.tool_name or "无")
+                            # L2: 以 doing 步骤定位刚发起的工具调用(见助手注释)
+                            for tn in _executor_tool_names(updates):
+                                yield sse_event("tool_call", tn)
                         if node_name == "merge":
                             # docx 渲染完成(docx_path 经 merge 回填 state)→
                             # 前端 toast/下载入口(Task 5 契约帧)
@@ -610,28 +615,24 @@ async def ask_stream(query: str = "", session_id: str | None = None):
                                     "docx_done",
                                     {"path": updates["docx_path"]},
                                 )
-                            for k in (
-                                "rag_documents",
-                                "web_search_results",
-                                "law_results",
-                                "evaluation",
-                            ):
-                                if k in updates and updates[k]:
-                                    n = (
-                                        len(updates[k])
-                                        if isinstance(updates[k], list)
-                                        else 1
-                                    )
-                                    yield sse_event("tool_result", f"{k}: {n}")
+                            # L2: 工具结果帧 — 定位刚完成步骤(见助手注释)
+                            summary = _merge_tool_summary(updates)
+                            if summary:
+                                yield sse_event("tool_result", summary)
                         if node_name == "element_assess" and "case_elements" in updates:
                             ce = updates.get("case_elements")
                             elems = getattr(ce, "elements", None) or []
+                            # L4: 要素面板显隐由后端显式标记(chitchat 不展示)
                             yield sse_event(
                                 "elements",
-                                [
-                                    {"key": e.key, "label": e.label, "status": e.status}
-                                    for e in elems
-                                ],
+                                {
+                                    "elements": [
+                                        {"key": e.key, "label": e.label, "status": e.status}
+                                        for e in elems
+                                    ],
+                                    "is_case_query": updates.get("question_category")
+                                    != "chitchat",
+                                },
                             )
                 elif stream_mode == "values":
                     final_state = chunk
@@ -684,6 +685,43 @@ def _validate_stream_text(text: str, limit: int = 4000) -> None:
         raise HTTPException(
             status_code=413, detail=f"文本过长({len(text)} > {limit} 字), 请分批发送"
         )
+
+
+# L2: SSE tool_call/tool_result 定位助手 —— executor 成功路径不回写
+# current_step_index(由 merge 推进), 旧实现以该键定位导致真实工具调用
+# 从不发出 tool_call 帧(仅失败/无工具分支可达)。现改为:
+# - tool_call 以 plan 内 doing 步骤定位(executor 刚发起的调用)
+# - tool_result 以 merge 回写的 current_step_index-1 定位刚完成步骤,
+#   覆盖全部工具(不止数据检索键), 检索键计数拼进摘要
+
+
+def _executor_tool_names(updates: dict) -> list:
+    """executor 节点 updates → 刚发起调用的工具名列表(doing 步骤)。"""
+    names = []
+    for s in updates.get("plan") or []:
+        if getattr(s, "status", "") == "doing" and s.tool_name:
+            names.append(s.tool_name)
+    return names
+
+
+def _merge_tool_summary(updates: dict) -> Optional[str]:
+    """merge 节点 updates → 刚完成步骤的工具结果摘要; 无工具/越界返回 None。"""
+    ci = updates.get("current_step_index")
+    plan = updates.get("plan") or []
+    if ci is None or not (0 < ci <= len(plan)):
+        return None
+    st = plan[ci - 1]
+    if not getattr(st, "tool_name", None):
+        return None
+    bits = []
+    for k in ("rag_documents", "web_search_results", "law_results", "evaluation"):
+        if k in updates and updates[k]:
+            bits.append(
+                f"{k} {len(updates[k]) if isinstance(updates[k], list) else 1}"
+            )
+    if bits:
+        return " ".join(bits)
+    return "执行完成" if getattr(st, "status", "") == "done" else "执行失败"
 
 
 # SSE keepalive 注释帧间隔(H10): 流未结束期间每 15s 发一行 ": ping",
@@ -780,13 +818,9 @@ def _run_sse(
                                             )
                                         )
                             if node_name == "executor" and "plan" in updates:
-                                plan = updates.get("plan") or []
-                                idx = updates.get("current_step_index")
-                                if idx is not None and idx < len(plan):
-                                    step = plan[idx]
-                                    await out_q.put(
-                                        ("tool_call", step.tool_name or "无")
-                                    )
+                                # L2: 以 doing 步骤定位刚发起的工具调用(见助手注释)
+                                for tn in _executor_tool_names(updates):
+                                    await out_q.put(("tool_call", tn))
                             if node_name == "merge":
                                 # docx 渲染完成(docx_path 经 merge 回填 state)→
                                 # 前端 toast/下载入口(Task 5 契约帧;
@@ -798,19 +832,10 @@ def _run_sse(
                                             {"path": updates["docx_path"]},
                                         )
                                     )
-                                for k in (
-                                    "rag_documents",
-                                    "web_search_results",
-                                    "law_results",
-                                    "evaluation",
-                                ):
-                                    if k in updates and updates[k]:
-                                        n = (
-                                            len(updates[k])
-                                            if isinstance(updates[k], list)
-                                            else 1
-                                        )
-                                        await out_q.put(("tool_result", f"{k}: {n}"))
+                                # L2: 工具结果帧 — 定位刚完成步骤(见助手注释)
+                                summary = _merge_tool_summary(updates)
+                                if summary:
+                                    await out_q.put(("tool_result", summary))
                             if (
                                 node_name == "element_assess"
                                 and "case_elements" in updates
@@ -820,14 +845,21 @@ def _run_sse(
                                 await out_q.put(
                                     (
                                         "elements",
-                                        [
-                                            {
-                                                "key": e.key,
-                                                "label": e.label,
-                                                "status": e.status,
-                                            }
-                                            for e in elems
-                                        ],
+                                        {
+                                            "elements": [
+                                                {
+                                                    "key": e.key,
+                                                    "label": e.label,
+                                                    "status": e.status,
+                                                }
+                                                for e in elems
+                                            ],
+                                            # L4: 要素面板显隐由后端显式标记
+                                            "is_case_query": updates.get(
+                                                "question_category"
+                                            )
+                                            != "chitchat",
+                                        },
                                     )
                                 )
                         pending_nodes.extend(
@@ -959,6 +991,9 @@ async def _mode_stream(
     inputs = {"query": query, "mode": mode}
     if mode == "assistant":
         inputs["doc_type"] = doc_type
+    # L13: 对话历史写侧 — 每轮提问以 user 消息入 state.messages
+    # (add_messages 跨轮持久, finalize 追加 assistant 条完成闭环)
+    inputs["messages"] = [{"role": "user", "content": query}]
 
     # H4: 同会话并发流防护 —— 抢锁失败 409, 成功后由 _run_sse finally 释放
     lock = await _acquire_session_lock(sid)
@@ -1004,7 +1039,9 @@ async def ask_pdf(request: QueryRequest):
     graph = get_graph()
     try:
         state = await graph.ainvoke(
-            {"query": request.query}, config=graph_config(sid)
+            {"query": request.query,
+             "messages": [{"role": "user", "content": request.query}]},
+            config=graph_config(sid),
         )
     except Exception as e:
         flow.error("PDF流程失败", summary="Graph 执行失败", detail=str(e))

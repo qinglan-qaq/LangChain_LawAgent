@@ -23,6 +23,7 @@
 - [人机协同 HITL](#人机协同-hitl)
 - [检索系统](#检索系统)
 - [律师助理文书生成](#律师助理文书生成)
+- [对话页体验](#对话页体验)
 - [工具链](#工具链)
 - [API 接口](#api-接口)
 - [数据模型](#数据模型)
@@ -95,7 +96,7 @@
 | **SSE 流式推送** | 实时推送推理 token、计划进度、工具调用、interrupt、文书生成事件，前端零刷新全流程可视 |
 | **对话日志审计** | 全流程事件流落库（问答/澄清/确认决策/终答/文书），聚合 API 按轮次时间线还原，支持服务端中断后前端无损恢复 |
 | **LLM 追踪** | `traced` 装饰器包裹全节点/工具/LLM 调用，trace run/span 落 PostgreSQL，兼容 LangSmith 观测 |
-| **测试背书** | 15 个测试文件、157 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界），回归全绿 |
+| **测试背书** | 16 个测试文件、197 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界），回归全绿 |
 | **并发安全** | 基于 LangGraph PostgreSQL 检查点实现会话级隔离与中断恢复 |
 
 ---
@@ -239,6 +240,24 @@ START → ingest → risk_gate ──[风险确认]──→ interrupt → resum
 - **模板资产**：`data/doc_templates/complaint/`（source.docx 原始模板 + fields.yaml 字段定义 + template.docx 注入产物），`scripts/build_docx_template.py` 可重建，anchor 未命中构建期报错
 - **字段定义**：74 字段（54 文本 / 17 勾选 / 3 日期），YAML 声明 anchor 正则与替换规则，`doc_templates.py` 提供 YAML↔docx 标签双向对账
 - **降级**：模板目录缺失/校验失败时整体降级 warning，planner 末步随之消失，回退纯咨询，不阻断流程
+
+---
+
+## 对话页体验
+
+聊天页（Vue3 + Tailwind4）围绕"过程可见、状态可控"的七项能力：
+
+```text
+● 就绪 → 思考中 → 🔧 正在调用 {工具名} → 组合资料中(后端 status) → 输出中 → ● 就绪
+```
+
+- **思考过程跟消息走**：每条 assistant 消息气泡下方挂独立思考区（状态 / 执行进度 / 计划 / 工具调用 / CoT / 提示词记录快照），流式期自动展开、完成后折叠、可随时回看（`MessageThinking.vue`，`ThinkingBox` 已退役）
+- **工具调用明确标识**：`🔧 正在调用 {工具}` spinner → `✓ {工具} · 结果摘要`；修复了 SSE `tool_call` 帧从不发出的存量缺陷（executor 成功路径不回写 `current_step_index`，改为以 plan 内 `doing` 步骤定位；`tool_result` 以 merge 回写索引定位刚完成步骤，覆盖全部工具）
+- **免责声明前端固定**：prompt 模板不再指示 LLM 生成尾行（`FINALIZE_CASE/DIRECT`、`LEGAL_ANALYSIS_PROMPT_KIM` 三处已删），改为每条完成态回答下固定淡灰小字
+- **案件要素条件展示**：`elements` SSE 帧带 `is_case_query`（由 `question_category != "chitchat"` 派生），闲聊轮要素面板隐藏
+- **agent 运行状态栏**：footer 上方常驻（`AgentStatusBar.vue`），纯前端聚合既有 SSE 状态，无新增后端事件
+- **提交区卡片化**：attorney 输入+发送同一行，assistant 文书单选 pill 化 + hint 行，对话列 `max-w-3xl` 居中
+- **对话历史闭环（短期记忆）**：写侧 API 每轮输入带 user 消息 + `finalize`/`chitchat` 收尾追加 assistant 消息（`add_messages` reducer 跨轮持久，幂等防重），读侧 `_query_with_supplements` 统一拼最近 3 轮（过滤空 AIMessage 占位、单条 300 / 总量 1200 字截断），planner / executor / replan_check / finalize / chitchat 全链路可回忆上下文
 
 ---
 

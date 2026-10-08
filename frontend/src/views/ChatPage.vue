@@ -7,10 +7,10 @@ import ModeSwitch from '../components/ModeSwitch.vue'
 import DisclaimerToast from '../components/DisclaimerToast.vue'
 import HistorySidebar from '../components/HistorySidebar.vue'
 import ChatView from '../components/ChatView.vue'
-import ThinkingBox from '../components/ThinkingBox.vue'
 import ElementPanel from '../components/ElementPanel.vue'
 import CitationList from '../components/CitationList.vue'
 import InterruptPanel from '../components/InterruptPanel.vue'
+import AgentStatusBar from '../components/AgentStatusBar.vue'
 import DocComposer from '../components/DocComposer.vue'
 import DocxGenModal from '../components/DocxGenModal.vue'
 import DocxDoneToast from '../components/DocxDoneToast.vue'
@@ -20,6 +20,22 @@ import TypewriterText from '../components/inspira/TypewriterText.vue'
 onMounted(() => {
   /* HistorySidebar 数据拉取由其自身 onMounted 负责 */
 })
+
+// 思考过程跟消息走(需求1): 每个流事件后把回合级思考状态快照到当轮
+// assistant 消息上(tools/steps 为引用共享, resetTurn 换新数组后旧快照不串)
+function syncThinking(assistant) {
+  if (!assistant || assistant.role !== 'assistant' || assistant.kind) return
+  // tools/steps 浅拷贝快照: 共享引用会让旧消息的思考区被后续轮次数据串写
+  assistant.thinking = {
+    status: state.value.status,
+    planText: state.value.planText,
+    tools: state.value.tools.map((t) => ({ ...t })),
+    steps: state.value.steps.map((s) => ({ ...s })),
+    reasoning: state.value.reasoning,
+    reasoningError: state.value.reasoningError,
+    promptsLog: state.value.promptsLog,
+  }
+}
 
 // SSE 事件路由(提问流与 HITL 恢复流共用):
 // reasoning 按 source 分流(status 工作状态 / *_plan 计划内容 / 其余 CoT),
@@ -38,8 +54,17 @@ function handleStreamEvent(e, assistant) {
   else if (e.event === 'tool_result')
     state.value.tools[state.value.tools.length - 1] &&
       (state.value.tools[state.value.tools.length - 1].result = e.data)
-  else if (e.event === 'elements') state.value.elements = e.data
-  else if (e.event === 'progress') {
+  else if (e.event === 'elements') {
+    // L4: 新 payload {elements, is_case_query}; 兼容旧数组格式
+    const p = e.data
+    if (Array.isArray(p)) {
+      state.value.elements = p
+      state.value.caseQuery = true
+    } else {
+      state.value.elements = (p && p.elements) || []
+      state.value.caseQuery = !!(p && p.is_case_query)
+    }
+  } else if (e.event === 'progress') {
     // 执行进度(需求2): "[2/5] 检索婚姻法条文" → 解析当前步/总步数, 重建 steps
     const text = String(e.data || '')
     const m = /^\[(\d+)\/(\d+)\]/.exec(text)
@@ -102,6 +127,8 @@ function handleStreamEvent(e, assistant) {
       s.current = false
     })
   }
+  // 思考过程快照到当轮 assistant 消息(需求1: 跟消息走)
+  syncThinking(assistant)
 }
 
 // AbortError = 用户主动取消(切模式/中止), 不显示错误横幅
@@ -151,6 +178,8 @@ async function submit({ text, docType }) {
     state.value.reasoningActive = false
     state.value.status = ''
     assistant.done = true
+    // 流结束/出错兜底: 终态思考快照入消息
+    syncThinking(assistant)
   }
 }
 
@@ -215,7 +244,10 @@ async function resumeHITL(answer) {
         await restoreInterruptFromServer(state.value.sessionId)
       }
     }
-    if (!state.value.interrupt) assistant.done = true
+    if (!state.value.interrupt) {
+      assistant.done = true
+      syncThinking(assistant) // 流结束兜底: 终态思考快照入消息
+    }
   }
 }
 
@@ -253,29 +285,35 @@ async function restoreInterruptFromServer(sid) {
       <DocxGenModal />
       <DocxDoneToast />
       <main class="flex-1 overflow-y-auto p-4">
-        <div v-if="!state.messages.length" class="text-slate-500 text-sm mt-8 text-center">
-          <TypewriterText
-            :text="['代理律师模式: 提问婚姻家事问题, 我来分析', '律师助理模式: 粘贴案情, 我来起草起诉状 / 答辩状']"
+        <!-- 对话列限宽居中(需求5): 视线动线集中, 状态栏/输入区同宽呼应 -->
+        <div class="chat-column max-w-3xl mx-auto w-full">
+          <div v-if="!state.messages.length" class="text-slate-500 text-sm mt-8 text-center">
+            <TypewriterText
+              :text="['代理律师模式: 提问婚姻家事问题, 我来分析', '律师助理模式: 粘贴案情, 我来起草起诉状 / 答辩状']"
+            />
+          </div>
+          <p
+            v-if="state.error"
+            class="text-red-600 text-sm border border-red-300 rounded p-2 bg-red-50"
+          >
+            出错: {{ state.error }} (不做兜底, 请修正后重试)
+          </p>
+          <ChatView />
+          <ElementPanel />
+          <InterruptPanel
+            v-if="state.interrupt"
+            :interrupt="state.interrupt"
+            @resume="resumeHITL"
           />
         </div>
-        <p
-          v-if="state.error"
-          class="text-red-600 text-sm border border-red-300 rounded p-2 bg-red-50"
-        >
-          出错: {{ state.error }} (不做兜底, 请修正后重试)
-        </p>
-        <ThinkingBox />
-        <ChatView />
-        <ElementPanel />
-        <InterruptPanel
-          v-if="state.interrupt"
-          :interrupt="state.interrupt"
-          @resume="resumeHITL"
-        />
       </main>
+      <!-- agent 运行状态栏(需求6): 常驻 footer 上方, 就绪→思考→工具→输出→就绪 -->
+      <AgentStatusBar />
       <footer class="border-t p-3 bg-white/80">
-        <!-- 统一提交区: attorney 单行输入, assistant 案情粘贴+文书单选 -->
-        <DocComposer @submit="submit" />
+        <!-- 统一提交区(需求5): 卡片化, 与对话列同宽居中 -->
+        <div class="max-w-3xl mx-auto w-full">
+          <DocComposer @submit="submit" />
+        </div>
       </footer>
     </div>
   </div>
