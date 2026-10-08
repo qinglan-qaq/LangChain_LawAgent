@@ -169,3 +169,35 @@ Pydantic 模型 `MonitorOverview / MonitorRunItem / MonitorStageDetail / Monitor
 - seq 计数器在 RunContext(内存), 进程重启丢历史不影响——已落库行不依赖内存
 - recursion_limit=60 / max_rounds=10 / max_clarify_rounds=5 / error_streak_threshold=2 为现有 config 值, limit_hit 判定复用, 不新设上限
 - 甘特图为事后监控主视图(D7), 实时态仅补充进行中 run 的状态条
+
+## 执行记录(2026-10-08, 监控全量落地)
+
+**提交链**:
+- 118054a D: spec 存档(D1-D11)
+- 58b6a1a P: 9 任务 TDD 实施计划
+- c71dec2 Task1: stage_chain/eval_runs DDL + open/close_stage/insert_eval_run 助手
+- 90c3964 Task2+3: @traced 拉链双写 + STAGE_ZIPPER 门控 + get_pool 跨 loop 锁重建 + score.py 综合评分(6 分量/缺数据重分配/judge 插槽)
+- c8dc4d6 Task4: eval_metrics 纯函数(hit_rate/MRR/P/R/F1@k)
+- 3f4490f Task5: gen_golden_set(Pinecone 分层抽样 + DeepSeek 提炼问题) + run_eval(retrieval suite + --baseline diff)
+- e22e85e Task6: /monitor 4 端点 + 6 响应模型(PG 掉线降级空态)
+- (Task7) vue-router@4 接入: App 改 router-view 壳/ChatPage 搬迁/header 监控入口
+- (Task8) MonitorView 实装: 总览 4 卡/评测批次表/runs 列表/甘特 CSS 自绘/阶段抽屉 rag 分数条三档/3s 智能轮询
+- (Task9 修复) close_stage 有界重试 + 全量回归 183 PASS/0 FAIL
+
+**门禁**: 全量 pytest 183 PASS / 0 FAIL / 0 SKIP(真实 PG 15432); vite build 零错误。
+
+**评测基线**: golden set 30 条(案由分层), label=baseline-001:
+hit_rate@5=0.667 / MRR@5=0.550 / P@5=0.367 / R@5=0.226 / F1@5=0.279
+(R 偏低属预期: relevant_ids=同案例全部 chunk, top-5 只能覆盖部分)。
+
+**偏差存档(8 项)**:
+1. gen_golden_set 改从 Pinecone 命名空间采样(计划 PG law_cases — 实测该表 0 行, 语料全在 Pinecone, 与 2026-09-20 spec 对齐)
+2. run_eval 直接绑 PineconeRetriever 实例(计划 get_retriever() — 后者读 os.environ, 脚本进程无 .env 注入会错落 pgvector 后端, id 空间不同致全 0 分)
+3. close_stage 闭行有界重试 6 次×50ms(计划/Task1 为静默忽略 0 行 — 全量回归暴露真实竞态: 开行 INSERT 与闭行 UPDATE 并发 fire, UPDATE 先到 0 行跳过则行永远 running)
+4. tests PG 门控用仓库 _pg_ok() 独立连接探测(计划 @PG skipif 标记 — 对齐存量测试风格)
+5. TestClient 无 /api 前缀(计划注释已预告需对齐 test_smoke, 确认无前缀)
+6. runs 列表未做 mini 瀑布条(计划 Task8 简化为综合分/触顶列 — 甘特详情已承载耗时可视化, 数据量单机可控)
+7. retrieve 指标统一 k=5(spec §五曾提 MRR@10 — 计划已定 k=5, evaluate 单 k 聚合)
+8. score_distribution 用 width_bucket 三桶 [0,34)/[34,67)/[67,100](计划原文如此, 前端总览卡暂未消费该字段)
+
+**遗留(Out of Scope 重申)**: LLM-as-judge 实现(D11 插槽已留)/spans 实时落库/e2e 评测 suite/监控页访问控制。
