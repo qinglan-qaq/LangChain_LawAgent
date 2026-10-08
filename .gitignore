@@ -55,3 +55,5 @@ ENV/
 *.csv
 *.xlsx
 *.db
+# 评测 golden set(可重生成, scripts/gen_golden_set.py)
+data/eval/*.jsonl
