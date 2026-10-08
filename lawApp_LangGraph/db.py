@@ -412,32 +412,38 @@ async def close_stage(
     latency_ms: int,
     detail: Optional[dict] = None,
 ) -> None:
-    """拉链闭行: 按 (run_id, node_name, seq) 定位; 无匹配行静默忽略
-    (开行极端乱序/失败时 UPDATE 0 行不算错误, 旁路)。"""
+    """拉链闭行: 按 (run_id, node_name, seq) 定位。开行 INSERT 与闭行
+    UPDATE 是并发 fire 任务, 闭行可能先到(0 行)——有界重试等开行落地;
+    重试耗尽仍 0 行则放弃(开行极端乱序/失败, 观测旁路不算错误)。"""
     try:
         pool = await get_pool()
-        async with pool.connection() as conn:
-            await conn.execute(
-                "UPDATE stage_chain SET status=%s, ended_at=NOW(), "
-                "is_current=FALSE, latency_ms=%s, detail=%s "
-                "WHERE run_id=%s AND node_name=%s AND seq=%s",
-                (
-                    status,
-                    latency_ms,
-                    json.dumps(detail or {}, ensure_ascii=False, default=str),
-                    run_id,
-                    node_name,
-                    seq,
-                ),
-            )
-            await conn.commit()
+        for _ in range(6):
+            async with pool.connection() as conn:
+                cur = await conn.execute(
+                    "UPDATE stage_chain SET status=%s, ended_at=NOW(), "
+                    "is_current=FALSE, latency_ms=%s, detail=%s "
+                    "WHERE run_id=%s AND node_name=%s AND seq=%s",
+                    (
+                        status,
+                        latency_ms,
+                        json.dumps(detail or {}, ensure_ascii=False, default=str),
+                        run_id,
+                        node_name,
+                        seq,
+                    ),
+                )
+                await conn.commit()
+                if cur.rowcount:
+                    return
+            await asyncio.sleep(0.05)
+        logger.warning(
+            "stage 闭行无匹配行(开行未落地, 观测旁路): %s/%s#%s",
+            run_id, node_name, seq)
     except Exception as e:  # pragma: no cover — 观测旁路
         logger.warning("stage 闭行失败(观测旁路): %s", e)
 
 
-async def insert_eval_run(
-    dataset: str, label: str, metrics: dict, cases: list
-) -> None:
+async def insert_eval_run(dataset: str, label: str, metrics: dict, cases: list) -> None:
     """评测批次落库(P2)。"""
     pool = await get_pool()
     async with pool.connection() as conn:
