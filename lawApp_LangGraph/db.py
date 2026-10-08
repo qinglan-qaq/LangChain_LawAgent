@@ -42,14 +42,12 @@ def build_dsn() -> str:
     url = settings.database_url
     if url:
         return url
-    return (
-        "postgresql://{user}:{password}@{host}:{port}/{name}".format(
-            user=settings.db_user,
-            password=settings.db_password,
-            host=settings.db_host,
-            port=settings.db_port,
-            name=settings.db_name,
-        )
+    return "postgresql://{user}:{password}@{host}:{port}/{name}".format(
+        user=settings.db_user,
+        password=settings.db_password,
+        host=settings.db_host,
+        port=settings.db_port,
+        name=settings.db_name,
     )
 
 
@@ -82,7 +80,9 @@ async def get_pool() -> AsyncConnectionPool:
                     pass
                 raise
             _pool = pool
-            logger.info("PostgreSQL 连接池就绪 | dsn=%s", build_dsn().rsplit("@", 1)[-1])
+            logger.info(
+                "PostgreSQL 连接池就绪 | dsn=%s", build_dsn().rsplit("@", 1)[-1]
+            )
         return _pool
 
 
@@ -184,6 +184,36 @@ async def ensure_tables(conn: AsyncConnection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_dialogue_created
             ON session_dialogue_events (created_at);
+        -- 阶段拉链表(SCD2): 开行 INSERT / 闭行 UPDATE, 节点级阶段状态
+        -- 规格 docs/superpowers/specs/2026-10-08-stage-chain-monitoring-design.md §一
+        CREATE TABLE IF NOT EXISTS stage_chain (
+            id          BIGSERIAL PRIMARY KEY,
+            run_id      TEXT NOT NULL,
+            session_id  TEXT NOT NULL,
+            node_name   TEXT NOT NULL,
+            seq         INT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'running',
+            started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            ended_at    TIMESTAMPTZ,
+            is_current  BOOLEAN NOT NULL DEFAULT TRUE,
+            latency_ms  INT,
+            detail      JSONB DEFAULT '{}'::jsonb
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_stage_chain_slot
+            ON stage_chain (run_id, node_name, seq);
+        CREATE INDEX IF NOT EXISTS idx_stage_chain_open
+            ON stage_chain (ended_at) WHERE ended_at IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_stage_chain_session
+            ON stage_chain (session_id, started_at);
+        -- 评测批次表(P2, 2026-09-20 spec 决策 2 原样)
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id          BIGSERIAL PRIMARY KEY,
+            dataset     TEXT NOT NULL,
+            label       TEXT NOT NULL,
+            metrics     JSONB DEFAULT '{}',
+            cases       JSONB DEFAULT '[]',
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        );
         """
     )
     await conn.commit()
@@ -192,22 +222,29 @@ async def ensure_tables(conn: AsyncConnection) -> None:
 #  审计 / 会话 / 反馈写入助手
 
 
-async def record_audit(session_id: str, event_type: str, payload: dict[str, Any]) -> None:
+async def record_audit(
+    session_id: str, event_type: str, payload: dict[str, Any]
+) -> None:
     """写入审计事件（引用来源 / HITL 事件等）。失败仅告警，不影响主流程。"""
     try:
         pool = await get_pool()
         async with pool.connection() as conn:
             await conn.execute(
                 "INSERT INTO audit (session_id, event_type, payload) VALUES (%s, %s, %s)",
-                (session_id, event_type, json.dumps(payload, ensure_ascii=False, default=str)),
+                (
+                    session_id,
+                    event_type,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                ),
             )
             await conn.commit()
     except Exception as e:  # pragma: no cover — 审计失败不阻塞主流程
         logger.warning("audit 写入失败: %s", e)
 
 
-async def upsert_session(session_id: str, user_id: Optional[str] = None,
-                         meta: Optional[dict] = None) -> None:
+async def upsert_session(
+    session_id: str, user_id: Optional[str] = None, meta: Optional[dict] = None
+) -> None:
     """新建或刷新会话活跃时间。"""
     try:
         pool = await get_pool()
@@ -221,16 +258,21 @@ async def upsert_session(session_id: str, user_id: Optional[str] = None,
                               user_id = COALESCE(EXCLUDED.user_id, sessions.user_id),
                               meta = sessions.meta || EXCLUDED.meta
                 """,
-                (session_id, user_id, json.dumps(meta or {}, ensure_ascii=False),
-                 datetime.now(timezone.utc)),
+                (
+                    session_id,
+                    user_id,
+                    json.dumps(meta or {}, ensure_ascii=False),
+                    datetime.now(timezone.utc),
+                ),
             )
             await conn.commit()
     except Exception as e:  # pragma: no cover
         logger.warning("session 写入失败: %s", e)
 
 
-async def record_feedback(session_id: str, rating: int,
-                          comment: str = "", answer_snapshot: str = "") -> None:
+async def record_feedback(
+    session_id: str, rating: int, comment: str = "", answer_snapshot: str = ""
+) -> None:
     """记录用户对回答的反馈。"""
     pool = await get_pool()
     async with pool.connection() as conn:
@@ -251,9 +293,18 @@ def _trace_json(value: Any) -> "Json":
     return Json(value, dumps=lambda o: json.dumps(o, default=str, ensure_ascii=False))
 
 
-async def insert_trace_run(run_id: str, session_id: str, run_type: str, mode: str,
-                           status: str, query: str, final_answer: str,
-                           metrics: dict, started_at: float, ended_at: float) -> None:
+async def insert_trace_run(
+    run_id: str,
+    session_id: str,
+    run_type: str,
+    mode: str,
+    status: str,
+    query: str,
+    final_answer: str,
+    metrics: dict,
+    started_at: float,
+    ended_at: float,
+) -> None:
     """写入/收尾更新一次运行(run_id 冲突时更新收尾字段)。"""
     pool = await get_pool()
     async with pool.connection() as conn:
@@ -269,9 +320,18 @@ async def insert_trace_run(run_id: str, session_id: str, run_type: str, mode: st
                 metrics = EXCLUDED.metrics,
                 ended_at = EXCLUDED.ended_at
             """,
-            (run_id, session_id, run_type, mode, status, query, final_answer,
-             _trace_json(metrics), datetime.fromtimestamp(started_at),
-             datetime.fromtimestamp(ended_at)),
+            (
+                run_id,
+                session_id,
+                run_type,
+                mode,
+                status,
+                query,
+                final_answer,
+                _trace_json(metrics),
+                datetime.fromtimestamp(started_at),
+                datetime.fromtimestamp(ended_at),
+            ),
         )
         await conn.commit()
 
@@ -291,10 +351,88 @@ async def insert_trace_spans(rows: list[dict]) -> None:
                      state, latency_ms, token_usage, started_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                [(r["run_id"], r["span_type"], r["name"], r["status"],
-                  _trace_json(r["input"]), _trace_json(r["output"]),
-                  _trace_json(r["state"]), r["latency_ms"],
-                  _trace_json(r["token_usage"]), datetime.fromtimestamp(r["started_at"]))
-                 for r in rows],
+                [
+                    (
+                        r["run_id"],
+                        r["span_type"],
+                        r["name"],
+                        r["status"],
+                        _trace_json(r["input"]),
+                        _trace_json(r["output"]),
+                        _trace_json(r["state"]),
+                        r["latency_ms"],
+                        _trace_json(r["token_usage"]),
+                        datetime.fromtimestamp(r["started_at"]),
+                    )
+                    for r in rows
+                ],
             )
+        await conn.commit()
+
+
+#  阶段拉链表 / 评测批次写入助手(观测旁路: 失败仅告警, 不阻塞业务)
+
+
+async def open_stage(run_id: str, session_id: str, node_name: str, seq: int) -> None:
+    """拉链开行: running / ended_at NULL / is_current TRUE。"""
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO stage_chain (run_id, session_id, node_name, seq) "
+                "VALUES (%s, %s, %s, %s)",
+                (run_id, session_id, node_name, seq),
+            )
+            await conn.commit()
+    except Exception as e:  # pragma: no cover — 观测旁路
+        logger.warning("stage 开行失败(观测旁路): %s", e)
+
+
+async def close_stage(
+    run_id: str,
+    node_name: str,
+    seq: int,
+    status: str,
+    latency_ms: int,
+    detail: Optional[dict] = None,
+) -> None:
+    """拉链闭行: 按 (run_id, node_name, seq) 定位; 无匹配行静默忽略
+    (开行极端乱序/失败时 UPDATE 0 行不算错误, 旁路)。"""
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE stage_chain SET status=%s, ended_at=NOW(), "
+                "is_current=FALSE, latency_ms=%s, detail=%s "
+                "WHERE run_id=%s AND node_name=%s AND seq=%s",
+                (
+                    status,
+                    latency_ms,
+                    json.dumps(detail or {}, ensure_ascii=False, default=str),
+                    run_id,
+                    node_name,
+                    seq,
+                ),
+            )
+            await conn.commit()
+    except Exception as e:  # pragma: no cover — 观测旁路
+        logger.warning("stage 闭行失败(观测旁路): %s", e)
+
+
+async def insert_eval_run(
+    dataset: str, label: str, metrics: dict, cases: list
+) -> None:
+    """评测批次落库(P2)。"""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO eval_runs (dataset, label, metrics, cases) "
+            "VALUES (%s, %s, %s, %s)",
+            (
+                dataset,
+                label,
+                _trace_json(metrics),
+                _trace_json(cases),
+            ),
+        )
         await conn.commit()
