@@ -96,7 +96,11 @@ from lawApp_LangGraph.prompts import (
     SEMANTIC_CONFIRM_PROMPT,
 )
 from lawApp_LangGraph.tools.rag_tools import analyze_legal_issue  # noqa — 已有,确认不缺
-from lawApp_LangGraph.tracing import get_instrumented_llm_cls, traced
+from lawApp_LangGraph.tracing import (
+    get_instrumented_llm_cls,
+    record_llm_span,
+    traced,
+)
 
 #  LLM 懒加载单例 — 导入期不触碰 API Key; Lock 双检防多线程/多 worker 重复初始化
 
@@ -936,24 +940,48 @@ async def _stream_plan(
     content: list[str] = []
     # M2: 模块级单例(带 60s 超时), planner/replanner/解析失败重试共用一个客户端
     client = _get_planner_openai_client()
+    # 裸流式不经 InstrumentedChatOpenAI, span 在此手动上报;
+    # include_usage: DeepSeek 用量在末帧 usage 块(choices 为空), 不请求不返
+    t0_span = time.perf_counter()
+    usage = None
     stream = await client.chat.completions.create(
         model=settings.deepseek_pro_model,
         messages=[{"role": "user", "content": prompt_text}],
         stream=True,
+        stream_options={"include_usage": True},
     )
-    async for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
-        rc = getattr(delta, "reasoning_content", None) or ""
-        if rc:
-            reasoning.append(rc)
-            # CoT 增量经总线广播(H4: 同会话全部订阅队列 fan-out)
-            _bus_put(thread_id, {"source": source, "delta": rc})
-        if delta.content:
-            content.append(delta.content)
-            # 计划内容实时流(先思考后计划): source 加 _plan 后缀区分, 前端路由到计划面板
-            _bus_put(thread_id, {"source": f"{source}_plan", "delta": delta.content})
+    try:
+        async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = {
+                    "prompt": getattr(chunk.usage, "prompt_tokens", None),
+                    "completion": getattr(chunk.usage, "completion_tokens", None),
+                }
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            rc = getattr(delta, "reasoning_content", None) or ""
+            if rc:
+                reasoning.append(rc)
+                # CoT 增量经总线广播(H4: 同会话全部订阅队列 fan-out)
+                _bus_put(thread_id, {"source": source, "delta": rc})
+            if delta.content:
+                content.append(delta.content)
+                # 计划内容实时流(先思考后计划): source 加 _plan 后缀区分, 前端路由到计划面板
+                _bus_put(thread_id, {"source": f"{source}_plan", "delta": delta.content})
+    except BaseException:
+        record_llm_span(
+            settings.deepseek_pro_model, [prompt_text],
+            {"error": f"{source} 流式中断", "content": "".join(content)},
+            t0_span, "error", usage,
+        )
+        raise
+    record_llm_span(
+        settings.deepseek_pro_model,
+        [prompt_text],
+        {"content": "".join(content), "reasoning": "".join(reasoning)},
+        t0_span, "ok", usage,
+    )
     return _parse_plan_json("".join(content)), reasoning
 
 

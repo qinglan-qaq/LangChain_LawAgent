@@ -154,3 +154,27 @@ def test_llm_factory_returns_instrumented_chatopenai():
         assert isinstance(llm, ChatOpenAI)  # 子类 → _structured json_mode 分支不受影响
         assert type(llm).__name__ == "InstrumentedChatOpenAI"
         assert isinstance(llm, tracing.get_instrumented_llm_cls())
+
+
+def test_record_llm_span_manual_path():
+    """裸 SDK 客户端路径(planner reasoner 流式)手动上报:
+    llm span 齐全 + token_usage 原样携带 + metrics 聚合可算。"""
+    from lawApp_LangGraph.tracing import record_llm_span
+
+    run = set_run(RunContext(run_id="t:llm-manual", session_id="t",
+                             run_type="live_ask"))
+    record_llm_span(
+        "deepseek-reasoner",
+        ["prompt 文本"],
+        {"content": "计划文本", "reasoning": "思考文本"},
+        t0=None, status="ok",
+        token_usage={"prompt": 100, "completion": 50},
+    )
+    s = run.spans[0]
+    assert (s.span_type, s.name, s.status) == ("llm", "llm:deepseek-reasoner", "ok")
+    assert s.input == ["prompt 文本"]
+    assert s.output["content"] == "计划文本"
+    assert s.token_usage == {"prompt": 100, "completion": 50}
+    m = run.metrics()
+    assert m["llm_count"] == 1
+    assert m["token_prompt"] == 100 and m["token_completion"] == 50

@@ -373,6 +373,30 @@ def _emit_llm_span(
     _emit(span)
 
 
+def record_llm_span(
+    model: str,
+    messages: Any,
+    output: Any = None,
+    t0: Optional[float] = None,
+    status: str = "ok",
+    token_usage: Optional[dict] = None,
+) -> None:
+    """裸 SDK 客户端路径的 llm span 手动上报(planner reasoner 流式不经
+    InstrumentedChatOpenAI, 由调用方在流收尾处带 token 用量调用)。"""
+    if t0 is None:
+        t0 = time.perf_counter()
+    _emit(Span(
+        span_type="llm",
+        name=f"llm:{model}",
+        input=messages,
+        output=output,
+        latency_ms=int((time.perf_counter() - t0) * 1000),
+        started_at=time.time(),
+        status=status,
+        token_usage=token_usage,
+    ))
+
+
 async def flush_run(run: RunContext) -> None:
     """run + spans 统一落库;失败记 ERROR 放行(观测旁路, 决策 8)。
 

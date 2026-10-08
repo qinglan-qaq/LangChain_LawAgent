@@ -4,6 +4,7 @@
 -->
 <script setup>
 import { computed } from 'vue'
+import { fmtCSTTime } from '../lib/time'
 
 const props = defineProps({
   stages: { type: Array, default: () => [] }, // MonitorStage[]
@@ -44,8 +45,8 @@ const rows = computed(() =>
 <template>
   <div class="border rounded bg-white p-3">
     <div class="text-xs text-slate-400 mb-2 flex justify-between">
-      <span>{{ new Date(t0t1[0]).toLocaleTimeString() }}</span>
-      <span>{{ new Date(t0t1[1]).toLocaleTimeString() }}</span>
+      <span>{{ fmtCSTTime(new Date(t0t1[0]).toISOString()) }}</span>
+      <span>{{ fmtCSTTime(new Date(t0t1[1]).toISOString()) }}</span>
     </div>
     <div class="space-y-1">
       <div

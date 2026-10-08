@@ -345,8 +345,10 @@ async def insert_trace_run(
                 query,
                 final_answer,
                 _trace_json(metrics),
-                datetime.fromtimestamp(started_at),
-                datetime.fromtimestamp(ended_at),
+                # tz=utc: fromtimestamp 默认取机器本地时区得 naive datetime,
+                # 插 TIMESTAMPTZ 被 PG 当 UTC → 整体 +8h 偏移
+                datetime.fromtimestamp(started_at, tz=timezone.utc),
+                datetime.fromtimestamp(ended_at, tz=timezone.utc),
             ),
         )
         await conn.commit()
@@ -378,7 +380,7 @@ async def insert_trace_spans(rows: list[dict]) -> None:
                         _trace_json(r["state"]),
                         r["latency_ms"],
                         _trace_json(r["token_usage"]),
-                        datetime.fromtimestamp(r["started_at"]),
+                        datetime.fromtimestamp(r["started_at"], tz=timezone.utc),
                     )
                     for r in rows
                 ],

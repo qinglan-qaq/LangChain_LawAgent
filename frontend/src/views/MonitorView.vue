@@ -9,6 +9,7 @@ import {
 } from '../api'
 import GanttTimeline from '../components/GanttTimeline.vue'
 import StageDetailDrawer from '../components/StageDetailDrawer.vue'
+import { fmtCST } from '../lib/time'
 
 const overview = ref({})
 const runs = ref([])
@@ -105,7 +106,7 @@ onUnmounted(() => timer.value && clearInterval(timer.value))
         </thead>
         <tbody class="text-slate-600">
           <tr v-for="e in evals" :key="e.id" class="border-t">
-            <td class="py-1">{{ (e.created_at || '').slice(0, 19) }}</td>
+            <td class="py-1">{{ fmtCST(e.created_at) }}</td>
             <td>{{ e.dataset }}</td><td>{{ e.label }}</td>
             <td>{{ (e.metrics['hit_rate_at_5'] ?? 0).toFixed(3) }}</td>
             <td>{{ (e.metrics['mrr_at_5'] ?? 0).toFixed(3) }}</td>
@@ -131,7 +132,7 @@ onUnmounted(() => timer.value && clearInterval(timer.value))
               class="border-t cursor-pointer hover:bg-slate-50"
               :class="{ 'bg-blue-50/50': detail && detail.run_id === r.run_id }"
               @click="openRun(r)">
-            <td class="py-1">{{ (r.started_at || '').slice(5, 19) }}</td>
+            <td class="py-1">{{ fmtCST(r.started_at).slice(5) }}</td>
             <td class="max-w-40 truncate">{{ r.run_id }}</td>
             <td class="max-w-32 truncate">{{ r.session_id }}</td>
             <td>{{ r.mode || r.run_type }}</td>
