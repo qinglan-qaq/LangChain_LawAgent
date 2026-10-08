@@ -143,6 +143,24 @@ def test_monitor_runs_status_filter():
         _cleanup()
 
 
+def test_monitor_runs_pagination():
+    """offset 翻页 + X-Total-Count 头: 第一页末行 == 第二页首行衔接。"""
+    try:
+        with _client() as c:
+            p1 = c.get("/monitor/runs?limit=2&offset=0")
+            p2 = c.get("/monitor/runs?limit=2&offset=2")
+            assert p1.status_code == 200 and p2.status_code == 200
+            total = int(p1.headers["X-Total-Count"])
+            assert total == int(p2.headers["X-Total-Count"])
+            rows1, rows2 = p1.json(), p2.json()
+            assert len(rows1) == 2 and len(rows2) <= 2
+            # started_at DESC 排序下两页衔接不重不漏
+            assert rows1[0]["run_id"] != rows2[0]["run_id"]
+            assert total >= len(rows1) + len(rows2)
+    finally:
+        _cleanup()
+
+
 #  2. 总览 + 评测列表
 
 

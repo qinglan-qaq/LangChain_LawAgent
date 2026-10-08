@@ -11,6 +11,7 @@ const props = defineProps({
   name: { type: String, default: '' },
   depth: { type: Number, default: 0 },
   defaultOpen: { type: Number, default: 1 },
+  treeId: { type: String, default: '' },   // 仅根层实例挂此 id(递归子层不挂)
 })
 
 const isBranch = computed(
@@ -50,8 +51,8 @@ function fmtLeaf(v) {
 </script>
 
 <template>
-  <!-- 分支: 折叠箭头 + key + {n}/[n] 概要或子层 -->
-  <div v-if="isBranch" class="leading-5">
+  <!-- 分支: 折叠箭头 + key + {n}/[n] 概要或子层(递归实例不重复挂 id) -->
+  <div v-if="isBranch" :id="treeId || null" class="json-tree leading-5">
     <div class="flex items-start gap-0.5">
       <button
         class="w-3.5 shrink-0 text-left text-slate-400 hover:text-slate-700"
@@ -84,7 +85,7 @@ function fmtLeaf(v) {
     </div>
   </div>
   <!-- 叶子: key: 值(类型着色) -->
-  <div v-else class="leading-5">
+  <div v-else :id="treeId ? `${treeId}-leaf` : null" class="json-tree-leaf leading-5">
     <span v-if="name" class="text-slate-600 font-medium">{{ name }}: </span>
     <span :class="typeCls(node)" :title="String(node)">{{
       typeof node === 'string' ? `“${fmtLeaf(node)}”` : fmtLeaf(node)

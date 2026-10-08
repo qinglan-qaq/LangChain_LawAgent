@@ -57,7 +57,7 @@ function onCreate() {
 </script>
 
 <template>
-  <aside id="history" class="p-3 text-xs overflow-y-auto">
+  <aside id="history" class="history-sidebar p-3 text-xs overflow-y-auto">
     <div class="font-semibold text-slate-700 mb-2 text-sm">最近会话</div>
     <button
       id="btn-new-session"

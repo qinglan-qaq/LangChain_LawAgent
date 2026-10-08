@@ -232,7 +232,7 @@ async function restoreInterruptFromServer(sid) {
 </script>
 
 <template>
-  <div class="relative flex h-screen bg-slate-100">
+  <div id="chat-page" class="chat-page relative flex h-screen bg-slate-100">
     <!-- 官方组件根节点自带 relative(cva 基底, class 数组不合并), 定位类由外层 wrapper 承载避免冲突 -->
     <div class="pointer-events-none absolute inset-0 z-0 opacity-60">
       <PatternBackground variant="dot" class="h-full" />

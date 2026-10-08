@@ -23,8 +23,11 @@ export const fetchDisclaimer = () =>
 export const getMonitorOverview = () =>
   http.get('/monitor/overview').then((r) => r.data)
 
-export const getMonitorRuns = (limit = 50) =>
-  http.get('/monitor/runs', { params: { limit } }).then((r) => r.data)
+// 分页: 后端 limit/offset 查询参数 + X-Total-Count 响应头, 归一为 {rows, total}
+export const getMonitorRuns = (limit = 20, offset = 0) =>
+  http
+    .get('/monitor/runs', { params: { limit, offset } })
+    .then((r) => ({ rows: r.data, total: parseInt(r.headers['x-total-count'] || '0', 10) }))
 
 export const getMonitorRunDetail = (runId) =>
   http.get(`/monitor/runs/${runId}/stages`).then((r) => r.data)

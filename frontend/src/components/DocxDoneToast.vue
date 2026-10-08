@@ -21,7 +21,8 @@ onBeforeUnmount(() => timer && clearTimeout(timer))
   <!-- docx 完成通知: 左上角, 内嵌下载入口(8s 自消) -->
   <div
     v-if="state.docxToast"
-    class="fixed top-4 left-4 max-w-xs z-50 border border-amber-300 rounded-xl bg-white shadow-lg p-3 text-xs"
+    id="docx-done-toast"
+    class="docx-done-toast fixed top-4 left-4 max-w-xs z-50 border border-amber-300 rounded-xl bg-white shadow-lg p-3 text-xs"
   >
     <div class="font-semibold text-slate-800 mb-1">Word 文书生成完成</div>
     <div class="text-slate-500 mb-2">可在消息区下载, 或点击此处下载</div>

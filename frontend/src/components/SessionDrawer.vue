@@ -87,13 +87,14 @@ function goToFinal() {
 <template>
   <Teleport to="body">
     <!-- 遮罩: 点击即关 -->
-    <div v-if="open" class="fixed inset-0 bg-black/30 z-40" @click="emit('close')" />
+    <div v-if="open" id="session-drawer-mask" class="session-drawer-mask fixed inset-0 bg-black/30 z-40" @click="emit('close')" />
     <Motion
       v-if="open"
       as="div"
       :initial="{ x: 40, opacity: 0 }"
       :animate="{ x: 0, opacity: 1 }"
-      class="fixed right-0 top-0 h-full w-[420px] max-w-[90vw] bg-white border-l border-slate-200 shadow-xl z-40 flex flex-col text-xs"
+      id="session-drawer-panel"
+      class="session-drawer-panel fixed right-0 top-0 h-full w-[420px] max-w-[90vw] bg-white border-l border-slate-200 shadow-xl z-40 flex flex-col text-xs"
     >
       <div class="px-4 py-3 border-b flex items-center justify-between">
         <div class="font-mono text-slate-700">{{ detail?.session_id || '' }}</div>

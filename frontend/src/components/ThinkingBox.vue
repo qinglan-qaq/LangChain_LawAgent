@@ -35,7 +35,7 @@ const hasToolUsage = computed(() => Object.keys(state.value.toolUsage).length > 
     v-if="hasContent"
     id="cot"
     :open="open"
-    class="border rounded-lg p-2 my-1 text-xs bg-slate-50 border-slate-200"
+    class="thinking-box border rounded-lg p-2 my-1 text-xs bg-slate-50 border-slate-200"
   >
     <summary class="cursor-pointer select-none">
       {{ state.reasoningError ? '思考过程(中断, 已保留片段)' : '思考过程' }}

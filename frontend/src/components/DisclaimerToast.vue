@@ -17,7 +17,8 @@ onMounted(async () => {
 <template>
   <div
     v-if="!state.disclaimerShown"
-    class="fixed top-4 right-4 max-w-xs z-50 border rounded-xl bg-white shadow-lg p-3 text-xs text-slate-600"
+    id="disclaimer-toast"
+    class="disclaimer-toast fixed top-4 right-4 max-w-xs z-50 border rounded-xl bg-white shadow-lg p-3 text-xs text-slate-600"
   >
     <div class="font-semibold text-slate-800 mb-1">免责声明</div>
     <p class="leading-5">{{ text }}</p>

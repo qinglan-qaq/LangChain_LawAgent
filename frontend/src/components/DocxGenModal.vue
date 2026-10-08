@@ -5,7 +5,8 @@ import { state } from '../store'
   <!-- docx 生成中全局弹窗: 遮罩阻断误操作, spinner + 提示文案 -->
   <div
     v-if="state.docxGenerating"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm"
+    id="docx-gen-modal"
+    class="docx-gen-modal fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm"
   >
     <div class="bg-white rounded-2xl shadow-xl px-8 py-6 flex flex-col items-center gap-3">
       <div

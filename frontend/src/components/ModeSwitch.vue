@@ -17,7 +17,7 @@ function pick(id) {
 </script>
 
 <template>
-  <div id="mode-switch" class="flex rounded-lg border overflow-hidden text-sm">
+  <div id="mode-switch" class="mode-switch flex rounded-lg border overflow-hidden text-sm">
     <button
       v-for="m in modes"
       :key="m.id"

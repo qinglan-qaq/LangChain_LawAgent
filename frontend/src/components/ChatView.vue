@@ -34,7 +34,7 @@ function hitlTag(m) {
 </script>
 
 <template>
-  <div id="chat" class="space-y-3">
+  <div id="chat" class="chat-view space-y-3">
     <!-- 官方 Inspira 无 FadeIn 组件, 消息入场按官方动画底座 motion-v 直写 -->
     <Motion
       v-for="(m, i) in state.messages"

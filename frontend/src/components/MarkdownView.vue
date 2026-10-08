@@ -14,5 +14,5 @@ const html = computed(() => md.render(props.text || ''))
 </script>
 
 <template>
-  <div class="md-body" v-html="html" />
+  <div id="markdown-view" class="markdown-view md-body" v-html="html" />
 </template>

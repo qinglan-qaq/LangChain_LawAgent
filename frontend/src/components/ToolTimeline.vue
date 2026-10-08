@@ -8,7 +8,8 @@ import { state } from '../store'
        轮播式), 按官方动画底座 motion-v 直写逐项入场 -->
   <div
     v-if="state.tools.length"
-    class="my-2 text-xs text-slate-600 border rounded-lg p-2 bg-slate-50"
+    id="tool-timeline"
+    class="tool-timeline my-2 text-xs text-slate-600 border rounded-lg p-2 bg-slate-50"
   >
     <div class="mb-1 text-slate-500">工具调用</div>
     <ol>

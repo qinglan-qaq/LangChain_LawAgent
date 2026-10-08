@@ -23,7 +23,7 @@ from typing import Optional
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from langgraph.types import Command
@@ -1196,8 +1196,9 @@ async def monitor_overview():
 
 
 @app.get("/monitor/runs", response_model=list[MonitorRunItem])
-async def monitor_runs(limit: int = 50, status: Optional[str] = None,
-                       session_id: Optional[str] = None):
+async def monitor_runs(limit: int = 50, offset: int = 0, status: Optional[str] = None,
+                       session_id: Optional[str] = None,
+                       response: Response = None):
     from lawApp_LangGraph.db import get_pool
 
     conds, params = ["1=1"], []
@@ -1207,6 +1208,7 @@ async def monitor_runs(limit: int = 50, status: Optional[str] = None,
     if session_id:
         conds.append("r.session_id = %s")
         params.append(session_id)
+    where = " AND ".join(conds)
     sql = (
         "SELECT r.run_id, r.session_id, r.run_type, r.mode, r.status, "
         "r.started_at, r.ended_at, r.metrics, "
@@ -1215,18 +1217,24 @@ async def monitor_runs(limit: int = 50, status: Optional[str] = None,
         " AND s.status = 'ok'), "
         "(SELECT COUNT(*) FROM stage_chain s WHERE s.run_id = r.run_id "
         " AND s.ended_at IS NULL) "
-        "FROM trace_runs r WHERE " + " AND ".join(conds) + " "
-        "ORDER BY r.started_at DESC LIMIT %s"
+        f"FROM trace_runs r WHERE {where} "
+        "ORDER BY r.started_at DESC LIMIT %s OFFSET %s"
     )
-    params.append(min(limit, 500))
+    page_params = params + [min(limit, 500), max(offset, 0)]
     try:
         pool = await get_pool()
         async with pool.connection() as conn:
-            cur = await conn.execute(sql, tuple(params))
+            cur = await conn.execute(sql, tuple(page_params))
             rows = await cur.fetchall()
+            # 分页元信息走响应头, 响应体保持纯列表(契约不变)
+            cur = await conn.execute(
+                f"SELECT COUNT(*) FROM trace_runs r WHERE {where}", tuple(params))
+            total = (await cur.fetchone())[0]
     except Exception as e:
         flow.error("monitor runs 降级", detail=str(e))
         return []
+    if response is not None:
+        response.headers["X-Total-Count"] = str(total)
     return [
         MonitorRunItem(
             run_id=r[0], session_id=r[1], run_type=r[2], mode=r[3],

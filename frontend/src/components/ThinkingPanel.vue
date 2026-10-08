@@ -8,8 +8,9 @@ const head = computed(() => state.value.reasoning.slice(-60))
 
 <template>
   <details
+    id="thinking-panel"
     :open="open"
-    class="border rounded-lg p-2 my-1 text-xs bg-slate-50"
+    class="thinking-panel border rounded-lg p-2 my-1 text-xs bg-slate-50"
     :class="state.reasoningError ? 'border-red-400' : 'border-slate-200'"
   >
     <summary class="cursor-pointer select-none">

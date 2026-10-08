@@ -9,7 +9,8 @@ import { state } from '../store'
   <Motion
     v-if="state.status"
     as="div"
-    class="flex items-center gap-2 my-1 text-xs text-slate-500 border rounded-lg px-2 py-1.5 bg-slate-50"
+    id="status-bar"
+    class="status-bar flex items-center gap-2 my-1 text-xs text-slate-500 border rounded-lg px-2 py-1.5 bg-slate-50"
     :initial="{ opacity: 0, y: -4 }"
     :animate="{ opacity: 1, y: 0 }"
   >

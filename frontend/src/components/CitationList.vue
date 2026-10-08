@@ -3,7 +3,7 @@ defineProps({ sources: { type: Array, default: () => [] } })
 </script>
 
 <template>
-  <div v-if="sources.length" class="mt-2">
+  <div v-if="sources.length" id="citation-list" class="citation-list mt-2">
     <div class="text-xs text-slate-500 mb-1">引用来源</div>
     <ul>
       <!-- L9: 列表源 filter(Boolean) 防混入 null/undefined; 项级 ?. 链 +

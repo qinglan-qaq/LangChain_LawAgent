@@ -47,8 +47,8 @@ const secs = [
 </script>
 
 <template>
-  <div v-if="stage" class="border rounded bg-white p-4 space-y-3">
-    <h3 class="font-semibold text-slate-700">
+  <div v-if="stage" id="stage-detail-drawer" class="stage-detail-drawer border rounded bg-white p-4 space-y-3">
+    <h3 id="stage-detail-header" class="stage-detail-header font-semibold text-slate-700">
       {{ stage.node_name }}
       <template v-if="stage.seq > 1">(第{{ stage.seq }}次)</template>
       <span class="ml-2 text-xs text-slate-400">
@@ -57,7 +57,7 @@ const secs = [
       </span>
     </h3>
 
-    <div v-if="ragDocs.length" class="space-y-1">
+    <div v-if="ragDocs.length" id="stage-detail-rag" class="stage-detail-rag space-y-1">
       <p class="text-xs text-slate-500 font-medium">检索结果 (hybrid_score 分数条)</p>
       <div v-for="(d, i) in ragDocs" :key="i" class="flex items-center gap-2 text-xs">
         <span class="w-56 truncate text-slate-600">
@@ -73,7 +73,8 @@ const secs = [
       </div>
     </div>
 
-    <details v-for="sec in secs" :key="sec.key" class="text-xs">
+    <details v-for="sec in secs" :key="sec.key" :id="`stage-detail-${sec.key}`"
+             class="stage-detail-section text-xs">
       <summary class="cursor-pointer text-slate-500 hover:text-slate-700">
         {{ sec.label }}
       </summary>
@@ -82,14 +83,16 @@ const secs = [
           :node="related.map(s => s[sec.key])"
           :name="`${stage.node_name}·${sec.key}`"
           :default-open="1"
+          :tree-id="`stage-detail-tree-${sec.key}`"
         />
       </div>
     </details>
 
-    <details class="text-xs">
+    <details id="stage-detail-token" class="stage-detail-section text-xs">
       <summary class="cursor-pointer text-slate-500 hover:text-slate-700">token 用量</summary>
       <div class="mt-1 max-h-48 overflow-auto bg-slate-50 border rounded p-2 text-[11px] font-mono">
-        <JsonTree v-if="tokenMap" :node="tokenMap" name="token_usage" :default-open="1" />
+        <JsonTree v-if="tokenMap" :node="tokenMap" name="token_usage" :default-open="1"
+                  tree-id="stage-detail-tree-token" />
         <p v-else class="text-slate-400">该阶段无 token 记录</p>
       </div>
     </details>

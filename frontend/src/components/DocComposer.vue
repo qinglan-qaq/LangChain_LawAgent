@@ -21,7 +21,7 @@ function send(e) {
 </script>
 
 <template>
-  <div class="flex flex-col gap-2">
+  <div id="doc-composer" class="doc-composer flex flex-col gap-2">
     <template v-if="state.mode === 'assistant'">
       <div class="flex gap-4 text-sm">
         <label class="flex items-center gap-1 cursor-pointer">
