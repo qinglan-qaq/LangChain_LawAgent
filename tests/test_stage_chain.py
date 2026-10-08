@@ -5,12 +5,22 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # psycopg async 在 Windows 需 SelectorEventLoop(与 uvicorn loop 工厂同款)
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+
+@pytest.fixture(autouse=True)
+def _enable_zipper(monkeypatch):
+    """conftest 全局关了拉链双写, 本文件用例按需重开。"""
+    monkeypatch.setenv("STAGE_ZIPPER", "1")
 
 
 def _pg_ok() -> bool:
@@ -159,3 +169,137 @@ def test_eval_run_insert():
         await db.close_pool()
 
     asyncio.run(_run())
+
+
+#  @traced 双写拉链(Task2)
+
+
+def test_traced_node_writes_zipper():
+    """@traced("node") 函数执行后: 拉链开行→闭行齐, 回环重跑 seq 递增。"""
+    _skip_no_pg()
+    rid = f"test-zip-{time.time_ns()}"
+
+    async def _run():
+        from lawApp_LangGraph import db
+        from lawApp_LangGraph.tracing import RunContext, set_run, traced
+
+        set_run(RunContext(run_id=rid, session_id="sess-z",
+                           run_type="live_ask"))
+
+        @traced("node", "planner")
+        async def fake_node(state):
+            return {"ok": True}
+
+        await fake_node({"x": 1})   # 第 1 次
+        await fake_node({"x": 2})   # 第 2 次(回环重跑)
+        await asyncio.sleep(0.3)     # 等 fire-and-forget 任务跑完
+
+        pool = await db.get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT seq, status, is_current, latency_ms FROM stage_chain "
+                "WHERE run_id=%s ORDER BY seq", (rid,))
+            rows = await cur.fetchall()
+            assert [(r[0], r[1], r[2]) for r in rows] == \
+                [(1, "ok", False), (2, "ok", False)]
+            assert all(r[3] >= 0 for r in rows)
+            await conn.execute("DELETE FROM stage_chain WHERE run_id=%s", (rid,))
+            await conn.commit()
+        await db.close_pool()
+
+    asyncio.run(_run())
+
+
+def test_traced_error_node_writes_error_row():
+    """节点抛异常 → 拉链行记 error + detail.exception, 异常原样透传不吞。"""
+    _skip_no_pg()
+    rid = f"test-zip-err-{time.time_ns()}"
+
+    async def _run():
+        from lawApp_LangGraph import db
+        from lawApp_LangGraph.tracing import RunContext, set_run, traced
+
+        set_run(RunContext(run_id=rid, session_id="sess-z",
+                           run_type="live_ask"))
+
+        @traced("node", "executor")
+        async def boom(state):
+            raise ValueError("tool blew up")
+
+        with pytest.raises(ValueError):
+            await boom({})
+        await asyncio.sleep(0.3)
+
+        pool = await db.get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT status, detail->>'exception' FROM stage_chain "
+                "WHERE run_id=%s", (rid,))
+            row = await cur.fetchone()
+            assert row[0] == "error" and "tool blew up" in row[1]
+            await conn.execute("DELETE FROM stage_chain WHERE run_id=%s", (rid,))
+            await conn.commit()
+        await db.close_pool()
+
+    asyncio.run(_run())
+
+
+def test_traced_tool_span_skips_zipper():
+    """span_type="tool" 不写拉链(只 node 层) — 表内无该 run 行。"""
+    _skip_no_pg()
+    rid = f"test-zip-tool-{time.time_ns()}"
+
+    async def _run():
+        from lawApp_LangGraph import db
+        from lawApp_LangGraph.tracing import RunContext, set_run, traced
+
+        set_run(RunContext(run_id=rid, session_id="sess-z",
+                           run_type="live_ask"))
+
+        @traced("tool", "retrieve_legal_knowledge")
+        async def fake_tool(q):
+            return {"status": "success"}
+
+        await fake_tool("q")
+        await asyncio.sleep(0.3)
+
+        pool = await db.get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM stage_chain WHERE run_id=%s", (rid,))
+            assert (await cur.fetchone())[0] == 0
+        await db.close_pool()
+
+    asyncio.run(_run())
+
+
+def test_traced_no_run_context_function_still_runs():
+    """无 run 上下文(单测直调) → 函数正常执行, 拉链旁路不报错不写。"""
+    from lawApp_LangGraph.tracing import traced
+
+    calls = []
+
+    @traced("node", "planner")
+    async def fake_node(state):
+        calls.append(state)
+        return {"ok": True}
+
+    asyncio.run(fake_node({"x": 1}))
+    assert calls == [{"x": 1}]
+
+
+def test_pool_reuse_across_loops():
+    """多 asyncio.run(测试/脚本场景)下 get_pool 跨 loop 可用 —
+    锁随 loop 更换重建, 不再抛 bound-to-different-event-loop。"""
+    _skip_no_pg()
+
+    async def _run():
+        from lawApp_LangGraph import db
+
+        pool = await db.get_pool()
+        async with pool.connection() as conn:
+            await conn.execute("SELECT 1")
+        await db.close_pool()
+
+    asyncio.run(_run())
+    asyncio.run(_run())  # 第二个 loop: 修复前此处抛 RuntimeError

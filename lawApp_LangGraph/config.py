@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     incorrect_threshold: float = 0.2
     min_quality_docs: int = 3
 
+    # ============ 综合评分(D10, env SCORE_WEIGHTS 传 JSON 可覆盖) ============
+    # 分量: rag 检索质量/时延/token 成本/工具正确率/HITL 轮次/replan 轮次
+    score_weights: dict = {
+        "rag": 0.25,
+        "latency": 0.15,
+        "token": 0.15,
+        "tool": 0.25,
+        "hitl": 0.10,
+        "replan": 0.10,
+    }
+
     # ============ LLM ============
     deepseek_pro_model: str = "deepseek-reasoner"
     deepseek_flash_model: str = "deepseek-chat"

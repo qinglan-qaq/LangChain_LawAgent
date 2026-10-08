@@ -101,6 +101,7 @@ def test_metrics_aggregation():
         "node_count": 3, "tool_count": 1, "llm_count": 1,
         "total_latency_ms": 190, "token_prompt": 110,
         "token_completion": 55, "clarify_rounds": 2,
+        "replan_rounds": 0, "tool_error_count": 0,
     }
 
 

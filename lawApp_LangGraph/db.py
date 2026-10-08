@@ -34,7 +34,22 @@ logger = logging.getLogger("lawApp.db")
 
 _pool: Optional[AsyncConnectionPool] = None
 # M14: 池初始化竞态防护 —— 并发首调 get_pool 时防止两个协程各建一个池
-_pool_lock = asyncio.Lock()
+# 拉链修复: asyncio.Lock 会绑死首个 await 它的 loop, 测试/评测脚本的多
+# asyncio.run 场景下后续 loop 全部抛 "bound to a different event loop"
+# → 检测到 loop 更换时重建锁并废弃旧池(旧 loop 已死, 池不可复用)
+_pool_lock: asyncio.Lock = asyncio.Lock()
+_pool_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _rebind_lock_if_loop_changed() -> None:
+    global _pool_lock, _pool_lock_loop, _pool
+    loop = asyncio.get_running_loop()
+    if _pool_lock_loop is not loop:
+        if _pool is not None:
+            logger.debug("事件循环更换, 废弃旧循环上的连接池引用")
+        _pool_lock = asyncio.Lock()
+        _pool_lock_loop = loop
+        _pool = None
 
 
 def build_dsn() -> str:
@@ -54,6 +69,7 @@ def build_dsn() -> str:
 async def get_pool() -> AsyncConnectionPool:
     """获取全局连接池（懒加载, M14: 全程加锁防双建; 失败不缓存坏池）。"""
     global _pool
+    _rebind_lock_if_loop_changed()
     async with _pool_lock:
         if _pool is None or _pool.closed:
             # timeout=5: 池操作(取连接)挂死时快速失败, 对齐 runtime.py

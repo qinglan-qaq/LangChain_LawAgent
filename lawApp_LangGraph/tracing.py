@@ -52,6 +52,8 @@ class RunContext:
     final_answer: str = ""
     status: str = "ok"  # ok | error | interrupted | cancelled(M5 断开)
     spans: list[Span] = field(default_factory=list)
+    # 阶段拉链(Task2): 节点回环重跑计数 node_name → 已开行次数
+    node_seq: dict[str, int] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
 
     def add(self, span: Span) -> None:
@@ -74,6 +76,16 @@ class RunContext:
                 for s in self.spans
                 if s.span_type == "node" and s.name in ("ask_element", "mid_clarify")
             ),
+            # 监控扩展(D9): replan 回环轮数 / 工具错误数
+            "replan_rounds": sum(
+                1
+                for s in self.spans
+                if s.span_type == "node" and s.name == "replanner"
+            ),
+            "tool_error_count": sum(
+                1 for s in self.spans
+                if s.span_type == "tool" and s.status != "ok"
+            ),
         }
 
 
@@ -94,6 +106,62 @@ def _emit(span: Span) -> None:
     _ORPHAN_SPANS.append(span)
     if len(_ORPHAN_SPANS) > _ORPHAN_CAP:
         del _ORPHAN_SPANS[: len(_ORPHAN_SPANS) - _ORPHAN_CAP]
+
+
+def _zipper_on() -> bool:
+    """拉链写入门控(env STAGE_ZIPPER, 默认开; 单测经 conftest 关闭,
+    避免"纯 Python 无 PG"用例真实连库污染/拖慢)。"""
+    import os
+
+    return os.getenv("STAGE_ZIPPER", "1") != "0"
+
+
+def _fire_stage(coro) -> None:
+    """拉链落库 fire-and-forget(D5): 拿不到 running loop(单测直调)静默
+    跳过; 任务取消不算异常; 任务异常吞并记 WARNING(观测旁路)。"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(coro)
+
+    def _swallow(t):
+        if t.cancelled():  # run 收尾取消不进 exception()(会抛 CancelledError)
+            return
+        e = t.exception()
+        if e:
+            logger.warning("stage 拉链落库失败(旁路): %s", e)
+
+    task.add_done_callback(_swallow)
+
+
+def _rag_summary(output: Any) -> Optional[dict]:
+    """best-effort 检索摘要(D8): output 顶层含 rag_documents 列表时取
+    top_score/条数, 否则 None(不递归扫描, 拿不到就算了)。"""
+    if isinstance(output, dict):
+        docs = output.get("rag_documents")
+        if isinstance(docs, list) and docs:
+            scores = [
+                d.get("hybrid_score", 0) if isinstance(d, dict) else 0
+                for d in docs
+            ]
+            return {"rag_top_score": max(scores), "rag_count": len(docs)}
+    return None
+
+
+def _close_zipper(db, run, node_name: str, stage_seq, status: str,
+                  latency_ms: int, payload: Any) -> None:
+    """闭行收口: 异常 payload 记 repr 截断; 正常 payload 尝试 rag 摘要。"""
+    if stage_seq is None or run is None:
+        return
+    if status in ("error", "interrupted", "cancelled"):
+        detail = {"exception": repr(payload)[:300]}
+    else:
+        detail = _rag_summary(payload) or {}
+    _fire_stage(
+        db.close_stage(run.run_id, node_name, stage_seq, status,
+                       latency_ms, detail)
+    )
 
 
 def _pack(args: tuple, kwargs: dict) -> Any:
@@ -130,6 +198,8 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
 
             @functools.wraps(fn)
             async def awrapper(*args, **kwargs):
+                from lawApp_LangGraph import db  # 延迟导入避免环
+
                 t0 = time.perf_counter()
                 span = Span(
                     span_type=span_type,
@@ -137,6 +207,18 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                     input=_pack(args, kwargs),
                     started_at=time.time(),
                 )
+                # 拉链开行(Task2): 只 node 层, seq 按节点重跑递增;
+                # 门控 env STAGE_ZIPPER(默认开, 单测 conftest 关)
+                run = _current_run.get()
+                node_name = name or fn.__name__
+                stage_seq = None
+                if span_type == "node" and run is not None and _zipper_on():
+                    stage_seq = run.node_seq.get(node_name, 0) + 1
+                    run.node_seq[node_name] = stage_seq
+                    _fire_stage(
+                        db.open_stage(run.run_id, run.session_id,
+                                       node_name, stage_seq)
+                    )
                 try:
                     out = await fn(*args, **kwargs)
                 except BaseException as e:
@@ -144,23 +226,31 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                     # (客户端断开)不是 Exception, 旧实现不捕 → span 不落库;
                     # 取消类记 "cancelled", 记后原样 re-raise
                     span.status = (
-                        "interrupted" if _is_interrupt(e)
-                        else "cancelled" if _is_cancel(e)
+                        "interrupted"
+                        if _is_interrupt(e)
+                        else "cancelled"
+                        if _is_cancel(e)
                         else "error"
                     )
                     span.output = {"exception": repr(e)}
                     span.latency_ms = int((time.perf_counter() - t0) * 1000)
                     _emit(span)
+                    _close_zipper(db, run, node_name, stage_seq,
+                                  span.status, span.latency_ms, e)
                     raise
                 span.output = out
                 span.latency_ms = int((time.perf_counter() - t0) * 1000)
                 _emit(span)
+                _close_zipper(db, run, node_name, stage_seq,
+                              "ok", span.latency_ms, out)
                 return out
 
             return awrapper
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            from lawApp_LangGraph import db  # 延迟导入避免环
+
             t0 = time.perf_counter()
             span = Span(
                 span_type=span_type,
@@ -168,6 +258,19 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                 input=_pack(args, kwargs),
                 started_at=time.time(),
             )
+            # 拉链开行(Task2): sync 节点由图在事件循环线程内调用,
+            # _fire_stage 内 get_running_loop 拿得到; 图外直调则静默跳过;
+            # 门控 env STAGE_ZIPPER(默认开, 单测 conftest 关)
+            run = _current_run.get()
+            node_name = name or fn.__name__
+            stage_seq = None
+            if span_type == "node" and run is not None and _zipper_on():
+                stage_seq = run.node_seq.get(node_name, 0) + 1
+                run.node_seq[node_name] = stage_seq
+                _fire_stage(
+                    db.open_stage(run.run_id, run.session_id,
+                                   node_name, stage_seq)
+                )
             try:
                 out = fn(*args, **kwargs)
             except Exception as e:
@@ -175,10 +278,14 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                 span.output = {"exception": repr(e)}
                 span.latency_ms = int((time.perf_counter() - t0) * 1000)
                 _emit(span)
+                _close_zipper(db, run, node_name, stage_seq,
+                              span.status, span.latency_ms, e)
                 raise
             span.output = out
             span.latency_ms = int((time.perf_counter() - t0) * 1000)
             _emit(span)
+            _close_zipper(db, run, node_name, stage_seq,
+                          "ok", span.latency_ms, out)
             return out
 
         return wrapper
@@ -267,9 +374,37 @@ def _emit_llm_span(
 
 
 async def flush_run(run: RunContext) -> None:
-    """run + spans 统一落库;失败记 ERROR 放行(观测旁路, 决策 8)。"""
+    """run + spans 统一落库;失败记 ERROR 放行(观测旁路, 决策 8)。
+
+    收尾时补监控扩展键(D9/D10): limit_hit 触顶标志 / rag_top_score /
+    composite_score 综合分(权重 settings.score_weights)。
+    """
     try:
         from lawApp_LangGraph import db
+        from lawApp_LangGraph.config import settings
+        from lawApp_LangGraph.score import composite_score
+
+        metrics = run.metrics()
+        metrics["limit_hit"] = bool(
+            metrics.get("clarify_rounds", 0) >= settings.max_clarify_rounds
+            or metrics.get("replan_rounds", 0) >= settings.max_rounds
+            or metrics.get("node_count", 0) >= settings.recursion_limit
+        )
+        rag_scores = []
+        for s in run.spans:
+            if s.span_type == "tool" and isinstance(s.output, dict):
+                docs = s.output.get("rag_documents")
+                if isinstance(docs, list) and docs:
+                    rag_scores.extend(
+                        d.get("hybrid_score", 0)
+                        for d in docs
+                        if isinstance(d, dict)
+                    )
+        if rag_scores:
+            metrics["rag_top_score"] = max(rag_scores)
+        metrics["composite_score"] = composite_score(
+            metrics, settings.score_weights
+        )
 
         await db.insert_trace_run(
             run_id=run.run_id,
@@ -279,7 +414,7 @@ async def flush_run(run: RunContext) -> None:
             status=run.status,
             query=run.query,
             final_answer=run.final_answer,
-            metrics=run.metrics(),
+            metrics=metrics,
             started_at=run.started_at,
             ended_at=time.time(),
         )
