@@ -706,7 +706,203 @@ git commit -m "feat: 答辩状模板上线 — defense/fields.yaml+template.docx
 
 ---
 
-### Task 5: doc/pdf 双格式下载端点
+### Task 5: 复杂案情 → 起诉状/答辩状模板渲染端到端测试
+
+**Files:**
+- Test: `tests/test_doc_e2e_complex_case.py`(新建,纯测试任务)
+
+**Interfaces:**
+- Consumes: Task 4 的 defense 模板 + 既有 complaint 模板;`tests/test_docx_generation.py` 的 `_run_tool`/`_doc_text` 模式(本文件自带同款实现,前缀 `T-doc-e2e`)。
+- Produces: 复杂案情 fixture `CASE_TEXT`(自拟完整离婚案情,覆盖双当事人/结婚子女/房车存款/债务/抚养探望/损害赔偿/证据)+ 手工 ground truth 字段映射;为 Task 10 冒烟提供人工校对参照。
+
+- [ ] **Step 1: 写测试**(完整文件;渲染断言不依赖 LLM/PG,唯一可选用例 skipif 无 API key)
+
+```python
+"""复杂案情端到端 — 同一案情分别渲染起诉状/答辩状模板, 断言关键字段值/
+勾选状态/待补充归一; 可选用例走真实 flash LLM 抽取(无 key 自动跳过)。"""
+import json
+from pathlib import Path
+
+_DOCX_T_PREFIX = "T-doc-e2e"
+
+
+def _run_tool(fields, doc_type="complaint", filename=""):
+    import asyncio
+
+    from lawApp_LangGraph.tools.tools import generate_docx
+    return asyncio.run(generate_docx.ainvoke({
+        "fields_json": json.dumps(fields, ensure_ascii=False),
+        "doc_type": doc_type, "filename": filename}))
+
+
+def _doc_text(docx_path) -> str:
+    import docx
+    d = docx.Document(str(docx_path))
+    parts = [p.text for p in d.paragraphs]
+
+    def walk(table):
+        for row in table.rows:
+            for cell in row.cells:
+                parts.extend(p.text for p in cell.paragraphs)
+                for nested in cell.tables:
+                    walk(nested)
+
+    for t in d.tables:
+        walk(t)
+    return "\n".join(parts)
+
+
+# 自拟复杂完整案情(覆盖: 双方身份/婚姻/子女/房产汽车存款/债务/抚养费/探望/
+# 损害赔偿/管辖保全/证据; 部分字段故意留白验"待补充"归一)
+CASE_TEXT = (
+    "原告张三,男,1985年3月12日出生,汉族,户籍北京市朝阳区幸福路10号,现住北京市"
+    "海淀区中关村大街8号,联系电话13800000001,在北京华宇科技有限公司任工程师。"
+    "被告李四,女,1987年7月25日出生,汉族,户籍河北省石家庄市长安区中山路5号,"
+    "现住北京市海淀区中关村大街8号,联系电话13900000002。双方于2008年5月20日在"
+    "北京市朝阳区民政局登记结婚,2009年生育长子张小军,2014年生育次女张小丽。"
+    "自2019年起被告沉迷赌博屡教不改,双方经常争吵,2021年8月起原告搬至公司宿舍"
+    "与被告分居至今,夫妻感情确已破裂。婚姻期间购得北京市海淀区学府路1号房屋一套"
+    "(登记双方名下,市值约600万元),别克牌汽车一辆(登记被告名下),招商银行存款"
+    "约80万元(原告名下账户)。被告因赌博欠个人债务20万元。两子女出生后一直随"
+    "原告及原告父母共同生活,原告请求两子女均由其直接抚养,被告每月支付每名子女"
+    "抚养费3000元至年满十八周岁,被告每月可探望子女两次。因被告赌博存在重大过错,"
+    "原告请求离婚损害赔偿50000元。双方无仲裁或管辖约定,原告不申请财产保全。"
+    "证据: 结婚证、户口簿、分居证明、被告赌博聊天记录、银行流水。"
+)
+
+# 案情 → 起诉状 ground truth(手工对出; 未提供字段如民族留给"待补充"断言)
+COMPLAINT_FIELDS = {
+    "plaintiff_name": "张三", "plaintiff_gender": "男",
+    "plaintiff_birth_date": "1985年3月12日", "plaintiff_work": "北京华宇科技有限公司",
+    "plaintiff_duty": "工程师", "plaintiff_phone": "13800000001",
+    "plaintiff_domicile": "北京市朝阳区幸福路10号",
+    "plaintiff_residence": "北京市海淀区中关村大街8号",
+    "defendant_name": "李四", "defendant_gender": "女",
+    "defendant_birth_date": "1987年7月25日",
+    "defendant_domicile": "河北省石家庄市长安区中山路5号",
+    "defendant_residence": "北京市海淀区中关村大街8号",
+    "defendant_phone": "13900000002",
+    "claim_divorce": "因感情确已破裂, 请求判决解除婚姻关系",
+    "property_has": "有财产",
+    "property_house": "北京市海淀区学府路1号房屋一套(双方名下, 市值约600万元)",
+    "property_house_owner": "原告",
+    "property_car": "别克牌汽车一辆(被告名下)",
+    "property_car_owner": "被告",
+    "property_deposit": "招商银行存款约80万元",
+    "property_deposit_owner": "原告",
+    "debt_has": "有债务",
+    "debt1": "被告因赌博欠个人债务20万元",
+    "custody_has": "有此问题", "custody_child1": "原告",
+    "alimony_has": "有此问题", "alimony_payer": "被告",
+    "alimony_amount": "每名子女每月3000元至年满十八周岁",
+    "visit_has": "有此问题", "visit_subject": "被告",
+    "visit_method": "每月探望子女两次",
+    "compensation": "离婚损害赔偿", "comp_damage_amount": "50000元",
+    "fact_marriage_time": "2008年5月20日",
+    "fact_children": "2009年生长子张小军, 2014年生次女张小丽",
+    "fact_divorce_reason": "被告沉迷赌博屡教不改, 2021年8月分居至今",
+    "fact_basis": "民法典第一千零七十九条",
+    "evidence_list": "结婚证、户口簿、分居证明、赌博聊天记录、银行流水",
+    "signer": "张三", "sign_date": "2026年10月9日",
+}
+
+# 案情 → 答辩状 ground truth(答辩人=被告李四视角; 7 项态度中仅示意 1/2/4 项,
+# 其余缺省验勾选全 ☐ + 待补充归一)
+DEFENSE_FIELDS = {
+    "case_no": "(2026)京0108民初1234号", "case_cause": "离婚纠纷",
+    "respondent_name": "李四", "respondent_gender": "女",
+    "respondent_birth_date": "1987年7月25日",
+    "respondent_domicile": "河北省石家庄市长安区中山路5号",
+    "respondent_residence": "北京市海淀区中关村大街8号",
+    "resp_divorce": "异议", "resp_divorce_reason": "不同意离婚, 双方感情尚未破裂",
+    "resp_property": "异议",
+    "resp_property_reason": "房屋系双方共同财产, 请求依法分割",
+    "resp_custody": "异议", "resp_custody_reason": "子女随母亲生活更有利于成长",
+    "resp_basis": "民法典第一千零八十四条",
+    "evidence_list": "结婚证、户口簿",
+    "signer": "李四", "sign_date": "2026年10月9日",
+}
+
+
+def test_complex_case_complaint_render(tmp_path, monkeypatch):
+    """复杂案情 → 起诉状: 关键字段值/勾选/关键归一全部落产物。"""
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    r = _run_tool(COMPLAINT_FIELDS, doc_type="complaint", filename="起诉状_e2e.docx")
+    assert r["status"] == "success"
+    assert (tmp_path / "起诉状_e2e.docx").exists()
+    text = _doc_text(r["docx_path"])
+    # 当事人与事实主干
+    for needle in ("张三", "李四", "13800000001", "北京市海淀区学府路1号",
+                   "2008年5月20日", "张小军", "张小丽", "600万元", "3000元",
+                   "民法典第一千零七十九条", "赌博聊天记录"):
+        assert needle in text, f"起诉状缺关键内容: {needle}"
+    # 勾选状态(性别/财产/抚养/探望)
+    assert "☑男 ☐女" in text
+    assert "☐无财产" in text and "☑有财产" in text
+    assert "☑有此问题" in text
+    # 事实理由自由文本整段落进产物
+    assert "分居至今" in text
+    # 案情未给的字段 → 待补充归一(原告民族未提供)
+    assert "民族：待补充" in text or "待补充" in text
+
+
+def test_complex_case_defense_render(tmp_path, monkeypatch):
+    """复杂案情 → 答辩状: 答辩人视角字段/确认异议勾选/未答项 ☐ 全落产物。"""
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    r = _run_tool(DEFENSE_FIELDS, doc_type="defense", filename="答辩状_e2e.docx")
+    assert r["status"] == "success"
+    text = _doc_text(r["docx_path"])
+    for needle in ("李四", "离婚纠纷", "(2026)京0108民初1234号",
+                   "不同意离婚", "依法分割", "第一千零八十四条"):
+        assert needle in text, f"答辩状缺关键内容: {needle}"
+    # 1/2/4 项态度勾选: 异议/异议/异议
+    assert "☑异议" in text
+    # 未表态项(3 债务/5 抚养费/6 探望/7 赔偿)勾选全空
+    assert "☐确认" in text
+    # 性别勾选: 女
+    assert "☐男 ☑女" in text
+    # 答辩人未提供的单位/职务 → 待补充
+    assert "待补充" in text
+
+
+def test_extract_doc_fields_from_complex_case():
+    """可选端到端: 真实 flash LLM 从复杂案情抽起诉状字段(无 API key 跳过)。"""
+    import pytest
+
+    from lawApp_LangGraph.config import settings
+    if not settings.deepseek_api_key:
+        pytest.skip("无 DEEPSEEK_API_KEY, 跳过真实抽取端到端")
+    import asyncio
+    import types as _t
+
+    import lawApp_LangGraph.LangGraph_lawApp as app
+
+    st = _t.SimpleNamespace(
+        query=CASE_TEXT, user_supplements=[], case_elements=None, law_results=[],
+    )
+    fields = asyncio.run(app._extract_doc_fields(st, "complaint"))
+    assert fields["plaintiff_name"] == "张三"
+    assert fields["plaintiff_gender"] == "男"
+    assert fields["defendant_name"] == "李四"
+    assert fields["fact_marriage_time"].startswith("2008")
+    assert "赌博" in fields["fact_divorce_reason"]
+```
+
+- [ ] **Step 2: 跑测试**
+
+Run: `$PY -m pytest tests/test_doc_e2e_complex_case.py -v`
+Expected: 2 渲染用例 PASS(依赖 Task 4 defense 模板;勾选断言如与模板排版的空格宽窄不符,以 `_doc_text` 实际输出校准空格个数,不放松语义)。
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add tests/test_doc_e2e_complex_case.py
+git commit -m "test: 复杂案情端到端 — 同一案情渲染起诉状/答辩状双模板, 断言关键字段/勾选/待补充归一 + 可选真实 LLM 抽取用例"
+```
+
+---
+
+### Task 6: doc/pdf 双格式下载端点
 
 **Files:**
 - Modify: `lawApp_LangGraph/FastAPI/api.py:1080-1128`(改造 `session_docx_latest` 为共用实现 + 新端点)
@@ -715,7 +911,7 @@ git commit -m "feat: 答辩状模板上线 — defense/fields.yaml+template.docx
 
 **Interfaces:**
 - Consumes: 既有 `docx_generated` 事件 + `DOCX_OUTPUT_DIR` 白名单校验;`PDF_OUTPUT_DIR`(`tools/tools.py:192` 同款 env,默认 `./pdf_outputs`)。
-- Produces: `GET /sessions/{session_id}/doc/{format}`,format∈docx|pdf(非法 400);docx 分支返回 `.docx` MIME,pdf 分支 `application/pdf`。旧 `GET /sessions/{sid}/docx/latest` 保留(docx 别名)。Task 6 前端按钮 href 依赖 `/api/sessions/{sid}/doc/{format}`。
+- Produces: `GET /sessions/{session_id}/doc/{format}`,format∈docx|pdf(非法 400);docx 分支返回 `.docx` MIME,pdf 分支 `application/pdf`。旧 `GET /sessions/{sid}/docx/latest` 保留(docx 别名)。Task 7 前端按钮 href 依赖 `/api/sessions/{sid}/doc/{format}`。
 
 - [ ] **Step 1: 装依赖**
 
@@ -953,7 +1149,7 @@ git commit -m "feat: /sessions/{sid}/doc/{format} 双格式下载 — docx2pdf(W
 
 ---
 
-### Task 6: 前端 DocReadyModal(模态双下载,替换 toast)
+### Task 7: 前端 DocReadyModal(模态双下载,替换 toast)
 
 **Files:**
 - Create: `frontend/src/components/DocReadyModal.vue`
@@ -963,7 +1159,7 @@ git commit -m "feat: /sessions/{sid}/doc/{format} 双格式下载 — docx2pdf(W
 - Delete: `frontend/src/components/DocxDoneToast.vue`
 
 **Interfaces:**
-- Consumes: Task 5 的 `/api/sessions/{sid}/doc/{format}`;SSE `docx_done` 帧载荷 `{path: str}`。
+- Consumes: Task 6 的 `/api/sessions/{sid}/doc/{format}`;SSE `docx_done` 帧载荷 `{path: str}`。
 - Produces: `state.showDocReady: boolean`(resetTurn 复位);模态根 id `doc-ready-modal`,按钮 id `btn-download-docx-modal` / `btn-download-pdf-modal` / `btn-doc-ready-close`。
 
 - [ ] **Step 1: store.js**
@@ -1047,7 +1243,7 @@ git commit -m "feat: 文书完成改模态弹窗双格式下载 — DocReadyModa
 
 ---
 
-### Task 7: 案情长文折叠改模糊渐变
+### Task 8: 案情长文折叠改模糊渐变
 
 **Files:**
 - Modify: `frontend/src/components/ChatView.vue:80-92`(用户气泡折叠渲染)
@@ -1096,7 +1292,7 @@ git commit -m "feat: 用户气泡长文折叠改限高+mask 渐变隐没(替换�
 
 ---
 
-### Task 8: 监控页触顶列改运行时长列
+### Task 9: 监控页触顶列改运行时长列
 
 **Files:**
 - Modify: `frontend/src/views/MonitorView.vue:166-190`(表头+行)与 script 区(加 fmtDuration)
@@ -1143,7 +1339,7 @@ git commit -m "feat: 监控运行列表触顶列改运行时长列(total_latency
 
 ---
 
-### Task 9: 全量回归 + 浏览器冒烟
+### Task 10: 全量回归 + 浏览器冒烟
 
 **Files:** 无新文件(验证任务)。
 
@@ -1183,4 +1379,4 @@ git add -A && git commit -m "fix: 冒烟修复(按实际问题描述)"
 
 ## 附注: 执行顺序依赖
 
-Task 1 → 2 → 3 → 4(后端链,顺序执行);Task 5 依赖 3 无强依赖可并行但建议在 4 后(docx 事件格式不变);Task 6 依赖 5(URL);Task 7/8 独立;Task 9 收尾。前端三项(6/7/8)互相独立。
+Task 1 → 2 → 3 → 4 → 5(后端链, 顺序执行);Task 6(PDF 端点)在 4 后;Task 7(模态)依赖 6(URL);Task 8/9(折叠/监控)独立;Task 10 收尾。前端三项(7/8/9)互相独立。
