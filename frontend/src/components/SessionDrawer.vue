@@ -138,11 +138,12 @@ function goToFinal() {
                 <div v-if="r.ts" class="text-slate-300 text-[10px]">{{ r.ts }}</div>
               </div>
             </div>
-            <!-- 关键字段补全轮(field_clarify, rounds 时间线后追加): 问/答/跳过可见 -->
+            <!-- 关键字段补全轮(field_clarify, rounds 时间线后追加): 问/答/跳过可见;
+                 key 用数组索引 — 重放复问会产生同 round 不同问法的多条(dedupe 键为 round+question), round 不唯一 -->
             <div v-if="dialogue.field_rounds?.length" class="space-y-2 mt-2">
               <div
-                v-for="fr in dialogue.field_rounds"
-                :key="'f' + fr.round"
+                v-for="(fr, i) in dialogue.field_rounds"
+                :key="'f' + i"
                 class="border-l border-amber-200 pl-2 space-y-1"
               >
                 <div class="flex gap-1.5 flex-wrap items-baseline">
