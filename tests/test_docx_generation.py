@@ -257,6 +257,28 @@ def test_build_docx_template_reproducible(tmp_path):
     assert rebuilt == _document_xml().encode("utf-8")
 
 
+def test_build_docx_template_defense_reproducible(tmp_path):
+    """Task 4 deferred: defense 模板同款可复现断言 — 同源同 YAML 重建,
+    document.xml 与已提交 template.docx 逐字节一致。"""
+    import subprocess
+    import sys
+    ddir = TPL_DIR.parent / "defense"
+    out = tmp_path / "template.docx"
+    r = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "scripts" / "build_docx_template.py"),
+         "--src", str(ddir / "source.docx"),
+         "--yaml", str(ddir / "fields.yaml"),
+         "--out", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, r.stderr
+    with zipfile.ZipFile(out) as z:
+        rebuilt = z.read("word/document.xml")
+    with zipfile.ZipFile(ddir / "template.docx") as z:
+        committed = z.read("word/document.xml")
+    assert rebuilt == committed
+
+
 # ---- Task 3(通用化): doc_type 前缀映射 / 工具与 planner 文案 ----
 
 
