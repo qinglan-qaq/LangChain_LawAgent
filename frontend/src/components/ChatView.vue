@@ -116,6 +116,12 @@ function hitlTag(m) {
         :href="'/api/sessions/' + encodeURIComponent(state.sessionId) + '/docx/latest'"
         download
       >下载 Word 文书</a>
+      <a
+        id="btn-download-pdf"
+        class="inline-block px-4 py-1.5 rounded-lg bg-slate-700 text-white text-sm ml-2"
+        :href="'/api/sessions/' + encodeURIComponent(state.sessionId) + '/doc/pdf'"
+        download
+      >下载 PDF</a>
     </div>
   </div>
 </template>

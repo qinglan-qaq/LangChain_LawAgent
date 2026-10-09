@@ -13,7 +13,7 @@ import InterruptPanel from '../components/InterruptPanel.vue'
 import AgentStatusBar from '../components/AgentStatusBar.vue'
 import DocComposer from '../components/DocComposer.vue'
 import DocxGenModal from '../components/DocxGenModal.vue'
-import DocxDoneToast from '../components/DocxDoneToast.vue'
+import DocReadyModal from '../components/DocReadyModal.vue'
 import { PatternBackground } from '../components/inspira/pattern-background'
 import TypewriterText from '../components/inspira/TypewriterText.vue'
 
@@ -107,9 +107,9 @@ function handleStreamEvent(e, assistant) {
     sessionsTick.value++ // L11: 新会话建立后刷新会话列表
   } else if (e.event === 'tool_usage') state.value.toolUsage = e.data
   else if (e.event === 'docx_done') {
-    // docx 生成完成帧: 收生成中弹窗, 开左上角 toast(8s 自消), 记路径供终答区下载
+    // docx 生成完成帧: 收生成中弹窗, 开双格式下载模态, 记路径供终答区按钮
     state.value.docxGenerating = false
-    state.value.docxToast = true
+    state.value.showDocReady = true
     state.value.docxPath = (e.data && e.data.path) || ''
   } else if (e.event === 'error') {
     state.value.docxGenerating = false // 出错关生成中弹窗(避免永久遮罩)
@@ -283,7 +283,7 @@ async function restoreInterruptFromServer(sid) {
       </header>
       <DisclaimerToast />
       <DocxGenModal />
-      <DocxDoneToast />
+      <DocReadyModal />
       <main class="flex-1 overflow-y-auto p-4">
         <!-- 对话列限宽居中(需求5): 视线动线集中, 状态栏/输入区同宽呼应 -->
         <div class="chat-column max-w-3xl mx-auto w-full">

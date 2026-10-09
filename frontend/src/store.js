@@ -26,7 +26,7 @@ export const state = ref({
   caseQuery: false,          // 本轮是否案件问询(elements 事件 payload.is_case_query, chitchat 为 false → 面板隐藏)
   interrupt: null,           // 当前 HITL 载荷
   docxGenerating: false,     // docx 确认后渲染中(全局弹窗)
-  docxToast: false,          // docx 完成通知(左上角, 自管 8s 消失)
+  showDocReady: false,      // docx 完成模态弹窗(双格式下载, 用户手动关)
   docxPath: '',              // 本轮生成的文书路径(终答区下载按钮显隐)
   busy: false,
   error: '',
@@ -62,7 +62,7 @@ export function resetTurn() {
     planText: '', status: '', toolUsage: {},
     tools: [], steps: [], promptsLog: '',
     elements: [], caseQuery: false, interrupt: null, error: '',
-    docxGenerating: false, docxToast: false, docxPath: '',
+    docxGenerating: false, showDocReady: false, docxPath: '',
   })
 }
 
