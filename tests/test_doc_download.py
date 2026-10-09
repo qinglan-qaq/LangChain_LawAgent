@@ -204,3 +204,61 @@ def test_doc_format_invalid_400(tmp_path, monkeypatch):
         r = client.get(f"/sessions/AT-20990101-000000-999/doc/exe")
         assert r.status_code == 400
         assert r.json()["detail"] == "invalid_format"
+
+
+# ---- Fix round 1: 失败残留清理 + 超时分支消息 ----
+
+
+def test_pdf_failure_cleans_partial_then_retry(tmp_path, monkeypatch):
+    """转换中途抛错时半成品 pdf 必须被清理 — 否则其新 mtime 会命中缓存,
+    后续请求 200 返回坏文件; 清理后重试走真实转换(直调 _docx_to_pdf, 无 PG 依赖)。"""
+    import pytest
+    from fastapi import HTTPException
+
+    pdf_dir = tmp_path / "pdfs"
+    monkeypatch.setenv("PDF_OUTPUT_DIR", str(pdf_dir))
+    f = tmp_path / "起诉状_test.docx"
+    f.write_bytes(b"PK\x03\x04fake-docx-payload")
+    calls = {"n": 0}
+
+    def _partial_then_boom(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            Path(dst).write_bytes(b"%PDF-partial-broken")
+            raise RuntimeError("COM unavailable")
+        Path(dst).write_bytes(b"%PDF-ok")
+
+    import lawApp_LangGraph.FastAPI.api as api
+    monkeypatch.setattr(api, "_convert_docx_pdf", _partial_then_boom)
+
+    pdf = pdf_dir / "起诉状_test.pdf"
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api._docx_to_pdf(str(f)))
+    assert ei.value.status_code == 502
+    assert "Word" in ei.value.detail
+    assert not pdf.exists(), "半成品 pdf 必须清理, 不得残留污染 mtime 缓存"
+
+    out = asyncio.run(api._docx_to_pdf(str(f)))
+    assert out == str(pdf)
+    assert pdf.read_bytes() == b"%PDF-ok", "重试不得返回半成品内容"
+    assert calls["n"] == 2, "清理后缓存未命中, 应重新转换"
+
+
+def test_pdf_timeout_detail_message(tmp_path, monkeypatch):
+    """超时分支 → detail 'PDF 转换超时(30s)', 不误报缺 Word(直调, 无 PG 依赖)。"""
+    import pytest
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("PDF_OUTPUT_DIR", str(tmp_path / "pdfs"))
+    f = tmp_path / "起诉状_test.docx"
+    f.write_bytes(b"PK\x03\x04fake-docx-payload")
+
+    def _slow(src, dst):
+        raise TimeoutError()
+
+    import lawApp_LangGraph.FastAPI.api as api
+    monkeypatch.setattr(api, "_convert_docx_pdf", _slow)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api._docx_to_pdf(str(f)))
+    assert ei.value.status_code == 502
+    assert ei.value.detail == "PDF 转换超时(30s)"

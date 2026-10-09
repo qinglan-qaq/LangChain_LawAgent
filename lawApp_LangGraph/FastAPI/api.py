@@ -1127,6 +1127,15 @@ def _convert_docx_pdf(docx_path: str, pdf_path: str) -> None:
     convert(docx_path, pdf_path)
 
 
+def _remove_partial_pdf(pdf_path: str) -> None:
+    """转换中断的半成品 pdf 若残留在盘上, 会以新 mtime 命中缓存被当有效文件返回, 必须删除;
+    清理尽力而为且绝不抛错 — 不得吞掉/掩盖原始转换异常。"""
+    try:
+        os.remove(pdf_path)
+    except OSError:
+        pass
+
+
 async def _docx_to_pdf(docx_path: str) -> str:
     """docx → pdf(Word COM, 30s 超时); 输出 PDF_OUTPUT_DIR 同名 .pdf, mtime 缓存。"""
     pdf_dir = os.path.abspath(os.getenv("PDF_OUTPUT_DIR", "./pdf_outputs"))
@@ -1138,7 +1147,11 @@ async def _docx_to_pdf(docx_path: str) -> str:
         await asyncio.wait_for(
             asyncio.to_thread(_convert_docx_pdf, docx_path, pdf_path), timeout=30
         )
+    except TimeoutError:
+        _remove_partial_pdf(pdf_path)
+        raise HTTPException(status_code=502, detail="PDF 转换超时(30s)")
     except Exception as e:
+        _remove_partial_pdf(pdf_path)
         raise HTTPException(
             status_code=502, detail=f"PDF 转换失败(需本机安装 Microsoft Word): {e}"
         )
