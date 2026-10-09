@@ -1129,7 +1129,7 @@ def _step_summaries(state: AgentState) -> dict[str, str]:
     rag_summary = "暂无"
     if state.rag_documents:
         rag_summary = " | ".join(
-            f"[{d.hybrid_score:.2f}] {d.chunk_text[:100]}..."
+            f"[{d.hybrid_score:.2f}] {d.chunk_text}"
             for d in state.rag_documents[:3]
         )
     eval_summary = "未评估"
@@ -1153,12 +1153,12 @@ def _step_summaries(state: AgentState) -> dict[str, str]:
                 if isinstance(item, dict)
                 else getattr(item, "snippet", "")
             )
-            parts.append(f"[{title}] {snippet[:80]}...")
+            parts.append(f"[{title}] {snippet}")
         web_summary = " | ".join(parts)
     law_summary = "暂无"
     if state.law_results:
         law_summary = " | ".join(
-            f"[{law.law_title}] 第{law.article_number}条 {law.content[:80]}..."
+            f"[{law.law_title}] 第{law.article_number}条 {law.content}"
             for law in state.law_results[:5]
         )
     return {
@@ -1201,7 +1201,7 @@ async def _extract_doc_fields(
     basis_label = "答辩的依据" if doc_type == "defense" else "诉请依据"
     qa_block = f"\n\n【补充问答】\n{extra_qa}" if extra_qa else ""
     laws_digest = "\n".join(
-        f"{l.law_title} {l.article_number}: {l.content[:80]}"
+        f"{l.law_title} {l.article_number}: {l.content}"
         for l in (state.law_results or [])[:5]
     )
     # 字段清单块: json_mode 不带 schema, 模型无从得知键名——不列清单会返回
@@ -1880,7 +1880,7 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
     await _publish_node_status(config, "mid_clarify")
     top_docs = (
         "\n".join(
-            f"- [{d.case_number}] {d.chunk_text[:120]}..."
+            f"- [{d.case_number}] {d.chunk_text}"
             for d in state.rag_documents[:5]
         )
         or "(检索为空)"
@@ -2114,13 +2114,13 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         )
         laws_digest = (
             "\n".join(
-                f"{l.law_title} {l.article_number}: {l.content[:80]}"
+                f"{l.law_title} {l.article_number}: {l.content}"
                 for l in (state.law_results or [])[:5]
             )
             or "无"
         )
         cases_digest = (
-            "\n".join(d.chunk_text[:100] for d in (state.rag_documents or [])[:3])
+            "\n".join(d.chunk_text for d in (state.rag_documents or [])[:3])
             or "无"
         )
         chain = PromptTemplate.from_template(template) | get_executor_llm()
@@ -2157,7 +2157,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         return out
 
     if state.rag_documents:
-        docs = "\n".join(f"- {d.chunk_text[:300]}" for d in state.rag_documents[:3])
+        docs = "\n".join(f"- {d.chunk_text}" for d in state.rag_documents[:3])
         chain = FINALIZE_CASE_PROMPT | get_executor_llm()
         parts: list[str] = []
         async for chunk in chain.astream(

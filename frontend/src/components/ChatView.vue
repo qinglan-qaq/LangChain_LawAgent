@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
-import { state, useTypewriter } from '../store'
+import { state, useTypewriter, COLLAPSE_LEN } from '../store'
 import MarkdownView from './MarkdownView.vue'
 import MessageThinking from './MessageThinking.vue'
 
@@ -96,11 +96,29 @@ function hitlTag(m) {
               {{ m.expanded ? '收起' : '展开全文' }}
             </button>
           </template>
-          <!-- assistant 消息: 流式期打字机原文 + 光标; done 后 md 渲染最终结果 -->
+          <!-- assistant 消息: 流式期打字机原文 + 光标; done 后 md 渲染最终结果。
+               超长回答同用户气泡模糊折叠(限高+底部渐变, 阈值同 COLLAPSE_LEN), 点击展开 -->
           <template v-else>
             <span v-if="m === lastAssistant && !m.done" class="whitespace-pre-wrap">{{ shown }}</span>
+            <div
+              v-else-if="m.text.length > COLLAPSE_LEN && !m.expanded"
+              class="result-llm-collapsed relative max-h-24 overflow-hidden"
+              :style="{
+                '-webkit-mask-image': 'linear-gradient(to bottom, black 55%, transparent 100%)',
+                'mask-image': 'linear-gradient(to bottom, black 55%, transparent 100%)',
+              }"
+            >
+              <MarkdownView :text="m.text" />
+            </div>
             <MarkdownView v-else :text="m.text" />
             <span v-if="m === lastAssistant && !m.done" class="animate-pulse">▍</span>
+            <button
+              v-if="m.done && m.text.length > COLLAPSE_LEN"
+              class="block mt-1 text-xs underline opacity-70"
+              @click="m.expanded = !m.expanded"
+            >
+              {{ m.expanded ? '收起' : '展开全文' }}
+            </button>
           </template>
         </div>
       </div>

@@ -178,3 +178,21 @@ def test_record_llm_span_manual_path():
     m = run.metrics()
     assert m["llm_count"] == 1
     assert m["token_prompt"] == 100 and m["token_completion"] == 50
+
+
+def test_msg_text_role_mapping_and_passthrough():
+    """llm span input 精简: BaseMessage→{role, content} 且 role 用 API 侧
+    命名(human→user/ai→assistant), 内部字段不落; 非 message 对象透传。"""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    from lawApp_LangGraph.tracing import _msg_text
+
+    assert _msg_text(SystemMessage("系统")) == {"role": "system", "content": "系统"}
+    assert _msg_text(HumanMessage("问")) == {"role": "user", "content": "问"}
+    assert _msg_text(AIMessage("答")) == {"role": "assistant", "content": "答"}
+    # langchain 内部字段(id/additional_kwargs)不落
+    out = _msg_text(HumanMessage("问", additional_kwargs={"k": 1}))
+    assert set(out.keys()) == {"role", "content"}
+    # 非 message 对象原样透传(兼容 str 替身 / planner 裸流纯字符串)
+    assert _msg_text("prompt 文本") == "prompt 文本"
+    assert _msg_text({"role": "user", "content": "x"}) == {"role": "user", "content": "x"}

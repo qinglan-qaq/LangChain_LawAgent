@@ -264,7 +264,7 @@ async def fetch_laws(query: str, top_k: int = 5) -> dict:
             law_title=r[0],
             chapter=r[1] or "",
             article_number=r[2],
-            content=(r[3] or "")[:600],
+            content=r[3] or "",
         )
         for r in rows
     ]

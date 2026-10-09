@@ -302,11 +302,21 @@ async def record_feedback(
 #  P1 观测层落库助手(trace_runs / trace_spans, 规格 2026-09-20-eval-monitoring-spec.md)
 
 
+def _json_default(o: Any) -> Any:
+    """观测层解包: pydantic 模型 → model_dump dict(监控页 JsonTree 分层
+    渲染的前提, 字符串化会把整条变 repr); 其余未知类型 str 兜住不抛。"""
+    from pydantic import BaseModel
+
+    if isinstance(o, BaseModel):
+        return o.model_dump(exclude_none=True)
+    return str(o)
+
+
 def _trace_json(value: Any) -> "Json":
-    """JSONB 包装: 非 JSON 原生类型(state 含 Pydantic 模型等)用 default=str 兜住, 全文不截断。"""
+    """JSONB 包装: 非 JSON 原生类型经 _json_default 解包/兜底, 全文不截断。"""
     from psycopg.types.json import Json
 
-    return Json(value, dumps=lambda o: json.dumps(o, default=str, ensure_ascii=False))
+    return Json(value, dumps=lambda o: json.dumps(o, default=_json_default, ensure_ascii=False))
 
 
 async def insert_trace_run(

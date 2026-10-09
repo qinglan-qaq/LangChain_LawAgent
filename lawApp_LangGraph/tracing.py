@@ -307,9 +307,14 @@ def attach_state(node_names: list[str], values: dict) -> None:
 
 
 def _msg_text(m: Any) -> Any:
-    content = getattr(m, "content", m)
+    """llm span input 精简: BaseMessage → {role, content} 纯 dict。
+    role 用 API 侧命名(human→user/ai→assistant), langchain 内部字段
+    (id/additional_kwargs 等)不落; 非 message 对象原样透传(兼容 str 替身)。"""
     role = getattr(m, "type", None)
-    return {"role": role, "content": content} if role is not None else content
+    if role is None:
+        return getattr(m, "content", m)
+    api_role = {"human": "user", "ai": "assistant"}.get(role, role)
+    return {"role": api_role, "content": getattr(m, "content", None)}
 
 
 def _gen_message(result: Any) -> Any:

@@ -283,3 +283,59 @@ def test_elements_sse_payload_has_case_flag():
     src = inspect.getsource(api)
     assert src.count("is_case_query") >= 2, "两处发射点(sync generator + out_q)均需带标记"
     assert '!= "chitchat"' in src, "标记须由 question_category 派生"
+
+
+# ── 监控双视图 A1: 摘要逐条字符截断全去除(全文进 prompt, 条数上限保留) ──
+
+
+def test_step_summaries_pass_full_text():
+    """_step_summaries 摘要不再逐条截断: 法条/检索 chunk/web 摘要
+    全文进入; 条数上限(law×5 / rag×3 / web×3)保留。"""
+    from lawApp_LangGraph.LangGraph_lawApp import _step_summaries
+    from lawApp_LangGraph.state import LawsResult, RetrievedDocument
+
+    long_law = "法" * 300
+    long_chunk = "案" * 300
+    long_snippet = "网" * 300
+    state = _state(
+        law_results=[
+            LawsResult(law_title=f"法律{i}", article_number=str(i), content=long_law)
+            for i in range(8)
+        ],
+        rag_documents=[
+            RetrievedDocument(case_number=f"case-{i}", chunk_text=long_chunk)
+            for i in range(6)
+        ],
+        web_search_results=[
+            {"title": f"t{i}", "snippet": long_snippet} for i in range(5)
+        ],
+    )
+    s = _step_summaries(state)
+    # 全文进入, 无截断省略号
+    assert long_law in s["law_summary"] and "..." not in s["law_summary"]
+    assert long_chunk in s["rag_summary"]
+    assert long_snippet in s["web_summary"]
+    # 条数上限保留
+    assert s["law_summary"].count("[法律") == 5
+    assert s["rag_summary"].count("[0.") + s["rag_summary"].count("]") >= 3
+    assert s["web_summary"].count("[t") == 3
+
+
+def test_prompt_assembly_has_no_per_item_truncation():
+    """A1 回归: prompt 组装层逐条字符截断全删 — 源码扫描
+    (检索类字段 content/chunk_text/snippet 的切片与 fetch_laws 的
+    源头 [:600] 均不得残留); query 整问护栏/日志截断不在本列。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    app_src = (root / "lawApp_LangGraph" / "LangGraph_lawApp.py").read_text(
+        encoding="utf-8"
+    )
+    tools_src = (root / "lawApp_LangGraph" / "tools" / "db_tools.py").read_text(
+        encoding="utf-8"
+    )
+    for frag in (
+        "chunk_text[:", "law.content[:", "l.content[:", "snippet[:",
+    ):
+        assert frag not in app_src, f"摘要逐条截断残留: {frag}"
+    assert '(r[3] or "")[:' not in tools_src, "fetch_laws 源头 600 字截断残留"
