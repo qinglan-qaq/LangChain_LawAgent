@@ -245,7 +245,7 @@ def test_pdf_failure_cleans_partial_then_retry(tmp_path, monkeypatch):
 
 
 def test_pdf_timeout_detail_message(tmp_path, monkeypatch):
-    """超时分支 → detail 'PDF 转换超时(30s)', 不误报缺 Word(直调, 无 PG 依赖)。"""
+    """超时分支 → detail 'PDF 转换超时({PDF_CONVERT_TIMEOUT_S}s)', 不误报缺 Word(直调, 无 PG 依赖)。"""
     import pytest
     from fastapi import HTTPException
 
@@ -261,4 +261,4 @@ def test_pdf_timeout_detail_message(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(api._docx_to_pdf(str(f)))
     assert ei.value.status_code == 502
-    assert ei.value.detail == "PDF 转换超时(30s)"
+    assert ei.value.detail == f"PDF 转换超时({api.PDF_CONVERT_TIMEOUT_S}s)"

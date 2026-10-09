@@ -459,9 +459,10 @@ async def get_session_dialogue(sid: str):
     """会话级对话历史(方案c: JSON 事件流聚合)。
 
     契约(前端并行开发依赖, 不得偏离):
-        {"session_id", "rounds": [...], "confirms": [...], "final": {...}|None}
-    空态(rounds/confirms 空列表、final=None)与 PG 掉线均返回 200 空结构
-    (对齐 GET /sessions 降级先例, 前端好处理); 非法 sid → 400。
+        {"session_id", "rounds": [...], "field_rounds": [...], "confirms": [...],
+        "final": {...}|None, "docx": {...}|None}
+    空态(rounds/field_rounds/confirms 空列表、final/docx=None)与 PG 掉线均返回
+    200 空结构(对齐 GET /sessions 降级先例, 前端好处理); 非法 sid → 400。
     """
     from lawApp_LangGraph import dialogue_log
     from lawApp_LangGraph.FastAPI.utils import (
@@ -486,6 +487,7 @@ async def get_session_dialogue(sid: str):
         return {
             "session_id": sid,
             "rounds": [],
+            "field_rounds": [],
             "confirms": [],
             "final": None,
             "docx": None,
@@ -1127,6 +1129,11 @@ def _convert_docx_pdf(docx_path: str, pdf_path: str) -> None:
     convert(docx_path, pdf_path)
 
 
+# 转换超时(秒): 冷启动 Word(COM 拉起 Word 进程+打开文档)实测可超 30s,
+# 冒烟首发下载 502 即此; 预热后单次转换秒级。取 90s 兼顾冷启与失败暴露。
+PDF_CONVERT_TIMEOUT_S = 90
+
+
 def _remove_partial_pdf(pdf_path: str) -> None:
     """转换中断的半成品 pdf 若残留在盘上, 会以新 mtime 命中缓存被当有效文件返回, 必须删除;
     清理尽力而为且绝不抛错 — 不得吞掉/掩盖原始转换异常。"""
@@ -1137,7 +1144,7 @@ def _remove_partial_pdf(pdf_path: str) -> None:
 
 
 async def _docx_to_pdf(docx_path: str) -> str:
-    """docx → pdf(Word COM, 30s 超时); 输出 PDF_OUTPUT_DIR 同名 .pdf, mtime 缓存。"""
+    """docx → pdf(Word COM, PDF_CONVERT_TIMEOUT_S 超时); 输出 PDF_OUTPUT_DIR 同名 .pdf, mtime 缓存。"""
     pdf_dir = os.path.abspath(os.getenv("PDF_OUTPUT_DIR", "./pdf_outputs"))
     os.makedirs(pdf_dir, exist_ok=True)
     pdf_path = os.path.join(pdf_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
@@ -1145,11 +1152,14 @@ async def _docx_to_pdf(docx_path: str) -> str:
         return pdf_path
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(_convert_docx_pdf, docx_path, pdf_path), timeout=30
+            asyncio.to_thread(_convert_docx_pdf, docx_path, pdf_path),
+            timeout=PDF_CONVERT_TIMEOUT_S,
         )
     except TimeoutError:
         _remove_partial_pdf(pdf_path)
-        raise HTTPException(status_code=502, detail="PDF 转换超时(30s)")
+        raise HTTPException(
+            status_code=502, detail=f"PDF 转换超时({PDF_CONVERT_TIMEOUT_S}s)"
+        )
     except Exception as e:
         _remove_partial_pdf(pdf_path)
         raise HTTPException(
