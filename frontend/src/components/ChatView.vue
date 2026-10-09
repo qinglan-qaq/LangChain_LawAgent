@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
-import { state, useTypewriter, COLLAPSE_LEN } from '../store'
+import { state, useTypewriter } from '../store'
 import MarkdownView from './MarkdownView.vue'
 import MessageThinking from './MessageThinking.vue'
 
@@ -77,11 +77,17 @@ function hitlTag(m) {
             </div>
             <span class="whitespace-pre-wrap">{{ m.text }}</span>
           </template>
-          <!-- 用户消息: 超长默认折叠, 点击展开(用户决策「提问可折叠」) -->
+          <!-- 用户消息: 超长默认折叠(限高+底部渐变隐没, 不做硬截断), 点击展开; 阈值由 ChatPage submit 按 COLLAPSE_LEN 决定 -->
           <template v-else-if="m.role === 'user'">
-            <span class="whitespace-pre-wrap">{{
-              m.collapsed && !m.expanded ? m.text.slice(0, COLLAPSE_LEN) + '…' : m.text
-            }}</span>
+            <span
+              v-if="m.collapsed && !m.expanded"
+              class="user-msg-collapsed relative block max-h-24 overflow-hidden whitespace-pre-wrap"
+              :style="{
+                '-webkit-mask-image': 'linear-gradient(to bottom, black 55%, transparent 100%)',
+                'mask-image': 'linear-gradient(to bottom, black 55%, transparent 100%)',
+              }"
+            >{{ m.text }}</span>
+            <span v-else class="whitespace-pre-wrap">{{ m.text }}</span>
             <button
               v-if="m.collapsed"
               class="block mt-1 text-xs underline opacity-70"
