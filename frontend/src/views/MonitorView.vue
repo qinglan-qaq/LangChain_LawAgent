@@ -89,6 +89,13 @@ function scoreCls(s) {
   return s >= 80 ? 'text-emerald-600' : s >= 60 ? 'text-amber-600' : 'text-red-500'
 }
 
+// 运行时长格式化: <60s 显秒, 否则显分钟(1 位小数); 缺失 → null(模板显 —)
+function fmtDuration(ms) {
+  if (ms == null || isNaN(ms) || ms < 0) return null
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`
+  return `${(ms / 60000).toFixed(1)}m`
+}
+
 onMounted(refresh)
 onUnmounted(() => timer.value && clearInterval(timer.value))
 </script>
@@ -163,7 +170,7 @@ onUnmounted(() => timer.value && clearInterval(timer.value))
       <table id="monitor-runs-table" class="monitor-runs-table w-full text-xs" v-if="runs.length">
         <thead id="monitor-runs-thead" class="text-slate-400 text-left">
           <tr><th class="py-1">开始时间</th><th>run_id</th><th>会话</th><th>模式</th>
-              <th>状态</th><th>阶段(ok/总)</th><th>综合分</th><th>触顶</th></tr>
+              <th>状态</th><th>阶段(ok/总)</th><th>综合分</th><th>运行时长</th></tr>
         </thead>
         <tbody class="text-slate-600">
           <tr v-for="r in runs" :key="r.run_id" :id="`monitor-run-row-${r.run_id}`"
@@ -186,8 +193,9 @@ onUnmounted(() => timer.value && clearInterval(timer.value))
             <td :class="scoreCls(r.metrics?.composite_score)">
               {{ r.metrics?.composite_score ?? '—' }}
             </td>
-            <td :class="r.metrics?.limit_hit ? 'text-red-500' : 'text-slate-400'">
-              {{ r.metrics?.limit_hit ? '是' : '—' }}
+            <td :class="r.metrics?.limit_hit ? 'text-red-500' : 'text-slate-400'"
+                :title="r.metrics?.limit_hit ? '触顶运行' : ''">
+              {{ fmtDuration(r.metrics?.total_latency_ms) ?? '—' }}
             </td>
           </tr>
         </tbody>
