@@ -201,7 +201,7 @@ async def normalize_resume(
     Args:
         interrupt_type: interrupt 载荷的 type 标签,取值为
             risk_confirm / pdf_confirm / docx_confirm / degrade_confirm /
-            budget_confirm / clarify / mid_clarify。
+            budget_confirm / clarify / mid_clarify / field_clarify。
         answer: 用户的原始回复文本(可能为空)。
         request_text: interrupt 载荷的确认文案/问题文本,语义判断的上下文。
 
@@ -212,7 +212,7 @@ async def normalize_resume(
             其余自由文本走 semantic_confirm(同意继续=retry,否则=abort);
         budget_confirm: 空回复或纯收尾指令词返回 "finish",
             其余自由文本走 semantic_confirm(同意继续=原文透传,否则=finish);
-        clarify / mid_clarify: 原文透传(空=跳过)。
+        clarify / mid_clarify / field_clarify: 原文透传(空=跳过)。
     """
     from lawApp_LangGraph.LangGraph_lawApp import semantic_confirm
 
@@ -252,7 +252,7 @@ async def normalize_resume(
         proceed = await semantic_confirm(request_text or "补充信息确认", ans)
         return ans if proceed else "finish"
 
-    # clarify / mid_clarify: 原文透传
+    # clarify / mid_clarify / field_clarify: 原文透传
     return ans
 
 

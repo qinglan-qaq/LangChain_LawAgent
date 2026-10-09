@@ -1164,7 +1164,9 @@ def _step_summaries(state: AgentState) -> dict[str, str]:
     }
 
 
-async def _extract_doc_fields(state: "AgentState", doc_type: str) -> dict:
+async def _extract_doc_fields(
+    state: "AgentState", doc_type: str, extra_qa: str = ""
+) -> dict:
     """flash LLM 按模板字段结构化抽取: 输入案情+问诊+法条, 输出 key→值/选项。
 
     模板字段全集进 schema(含 _merge_into 附带 13 项, spec §3); 不可判定
@@ -1174,27 +1176,33 @@ async def _extract_doc_fields(state: "AgentState", doc_type: str) -> dict:
         state (AgentState): 图状态, 读取 query/user_supplements/case_elements/
             law_results 组装抽取上下文。
         doc_type (str): 模板目录名(本期 complaint)。
+        extra_qa (str): field_clarify 补全问答原文(问/答逐行), 进 prompt
+            【补充问答】块; 空=首轮抽取无补答上下文。
 
     Returns:
         dict: 字段 key → 抽取值(文本或 choice 选项, 空串=未抽取到)。
     """
     from pydantic import create_model
 
-    from lawApp_LangGraph.doc_templates import load_fields
+    from lawApp_LangGraph.doc_templates import doc_label, load_fields
 
     fields_defs = load_fields(doc_type)
     # 模板字段全集动态 schema(74 项, 含 _merge_into 附带字段)
     anns = {fd["key"]: (str, "") for fd in fields_defs}
     schema = create_model("DocFields", **anns)
 
+    # 文书名取模板全称(doc_label); "依据"字段按模板说法(complaint=诉请依据)
+    doc_name = doc_label(doc_type)
+    basis_label = "答辩的依据" if doc_type == "defense" else "诉请依据"
+    qa_block = f"\n\n【补充问答】\n{extra_qa}" if extra_qa else ""
     laws_digest = "\n".join(
         f"{l.law_title} {l.article_number}: {l.content[:80]}"
         for l in (state.law_results or [])[:5]
     )
-    prompt = f"""你是资深婚姻家事律师助理。从下列案情中为《民事起诉状》抽取字段值。
+    prompt = f"""你是资深婚姻家事律师助理。从下列案情中为《{doc_name}》抽取字段值。
 规则: 只依据案情文本; 案情未提及的字段返回空字符串; choice 类字段必须取给定选项之一或空串。
 可选选项参照(常见): 性别[男,女]; 有无财产[无财产,有财产]; 抚养归属[原告,被告]; 代理权限[一般授权,特别授权]。
-"诉请依据"字段: 引用法条原文标题与条号(可参考下方检索到的法条)。
+"{basis_label}"字段: 引用法条原文标题与条号(可参考下方检索到的法条)。
 
 【案情】
 {_query_with_supplements(state, 4000)}
@@ -1203,7 +1211,7 @@ async def _extract_doc_fields(state: "AgentState", doc_type: str) -> dict:
 {state.case_elements.digest()}
 
 【检索法条】
-{laws_digest or '无'}
+{laws_digest or '无'}{qa_block}
 """
     # flash 结构化输出链(_structured 内部对真实 ChatOpenAI 走 method="json_mode")
     result = await _structured(schema).ainvoke([SystemMessage(content=prompt)])
@@ -1292,6 +1300,8 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
 
     # HITL-4: docx 生成前确认(镜像 pdf_confirm; 先抽取字段供预览, 确认后参数直注)
     confirmed_fields = state.doc_fields or {}
+    # field_clarify 补全轮累计(resume 重放/直调分支共用; 确认后落 state)
+    qa_log: list = []
     if step.tool_name == "generate_docx" and not state.docx_confirmed:
         from lawApp_LangGraph.doc_templates import load_fields
 
@@ -1319,22 +1329,69 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
                     "messages": [AIMessage(content="")], "docx_confirmed": True}
 
         fields_defs = {fd["key"]: fd for fd in load_fields(doc_type)}
-        preview, critical_missing = [], []
-        for k, v in doc_fields.items():
-            fd = fields_defs.get(k, {})
-            val = str(v or "").strip()
-            if val:
-                preview.append({"key": k, "label": fd.get("label", k), "value": val,
-                                "critical": bool(fd.get("critical")), "status": "filled"})
-            else:
-                preview.append({"key": k, "label": fd.get("label", k), "value": "待补充",
-                                "critical": bool(fd.get("critical")), "status": "pending"})
-                if fd.get("critical"):
-                    critical_missing.append(fd.get("label", k))
+
+        def _preview_and_missing(fields: dict):
+            preview, crit = [], []
+            for k, v in fields.items():
+                fd = fields_defs.get(k, {})
+                val = str(v or "").strip()
+                if val:
+                    preview.append({"key": k, "label": fd.get("label", k), "value": val,
+                                    "critical": bool(fd.get("critical")), "status": "filled"})
+                else:
+                    preview.append({"key": k, "label": fd.get("label", k), "value": "待补充",
+                                    "critical": bool(fd.get("critical")), "status": "pending"})
+                    if fd.get("critical"):
+                        crit.append(fd.get("label", k))
+            return preview, crit
+
+        # field_clarify: 关键字段缺口循环补全(缺关键再问; 空答/轮尽 → 现状进确认)。
+        # interrupt 节点内多次调用, resume 重放已答轮次 — qa_log 在重放中逐轮重建
+        from lawApp_LangGraph.doc_templates import doc_label
+        doc_name = doc_label(doc_type)
+        while len(qa_log) < settings.max_doc_field_rounds:
+            preview, critical_missing = _preview_and_missing(doc_fields)
+            if not critical_missing:
+                break
+            labels = critical_missing[:5]
+            q_text = f"为生成完整《{doc_name}》, 请补充以下关键信息: {'、'.join(labels)}"
+            # resume 重放会重复执行该写入 — dedupe_on 同轮同问只落一次(幂等)
+            dialogue_log.log_event(
+                _dialogue_sid(config),
+                "field_question",
+                {"round": len(qa_log) + 1, "question": q_text, "fields": labels},
+                dedupe_on=("round", "question"),
+            )
+            answer = interrupt(
+                {
+                    "type": "field_clarify",
+                    "round": f"{len(qa_log) + 1}/{settings.max_doc_field_rounds}",
+                    "message": q_text,
+                    "field_preview": preview,
+                }
+            )
+            answer = str(answer).strip() if answer else ""
+            if not answer:
+                break  # 用户跳过补全 → 带现状进确认
+            qa_log.append((q_text, answer))
+            dialogue_log.log_event(
+                _dialogue_sid(config),
+                "field_answer",
+                {"round": len(qa_log), "question": q_text, "answer": answer},
+                dedupe_on=("round", "question"),
+            )
+            extra_qa = "\n".join(f"问: {q}\n答: {a}" for q, a in qa_log)
+            try:
+                doc_fields = await _extract_doc_fields(state, doc_type, extra_qa=extra_qa)
+            except Exception as e:
+                debug.warning("field_clarify 补答后重抽取失败", detail=str(e)[:120])
+                break  # 重抽失败 → 用补答前字段进确认
+
+        preview, critical_missing = _preview_and_missing(doc_fields)
         n_filled = sum(1 for p in preview if p["status"] == "filled")
         n_pending = len(preview) - n_filled
         docx_msg = (
-            f"即将生成 Word 文书(民事起诉状)。已填 {n_filled} 项, "
+            f"即将生成 Word 文书({doc_name})。已填 {n_filled} 项, "
             f"待补充 {n_pending} 项"
             + (f", 关键缺失: {'、'.join(critical_missing[:5])}" if critical_missing else "")
             + "。确认生成吗?"
@@ -1414,7 +1471,7 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             for i, s in enumerate(plan)
         ]
         return {"plan": doing, "messages": [ai_msg], "docx_confirmed": True,
-                "doc_fields": confirmed_fields}
+                "doc_fields": confirmed_fields, "doc_field_rounds": len(qa_log)}
 
     tool = _tool_by_name(step.tool_name)
     if tool is None:

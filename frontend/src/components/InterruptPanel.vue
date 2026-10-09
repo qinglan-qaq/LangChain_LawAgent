@@ -14,9 +14,10 @@ const TYPE_LABEL = {
   degrade_confirm: '工具降级',
   budget_confirm: '预算确认',
   docx_confirm: 'Word 文书生成',
+  field_clarify: '关键信息补充',
 }
-// 开放文本型(要素反问/检索追问): 保留自由输入
-const TEXT_KINDS = new Set(['clarify', 'mid_clarify'])
+// 开放文本型(要素反问/检索追问/关键字段补全): 保留自由输入
+const TEXT_KINDS = new Set(['clarify', 'mid_clarify', 'field_clarify'])
 // 跳过按钮语义值: 后端归一化可直接识别; 文本型传空串=跳过反问
 const PASS_VALUE = {
   risk_confirm: '跳过',
@@ -24,6 +25,7 @@ const PASS_VALUE = {
   degrade_confirm: '跳过',
   budget_confirm: '收尾',
   docx_confirm: '跳过',
+  field_clarify: '',
 }
 
 const props = defineProps({ interrupt: { type: Object, required: true } })
