@@ -106,9 +106,11 @@ doc_templates.py 契约:模板目录三文件齐(fields.yaml + template.docx[, s
 
 ## 5. 案情长文折叠(前端纯改)
 
-- 新组件 `frontend/src/components/CollapsibleText.vue`(根 id 由调用方传/生成):props = text / threshold(默认 120 字符或 5 行,超出才收起)。
-- 收起态:内容 `max-h` 限高 + `overflow-hidden`,底部叠 `mask-image: linear-gradient(to bottom, black 60%, transparent)` 渐变隐没层(模糊渐变观感),下方"展开全文"按钮;展开后按钮变"收起"。
-- 应用点:对话流用户气泡中的案情长文(assistant 模式粘贴的 case_details 文本)。其余消息类型(问诊问答、agent 输出、思考过程)不动。
+**现状**:用户气泡超长折叠已存在(ChatView.vue 硬截断 `text.slice(0,120) + '…'` + 展开全文按钮)。本次改造其呈现:
+
+- 折叠态从"硬截断+省略号"改为**限高 + 模糊渐变隐没**:内容容器 `max-h` 限高 + `overflow-hidden`,底部叠 `mask-image: linear-gradient(...)` 渐变遮罩层(文字向下渐隐),"展开全文"按钮保留。
+- 触发阈值沿用 `COLLAPSE_LEN = 120`(store.js),展开/收起交互不变。
+- 应用点维持现状:对话流用户气泡(assistant 模式粘贴的案情长文走同一 user 气泡)。其余消息类型不动。
 
 ## 6. 监控页"触顶"列 → "运行时长"列(前端纯改)
 
