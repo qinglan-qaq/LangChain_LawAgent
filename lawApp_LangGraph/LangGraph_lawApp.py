@@ -1370,6 +1370,10 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
                     "field_preview": preview,
                 }
             )
+            # 错位防护: bool 是 docx_confirm 的归一化值(resume 槽位前移误落此处),
+            # 不得 str(True) 进 qa_log — 丢弃该轮, 直接转入确认
+            if isinstance(answer, bool):
+                break
             answer = str(answer).strip() if answer else ""
             if not answer:
                 break  # 用户跳过补全 → 带现状进确认
@@ -1396,17 +1400,21 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             + (f", 关键缺失: {'、'.join(critical_missing[:5])}" if critical_missing else "")
             + "。确认生成吗?"
         )
-        confirmed = interrupt(
-            {
-                "type": "docx_confirm",
-                "message": docx_msg,
-                "options": [
-                    {"value": "确认", "label": "确认生成 Word 文书"},
-                    {"value": "跳过", "label": "跳过该步骤"},
-                ],
-                "field_preview": preview,
-            }
-        )
+        docx_payload = {
+            "type": "docx_confirm",
+            "message": docx_msg,
+            "options": [
+                {"value": "确认", "label": "确认生成 Word 文书"},
+                {"value": "跳过", "label": "跳过该步骤"},
+            ],
+            "field_preview": preview,
+        }
+        confirmed = interrupt(docx_payload)
+        # 错位防护: 确认槽只收 normalize_resume 的 bool; 非 bool = field_clarify
+        # 补答文本误占槽(resume 按 interrupt 调用序匹配, 重放填平缺口时槽位前移)
+        # → 丢弃杂值重新发起, 待用户真实确认, 不得自动生成
+        if not isinstance(confirmed, bool):
+            confirmed = interrupt(docx_payload)
         # 方案c: docx_confirm 用户决策落库(resume 消费路径)
         dialogue_log.log_event(
             _dialogue_sid(config),

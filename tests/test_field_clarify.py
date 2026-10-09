@@ -184,3 +184,62 @@ def test_field_clarify_no_critical_gap_no_ask(monkeypatch):
         assert calls["n"] == 1
 
     asyncio.run(run())
+
+
+def test_field_clarify_order_mismatch_docx_not_auto_consumed(monkeypatch, tmp_path):
+    """方向1 错位防护: 重放首抽恰填平缺口 → 循环零 interrupt, 补答文本(非 bool)
+    误落 docx_confirm 槽 → 守卫丢弃杂值重新发起确认, 不得自动生成;
+    用户真实确认(bool)后由重新发起的确认槽收值 → 正常生成。"""
+    filled = {**_FIELD_STUB, "plaintiff_gender": "男"}
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    g, _ = _build_graph(monkeypatch, [_FIELD_STUB, filled, filled])
+    cfg = {"configurable": {"thread_id": "fc-5"}, "recursion_limit": 40}
+
+    async def run():
+        from langgraph.types import Command
+        await g.ainvoke(_INPUT, config=cfg)  # 首抽缺 → field_clarify r1 暂停
+        # 重放: 首抽(无 extra_qa)非确定性地填平缺口 → "男" 被确认槽误收
+        r2 = await g.ainvoke(Command(resume="男"), config=cfg)
+        assert not r2.get("final_answer"), "补答文本不得被当作确认自动生成"
+        snap = await g.aget_state(cfg)
+        intr = next(iter(snap.interrupts), None)
+        assert intr and intr.value["type"] == "docx_confirm", "守卫应重新发起确认"
+        assert not list(tmp_path.glob("*.docx")), "错位轮不得落盘 docx"
+        # 用户真实确认 → 重新发起的确认槽收 bool → 生成
+        r3 = await g.ainvoke(Command(resume=True), config=cfg)
+        assert r3.get("final_answer") == "文书终答测试"
+        assert r3.get("docx_path") and list(tmp_path.glob("*.docx"))
+
+    asyncio.run(run())
+
+
+def test_field_clarify_order_mismatch_bool_at_field_guard(monkeypatch, tmp_path):
+    """方向2 错位防护: docx_confirm 的 bool 归一值误落 field_clarify 槽 →
+    不进 qa_log(否则 str(True)="True" 成补答文本), 直接转入确认重新暂停;
+    用户再确认一轮后收敛生成。"""
+    filled = {**_FIELD_STUB, "plaintiff_gender": "男"}
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    # 抽取序列: 首抽缺 → 重放填平(触发方向1守卫暂停) → 之后重放又缺
+    # (bool 落 field_clarify 槽) → 之后一直缺
+    g, _ = _build_graph(monkeypatch, [_FIELD_STUB, filled, _FIELD_STUB, _FIELD_STUB])
+    cfg = {"configurable": {"thread_id": "fc-6"}, "recursion_limit": 60}
+
+    async def run():
+        from langgraph.types import Command
+        await g.ainvoke(_INPUT, config=cfg)  # field_clarify r1 暂停
+        # 补答后重放填平缺口 → 方向1守卫重新发起 docx_confirm 暂停
+        await g.ainvoke(Command(resume="男"), config=cfg)
+        # 用户确认(True): 重放又缺 → r1 重放"男" → r2 槽误收 bool → 守卫转确认
+        r3 = await g.ainvoke(Command(resume=True), config=cfg)
+        assert not r3.get("final_answer"), "bool 不得被当作补答继续问诊"
+        snap = await g.aget_state(cfg)
+        intr = next(iter(snap.interrupts), None)
+        assert intr and intr.value["type"] == "docx_confirm", \
+            "bool 落 field 槽时应转入 docx_confirm(而非 field_clarify 第3轮)"
+        assert not list(tmp_path.glob("*.docx"))
+        # 用户再确认一轮 → 收敛生成
+        r4 = await g.ainvoke(Command(resume=True), config=cfg)
+        assert r4.get("final_answer") == "文书终答测试"
+        assert r4.get("docx_path") and list(tmp_path.glob("*.docx"))
+
+    asyncio.run(run())
