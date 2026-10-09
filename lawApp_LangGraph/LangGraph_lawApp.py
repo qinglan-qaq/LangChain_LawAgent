@@ -1204,10 +1204,23 @@ async def _extract_doc_fields(
         f"{l.law_title} {l.article_number}: {l.content[:80]}"
         for l in (state.law_results or [])[:5]
     )
+    # 字段清单块: json_mode 不带 schema, 模型无从得知键名——不列清单会返回
+    # 中文标签键, pydantic 校验按默认空串静默吞掉(e2e 实测全空)。逐项列
+    # key/label/类型或选项, choice 值以清单选项为准(全选项以 YAML 为准)。
+    field_lines = []
+    for fd in fields_defs:
+        if fd["type"] == "choice":
+            field_lines.append(
+                f"- {fd['key']}({fd['label']}, 选项: {'/'.join(fd['options'])})")
+        else:
+            field_lines.append(f"- {fd['key']}({fd['label']}, 文本)")
     prompt = f"""你是资深婚姻家事律师助理。从下列案情中为《{doc_name}》抽取字段值。
-规则: 只依据案情文本; 案情未提及的字段返回空字符串; choice 类字段必须取给定选项之一或空串。
-可选选项参照(常见): 性别[男,女]; 有无财产[无财产,有财产]; 抚养归属[原告,被告]; 代理权限[一般授权,特别授权]。
+规则: 只依据案情文本; 案情未提及的字段返回空字符串; choice 类字段必须取给定选项之一或空串;
+输出为一个 JSON 对象(键为字段名, 值为字符串)——键必须与【字段清单】的 key 完全一致。
 "{basis_label}"字段: 引用法条原文标题与条号(可参考下方检索到的法条)。
+
+【字段清单】
+{chr(10).join(field_lines)}
 
 【案情】
 {_query_with_supplements(state, 4000)}
