@@ -818,6 +818,7 @@ _TOOL_DESC_OVERRIDES = {
 }
 
 # assistant 直调分支的文书文件名前缀(doc_type → 中文名); 未知类型兜底"文书"
+# 注: 刻意用短文件名形, 与 doc_label() 的 fields.yaml 全称(民事答辩状（离婚纠纷）)用途不同
 _DOC_TYPE_FILE_PREFIX = {"complaint": "起诉状", "defense": "答辩状"}
 
 

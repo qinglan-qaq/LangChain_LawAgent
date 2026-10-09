@@ -1,0 +1,115 @@
+# 离婚民事答辩状 — 字段结构定义(anchor/replacement 语义同 complaint/fields.yaml 头注释)
+doc_type: defense
+template: template.docx
+label: 民事答辩状（离婚纠纷）
+fields:
+  # ---- 案号/案由 ----
+  - {key: case_no, label: 案号, type: text, anchor: '案号', occurrence: 0}
+  - {key: case_cause, label: 案由, type: text, anchor: '案由', occurrence: 0}
+  # ---- 答辩人 ----
+  - {key: respondent_name, label: 答辩人姓名, type: text, critical: true,
+     anchor: '姓名：', occurrence: 0}
+  - {key: respondent_gender, label: 答辩人性别, type: choice, options: [男, 女], critical: true,
+     anchor: '性别：男\s*女', occurrence: 0,
+     replacement: '性别：{{ c.respondent_gender_male }}男 {{ c.respondent_gender_female }}女'}
+  - {key: respondent_birth_date, label: 答辩人出生日期, type: date,
+     anchor: '出生日期：\s*年\s*月\s*日', occurrence: 0,
+     replacement: '出生日期：{{ f.respondent_birth_date }}'}
+  - {key: respondent_ethnic, label: 答辩人民族, type: text,
+     anchor: '民族：', occurrence: 0}
+  - {key: respondent_work, label: 答辩人工作单位, type: text,
+     anchor: '工作单位：\s*职务：\s*联系电话：', occurrence: 0,
+     replacement: '工作单位：{{ f.respondent_work }}  职务：{{ f.respondent_duty }}  联系电话：{{ f.respondent_phone }}'}
+  - {key: respondent_duty, label: 答辩人职务, type: text, _merge_into: respondent_work}
+  - {key: respondent_phone, label: 答辩人联系电话, type: text, _merge_into: respondent_work}
+  - {key: respondent_domicile, label: 答辩人户籍地, type: text,
+     anchor: '住所地（户籍所在地）：', occurrence: 0}
+  - {key: respondent_residence, label: 答辩人经常居住地, type: text,
+     anchor: '经常居住地：', occurrence: 0}
+  # ---- 委托诉讼代理人 ----
+  - {key: agent_has, label: 有无委托代理人, type: choice, options: [有, 无],
+     anchor: '^有\s*$', occurrence: 0,
+     replacement: "{{ c.agent_has_yes }}有\n~\n~\n~\n{{ c.agent_has_no }}无"}
+  - {key: agent_name, label: 代理人姓名, type: text,
+     anchor: '姓名：', occurrence: 1}
+  - {key: agent_org, label: 代理人单位, type: text,
+     anchor: '(?<!工作)单位：\s*职务：\s*联系电话：', occurrence: 0,
+     replacement: '单位：{{ f.agent_org }}  职务：{{ f.agent_duty }}  联系电话：{{ f.agent_phone }}'}
+  - {key: agent_duty, label: 代理人职务, type: text, _merge_into: agent_org}
+  - {key: agent_phone, label: 代理人电话, type: text, _merge_into: agent_org}
+  - {key: agent_scope, label: 代理权限, type: choice, options: [一般授权, 特别授权],
+     anchor: '代理权限：一般授权\s*特别授权', occurrence: 0,
+     replacement: '代理权限：{{ c.agent_scope_general }}一般授权  {{ c.agent_scope_special }}特别授权'}
+  # ---- 送达地址 ----
+  - {key: service_addr, label: 送达地址, type: text,
+     anchor: '地址：', occurrence: 0}
+  - {key: service_receiver, label: 送达收件人, type: text,
+     anchor: '收件人：', occurrence: 0}
+  - {key: service_receiver_phone, label: 送达收件电话, type: text,
+     anchor: '(?<!联系)电话：', occurrence: 0,
+     replacement: '电话：{{ f.service_receiver_phone }}'}
+  - {key: e_service, label: 是否接受电子送达, type: choice, options: [是, 否],
+     anchor: '是\s*方式：', occurrence: 0,
+     replacement: "{{ c.e_service_yes }}是  方式：\n{{ c.e_service_no }}否"}
+  - {key: e_service_method, label: 电子送达方式, type: choice,
+     options: [短信, 微信, 传真, 邮箱, 其他],
+     anchor: '短信\s*微信\s*传真\s*邮箱\s*其他', occurrence: 0,
+     replacement: '{{ c.e_service_method_sms }}短信  {{ c.e_service_method_wechat }}微信  {{ c.e_service_method_fax }}传真  {{ c.e_service_method_email }}邮箱  {{ c.e_service_method_other }}其他'}
+  # ---- 答辩事项 1-7: 每项 确认/异议 choice + 事由 text ----
+  # 注意: 含换行的 replacement 必须用 YAML 双引号(单引号里 \n 是字面两字符, 不换行)
+  - {key: resp_divorce, label: 对解除婚姻关系的态度, type: choice, options: [确认, 异议], critical: true,
+     anchor: '1\.对解除婚姻关系的确认和异议', occurrence: 0,
+     replacement: "1.对解除婚姻关系的确认和异议\n{{ c.resp_divorce_confirm }}确认      {{ c.resp_divorce_object }}异议"}
+  - {key: resp_divorce_reason, label: 解除婚姻关系事由, type: text,
+     anchor: '事由：', occurrence: 0,
+     replacement: '事由：{{ f.resp_divorce_reason }}'}
+  - {key: resp_property, label: 对财产诉请的态度, type: choice, options: [确认, 异议],
+     anchor: '2\.对夫妻共同财产诉请的确认和异议', occurrence: 0,
+     replacement: "2.对夫妻共同财产诉请的确认和异议\n{{ c.resp_property_confirm }}确认      {{ c.resp_property_object }}异议"}
+  - {key: resp_property_reason, label: 财产诉请事由, type: text,
+     anchor: '事由：', occurrence: 1,
+     replacement: '事由：{{ f.resp_property_reason }}'}
+  - {key: resp_debt, label: 对债务诉请的态度, type: choice, options: [确认, 异议],
+     anchor: '3\.对夫妻共同债务诉请的确认和异议', occurrence: 0,
+     replacement: "3.对夫妻共同债务诉请的确认和异议\n{{ c.resp_debt_confirm }}确认      {{ c.resp_debt_object }}异议"}
+  - {key: resp_debt_reason, label: 债务诉请事由, type: text,
+     anchor: '事由：', occurrence: 2,
+     replacement: '事由：{{ f.resp_debt_reason }}'}
+  - {key: resp_custody, label: 对抚养诉请的态度, type: choice, options: [确认, 异议],
+     anchor: '4\.对子女直接抚养诉请的确认和异议', occurrence: 0,
+     replacement: "4.对子女直接抚养诉请的确认和异议\n{{ c.resp_custody_confirm }}确认      {{ c.resp_custody_object }}异议"}
+  - {key: resp_custody_reason, label: 抚养诉请事由, type: text,
+     anchor: '事由：', occurrence: 3,
+     replacement: '事由：{{ f.resp_custody_reason }}'}
+  - {key: resp_alimony, label: 对抚养费诉请的态度, type: choice, options: [确认, 异议],
+     anchor: '5\.对子女抚养费诉请的确认和异议', occurrence: 0,
+     replacement: "5.对子女抚养费诉请的确认和异议\n{{ c.resp_alimony_confirm }}确认      {{ c.resp_alimony_object }}异议"}
+  - {key: resp_alimony_reason, label: 抚养费诉请事由, type: text,
+     anchor: '事由：', occurrence: 4,
+     replacement: '事由：{{ f.resp_alimony_reason }}'}
+  - {key: resp_visit, label: 对探望权诉请的态度, type: choice, options: [确认, 异议],
+     anchor: '6\.对子女探望权诉请的确认和异议', occurrence: 0,
+     replacement: "6.对子女探望权诉请的确认和异议\n{{ c.resp_visit_confirm }}确认      {{ c.resp_visit_object }}异议"}
+  - {key: resp_visit_reason, label: 探望权诉请事由, type: text,
+     anchor: '事由：', occurrence: 5,
+     replacement: '事由：{{ f.resp_visit_reason }}'}
+  - {key: resp_comp, label: 对赔偿/补偿/帮助的态度, type: choice, options: [确认, 异议],
+     anchor: '7\.对赔偿/补偿/经济帮助的确认和异议', occurrence: 0,
+     replacement: "7.对赔偿/补偿/经济帮助的确认和异议\n{{ c.resp_comp_confirm }}确认      {{ c.resp_comp_object }}异议"}
+  - {key: resp_comp_reason, label: 赔偿/补偿/帮助事由, type: text,
+     anchor: '事由：', occurrence: 6,
+     replacement: '事由：{{ f.resp_comp_reason }}'}
+  # ---- 8-10 ----
+  - {key: resp_other, label: 其他事由, type: text,
+     anchor: '8\.其他事由', occurrence: 0}
+  - {key: resp_basis, label: 答辩依据(法条), type: text, critical: true,
+     anchor: '9\.答辩的依据', occurrence: 0,
+     replacement: "9.答辩的依据\n{{ f.resp_basis }}"}
+  - {key: evidence_list, label: 证据清单, type: text,
+     anchor: '10\.证据清单（可另附页）', occurrence: 0,
+     replacement: "10.证据清单（可另附页）\n{{ f.evidence_list }}"}
+  # ---- 落款 ----
+  - {key: signer, label: 答辩人签字, type: text,
+     anchor: '答辩人（签字、盖章）：', occurrence: 0}
+  - {key: sign_date, label: 落款日期, type: date,
+     anchor: '(?<!出生)日期：', occurrence: 0}

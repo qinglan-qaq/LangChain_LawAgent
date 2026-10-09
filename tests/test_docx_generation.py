@@ -69,9 +69,18 @@ def test_load_fields_complaint():
     assert {"plaintiff_name", "defendant_name", "fact_divorce_reason"} <= keys
 
 
+def test_load_fields_defense():
+    from lawApp_LangGraph.doc_templates import load_fields, template_available
+    fields = load_fields("defense")
+    assert fields, "defense 模板应可加载"
+    keys = {f["key"] for f in fields}
+    assert {"respondent_name", "resp_divorce", "resp_basis"} <= keys
+    assert template_available("defense"), "defense 模板对账应通过"
+
+
 def test_load_fields_missing_returns_empty():
     from lawApp_LangGraph.doc_templates import load_fields
-    assert load_fields("defense") == []  # 本期无答辩状模板 → 空表(不抛)
+    assert load_fields("nonexistent") == []  # 无模板目录 → 空表(不抛)
 
 
 def test_validate_template_complaint_ok():
@@ -201,8 +210,24 @@ def test_generate_docx_xml_special_chars_escaped(tmp_path, monkeypatch):
 
 def test_generate_docx_unknown_doctype_error(tmp_path, monkeypatch):
     monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
-    r = _run_tool({"a": "b"}, doc_type="defense")
+    r = _run_tool({"a": "b"}, doc_type="nonexistent")
     assert r["status"] == "error" and r["docx_path"] is None
+
+
+def test_generate_docx_defense_renders(tmp_path, monkeypatch):
+    """defense 模板渲染冒烟: 关键字段落产物, 勾选/待补充兜底同 complaint。"""
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    r = _run_tool(
+        {"respondent_name": "王五", "respondent_gender": "男", "resp_divorce": "异议",
+         "resp_divorce_reason": "不同意离婚", "resp_basis": "民法典第1079条",
+         "signer": "王五", "sign_date": "2026-10-09"},
+        doc_type="defense", filename="答辩状_t.docx",
+    )
+    assert r["status"] == "success" and r["filled"] >= 5
+    assert (tmp_path / "答辩状_t.docx").exists()
+    text = _doc_text(r["docx_path"])
+    assert "王五" in text and "异议" in text
+    assert "☑男 ☐女" in text
 
 
 def test_build_docx_template_reproducible(tmp_path):
