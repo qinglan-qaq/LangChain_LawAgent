@@ -70,12 +70,14 @@ def test_load_fields_complaint():
 
 
 def test_load_fields_defense():
-    from lawApp_LangGraph.doc_templates import load_fields, template_available
+    from lawApp_LangGraph.doc_templates import doc_label, load_fields, template_available
     fields = load_fields("defense")
     assert fields, "defense 模板应可加载"
     keys = {f["key"] for f in fields}
     assert {"respondent_name", "resp_divorce", "resp_basis"} <= keys
     assert template_available("defense"), "defense 模板对账应通过"
+    # 全称标签(fields.yaml 顶层 label, Task 1 doc_label 契约; 全角括号防半角退化)
+    assert doc_label("defense") == "民事答辩状（离婚纠纷）"
 
 
 def test_load_fields_missing_returns_empty():
@@ -228,6 +230,11 @@ def test_generate_docx_defense_renders(tmp_path, monkeypatch):
     text = _doc_text(r["docx_path"])
     assert "王五" in text and "异议" in text
     assert "☑男 ☐女" in text
+    # 换行 replacement 必须真拆段: 单引号 YAML 的字面 \n 会静默打进正文
+    # (标签仍在对账通过, 但渲染产物含字面反斜杠) — 此处钉死该回归
+    assert "\\" not in text, "渲染文本不得含字面反斜杠(\\n 未拆段)"
+    # resp_basis 尾段落独立成段: 值出现在"9.答辩的依据"之后的段
+    assert "民法典第1079条" in text
 
 
 def test_build_docx_template_reproducible(tmp_path):
