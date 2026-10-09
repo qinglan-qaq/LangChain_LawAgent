@@ -1077,12 +1077,12 @@ async def ask_pdf(request: QueryRequest):
     )
 
 
-@app.get("/sessions/{session_id}/docx/latest")
-async def session_docx_latest(session_id: str):
-    """会话最新 Word 文书下载(Task 5: 读 docx_generated 事件 → 路径白名单 → FileResponse)。
+async def _session_doc_path(session_id: str) -> str:
+    """会话最新 docx 路径(Task 6: 自 session_docx_latest 抽出的共用实现)。
 
-    404 三态: 本会话无 docx_generated 事件 / 事件指向的文件已不存在 /
-    事件里的路径越出 DOCX_OUTPUT_DIR(事件被篡改或迁移残留, spec §7 双防线第二道)。
+    事件查询 + DOCX_OUTPUT_DIR 白名单; 404 三态: 本会话无 docx_generated 事件 /
+    事件指向的文件已不存在 / 事件里的路径越出 DOCX_OUTPUT_DIR
+    (事件被篡改或迁移残留, spec §7 双防线第二道)。
     """
     from lawApp_LangGraph.db import get_pool
     from lawApp_LangGraph.FastAPI.utils import (
@@ -1118,14 +1118,61 @@ async def session_docx_latest(session_id: str):
         raise HTTPException(status_code=404, detail="文书文件不存在或路径非法")
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="文书文件不存在或路径非法")
+    return path
+
+
+def _convert_docx_pdf(docx_path: str, pdf_path: str) -> None:
+    """同步 docx→pdf(Word COM); 模块级便于测试 monkeypatch。"""
+    from docx2pdf import convert
+    convert(docx_path, pdf_path)
+
+
+async def _docx_to_pdf(docx_path: str) -> str:
+    """docx → pdf(Word COM, 30s 超时); 输出 PDF_OUTPUT_DIR 同名 .pdf, mtime 缓存。"""
+    pdf_dir = os.path.abspath(os.getenv("PDF_OUTPUT_DIR", "./pdf_outputs"))
+    os.makedirs(pdf_dir, exist_ok=True)
+    pdf_path = os.path.join(pdf_dir, os.path.splitext(os.path.basename(docx_path))[0] + ".pdf")
+    if os.path.exists(pdf_path) and os.path.getmtime(pdf_path) >= os.path.getmtime(docx_path):
+        return pdf_path
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_convert_docx_pdf, docx_path, pdf_path), timeout=30
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502, detail=f"PDF 转换失败(需本机安装 Microsoft Word): {e}"
+        )
+    return pdf_path
+
+
+@app.get("/sessions/{session_id}/doc/{format}")
+async def session_doc(session_id: str, format: str):
+    """双格式文书下载: docx=原文件, pdf=Word COM 转换(mtime 缓存)。
+
+    非法 format → 400(不触文件查找); Task 7 前端下载按钮 href 依赖本路由。
+    """
+    if format not in ("docx", "pdf"):
+        raise HTTPException(status_code=400, detail="invalid_format")
+    path = await _session_doc_path(session_id)
+    if format == "docx":
+        return FileResponse(
+            path=path,
+            filename=os.path.basename(path),
+            media_type=(
+                "application/vnd.openxmlformats-officedocument"
+                ".wordprocessingml.document"
+            ),
+        )
+    pdf = await _docx_to_pdf(path)
     return FileResponse(
-        path=path,
-        filename=os.path.basename(path),
-        media_type=(
-            "application/vnd.openxmlformats-officedocument"
-            ".wordprocessingml.document"
-        ),
+        path=pdf, filename=os.path.basename(pdf), media_type="application/pdf"
     )
+
+
+@app.get("/sessions/{session_id}/docx/latest")
+async def session_docx_latest(session_id: str):
+    """旧路径兼容别名 → docx 分支(Task 7 前端切换前契约不变)。"""
+    return await session_doc(session_id, "docx")
 
 
 @app.post("/feedback")

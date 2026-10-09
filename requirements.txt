@@ -43,3 +43,4 @@ serpapi>=0.1.0              # langchain-community 0.4 的 SerpAPIWrapper 依赖�
 
 # ── 文书生成 (docx) ──
 docxtpl>=0.20               # 法院表格式文书模板渲染(jinja2 标签嵌入 docx)
+docx2pdf>=0.1.8             # docx → pdf 转换(Word COM, 仅 Windows 本机装 Word 可用)
