@@ -391,4 +391,6 @@ class AgentState(BaseModel):
     doc_fields: dict = Field(default_factory=dict)
     docx_path: Optional[str] = None
     docx_confirmed: bool = False
+    # field_clarify 关键字段补问轮数(ingest 归零; executor 写入)
+    doc_field_rounds: int = 0
     error: Optional[str] = None

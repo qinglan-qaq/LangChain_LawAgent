@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     max_rounds: int = 10
     # 入口澄清轮数上限
     max_clarify_rounds: int = 5
+    # docx 生成前关键字段补问轮数上限(field_clarify)
+    max_doc_field_rounds: int = 3
     # 连续失败触发降级询问的阈值
     error_streak_threshold: int = 2
 

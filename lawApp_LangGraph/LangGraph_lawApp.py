@@ -426,6 +426,7 @@ def ingest_node(state: AgentState) -> dict:
         "doc_fields": {},
         "docx_path": None,
         "docx_confirmed": False,
+        "doc_field_rounds": 0,
         "error": None,
         "risk_confirmed": False,
         "pdf_confirmed": False,

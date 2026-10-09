@@ -25,6 +25,18 @@ def load_fields(doc_type: str) -> List[dict]:
     return list(spec.get("fields") or [])
 
 
+def doc_label(doc_type: str) -> str:
+    """文书显示名(fields.yaml 顶层 label; 缺模板/缺键给通用兜底)。"""
+    p = _TEMPLATE_ROOT / doc_type / "fields.yaml"
+    if not p.exists():
+        return "Word 文书"
+    try:
+        spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+        return str(spec.get("label") or "Word 文书")
+    except Exception:
+        return "Word 文书"
+
+
 def template_path(doc_type: str) -> str:
     """template.docx 绝对路径字符串(生成工具按路径读取)。"""
     return str(_TEMPLATE_ROOT / doc_type / "template.docx")
