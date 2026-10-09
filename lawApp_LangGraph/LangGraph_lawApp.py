@@ -1410,10 +1410,15 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             "field_preview": preview,
         }
         confirmed = interrupt(docx_payload)
-        # 错位防护: 确认槽只收 normalize_resume 的 bool; 非 bool = field_clarify
-        # 补答文本误占槽(resume 按 interrupt 调用序匹配, 重放填平缺口时槽位前移)
-        # → 丢弃杂值重新发起, 待用户真实确认, 不得自动生成
-        if not isinstance(confirmed, bool):
+        # 错位防护(drain): 确认槽只收 normalize_resume 的 bool; 非 bool = field_clarify
+        # 陈旧补答误占槽(resume 按 interrupt 调用序匹配, 重放填平缺口时槽位前移,
+        # 已消费杂值每次重放都在原槽位重现 → 可能多条连落)→ 逐条丢弃并重新发起,
+        # 待用户真实确认, 不得自动生成
+        while not isinstance(confirmed, bool):
+            debug.warning(
+                "docx_confirm 槽位错位: 丢弃非 bool 杂值",
+                detail=f"discarded={str(confirmed)[:60]}",
+            )
             confirmed = interrupt(docx_payload)
         # 方案c: docx_confirm 用户决策落库(resume 消费路径)
         dialogue_log.log_event(

@@ -243,3 +243,32 @@ def test_field_clarify_order_mismatch_bool_at_field_guard(monkeypatch, tmp_path)
         assert r4.get("docx_path") and list(tmp_path.glob("*.docx"))
 
     asyncio.run(run())
+
+
+def test_field_clarify_double_stale_drained(monkeypatch, tmp_path):
+    """双杂值错位: 两轮补答后重放首抽恰填平缺口 → 循环零 interrupt,
+    两条陈旧补答连落 docx_confirm 槽 → 守卫须逐条丢弃(drain),
+    不得让第二条非 bool 杂值按 truthy 静默生成。"""
+    filled = {**_FIELD_STUB, "plaintiff_gender": "男"}
+    monkeypatch.setenv("DOCX_OUTPUT_DIR", str(tmp_path))
+    # 抽取序列: 首抽缺 → r1 答后重抽仍缺 → r2 暂停后重放首抽填平缺口
+    g, _ = _build_graph(monkeypatch, [_FIELD_STUB, _FIELD_STUB, _FIELD_STUB, filled])
+    cfg = {"configurable": {"thread_id": "fc-7"}, "recursion_limit": 60}
+
+    async def run():
+        from langgraph.types import Command
+        await g.ainvoke(_INPUT, config=cfg)  # field_clarify r1 暂停
+        await g.ainvoke(Command(resume="答一"), config=cfg)  # r1 答后 → r2 暂停
+        # 重放首抽填平缺口 → r1/r2 均不发起, 陈旧"答一""答二"连落确认槽
+        r3 = await g.ainvoke(Command(resume="答二"), config=cfg)
+        assert not r3.get("final_answer"), "第二条陈旧补答不得被当作确认静默生成"
+        snap = await g.aget_state(cfg)
+        intr = next(iter(snap.interrupts), None)
+        assert intr and intr.value["type"] == "docx_confirm", "drain 后应仍暂停待真实确认"
+        assert not list(tmp_path.glob("*.docx")), "错位轮不得落盘 docx"
+        # 用户真实确认 → 陈旧值已 drain 清空 → 正常生成
+        r4 = await g.ainvoke(Command(resume=True), config=cfg)
+        assert r4.get("final_answer") == "文书终答测试"
+        assert r4.get("docx_path") and list(tmp_path.glob("*.docx"))
+
+    asyncio.run(run())
