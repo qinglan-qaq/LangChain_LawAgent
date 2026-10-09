@@ -131,6 +131,9 @@ async def aggregate_dialogue(session_id: str) -> dict:
         - round_question 与 round_answer 按 payload.round 配对(seq 顺序:
           每个 question 取其后首个未被消费的相同 round 的 answer),
           只有问没答的(用户停在 interrupt / 跳过)单独成条 selected=null
+        - field_question 与 field_answer 同规则配对入 field_rounds(
+          field_clarify 关键字段补全轮, 冒烟清单要求轮次在对话事件可见;
+          跳过/未答轮 answer=None)
         - interrupt_confirm 逐条入 confirms(docx_confirm 同构映射, 结构化键
           多透 filled/pending/critical_missing 供前端拼决策行)
         - final_answer 取最后一条入 final(多轮对话以最新终答为准)
@@ -138,15 +141,17 @@ async def aggregate_dialogue(session_id: str) -> dict:
           无 docx 事件的会话为 None, 前端据此隐藏下载入口)
 
     Returns:
-        dict: {"session_id", "rounds": [], "confirms": [], "final": None,
-        "docx": None} 形状, 空态合法(rounds/confirms 空列表, final/docx None)。
+        dict: {"session_id", "rounds": [], "field_rounds": [], "confirms": [],
+        "final": None, "docx": None} 形状, 空态合法(rounds/field_rounds/confirms
+        空列表, final/docx None)。
     """
     events = await fetch_dialogue(session_id)
     rounds: list[dict] = []
+    field_rounds: list[dict] = []
     confirms: list[dict] = []
     final: Optional[dict] = None
     docx: Optional[dict] = None
-    consumed: set[int] = set()  # 已配对的 round_answer seq(防跨轮重复消费)
+    consumed: set[int] = set()  # 已配对的 answer seq(防跨轮重复消费)
 
     for ev in events:
         et = ev["event_type"]
@@ -192,6 +197,32 @@ async def aggregate_dialogue(session_id: str) -> dict:
                         "ts": ts,
                     }
                 )
+        elif et == "field_question":
+            # field_clarify 补全轮(冒烟清单: 监控会话 trace 轮次可见):
+            # 与 field_answer 按 round 配对, 跳过/未答 → answer=None
+            answer = None
+            for cand in events:
+                if (
+                    cand["seq"] in consumed
+                    or cand["seq"] <= ev["seq"]
+                    or cand["event_type"] != "field_answer"
+                    or (cand["payload"] or {}).get("round") != p.get("round")
+                ):
+                    continue
+                answer = cand
+                break
+            ap = (answer["payload"] or {}) if answer is not None else {}
+            if answer is not None:
+                consumed.add(answer["seq"])
+            field_rounds.append(
+                {
+                    "round": p.get("round"),
+                    "question": p.get("question"),
+                    "fields": p.get("fields") or [],
+                    "answer": ap.get("answer"),
+                    "ts": _iso(answer.get("created_at")) if answer is not None else ts,
+                }
+            )
         elif et == "interrupt_confirm":
             confirms.append(
                 {
@@ -233,6 +264,7 @@ async def aggregate_dialogue(session_id: str) -> dict:
     return {
         "session_id": session_id,
         "rounds": rounds,
+        "field_rounds": field_rounds,
         "confirms": confirms,
         "final": final,
         "docx": docx,

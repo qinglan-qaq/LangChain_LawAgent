@@ -200,6 +200,22 @@ def test_aggregate_dialogue_assembles_contract():
             sid, "interrupt_confirm",
             {"type": "budget_confirm", "question": "材料仍不充分", "chosen": "同意"},
         )
+        # field_clarify 补全轮: 轮1 问+答, 轮2 只问没答(用户跳过)
+        dialogue_log.log_event(
+            sid, "field_question",
+            {"round": 1, "question": "为生成完整《民事起诉状》, 请补充以下关键信息: 原告姓名、被告姓名",
+             "fields": ["原告姓名", "被告姓名"]},
+        )
+        dialogue_log.log_event(
+            sid, "field_answer",
+            {"round": 1, "question": "为生成完整《民事起诉状》, 请补充以下关键信息: 原告姓名、被告姓名",
+             "answer": "原告张三, 被告李四"},
+        )
+        dialogue_log.log_event(
+            sid, "field_question",
+            {"round": 2, "question": "为生成完整《民事起诉状》, 请补充以下关键信息: 诉讼请求",
+             "fields": ["诉讼请求"]},
+        )
         dialogue_log.log_event(
             sid, "final_answer",
             {"answer": "建议先协商抚养权归属。",
@@ -232,6 +248,15 @@ def test_aggregate_dialogue_assembles_contract():
         # ts 均为 ISO 字符串
         for r in doc["rounds"]:
             assert isinstance(r["ts"], str) and "T" in r["ts"]
+        # field_rounds: 轮1 问+答, 轮2 跳过(answer=None)
+        assert len(doc["field_rounds"]) == 2
+        f1, f2 = doc["field_rounds"]
+        assert f1["round"] == 1
+        assert "原告姓名" in f1["question"]
+        assert f1["answer"] == "原告张三, 被告李四"
+        assert isinstance(f1["ts"], str) and "T" in f1["ts"]
+        assert f2["round"] == 2
+        assert f2["answer"] is None
         # confirms / final
         (c,) = doc["confirms"]
         assert c["type"] == "budget_confirm"
@@ -262,6 +287,7 @@ def test_aggregate_dialogue_empty_session():
         assert doc == {
             "session_id": f"{_T_PREFIX}-nonexist",
             "rounds": [],
+            "field_rounds": [],
             "confirms": [],
             "final": None,
             "docx": None,
@@ -384,6 +410,7 @@ def test_dialogue_endpoint_returns_contract():
             assert r2.json() == {
                 "session_id": "AT-20260923-101530-001",
                 "rounds": [],
+                "field_rounds": [],
                 "confirms": [],
                 "final": None,
                 "docx": None,
@@ -425,6 +452,7 @@ def test_dialogue_endpoint_degrades_when_pg_down(monkeypatch):
     assert r.json() == {
         "session_id": "AT-20260923-101530-001",
         "rounds": [],
+        "field_rounds": [],
         "confirms": [],
         "final": None,
         "docx": None,

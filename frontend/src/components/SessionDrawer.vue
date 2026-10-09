@@ -61,7 +61,7 @@ watch(
       .then((d) => {
         const empty =
           !d ||
-          (!d.rounds?.length && !d.confirms?.length && !d.final)
+          (!d.rounds?.length && !d.field_rounds?.length && !d.confirms?.length && !d.final)
         dialogue.value = empty ? null : d
       })
       .catch(() => {
@@ -136,6 +136,24 @@ function goToFinal() {
                   <span v-for="k in r.element_keys" :key="k" class="mr-1">#{{ k }}</span>
                 </div>
                 <div v-if="r.ts" class="text-slate-300 text-[10px]">{{ r.ts }}</div>
+              </div>
+            </div>
+            <!-- 关键字段补全轮(field_clarify, rounds 时间线后追加): 问/答/跳过可见 -->
+            <div v-if="dialogue.field_rounds?.length" class="space-y-2 mt-2">
+              <div
+                v-for="fr in dialogue.field_rounds"
+                :key="'f' + fr.round"
+                class="border-l border-amber-200 pl-2 space-y-1"
+              >
+                <div class="flex gap-1.5 flex-wrap items-baseline">
+                  <span class="rounded px-1.5 py-0.5 bg-amber-100 text-amber-700 text-[10px]">补全第{{ fr.round }}轮</span>
+                  <span class="text-slate-800">{{ fr.question }}</span>
+                </div>
+                <div v-if="fr.answer === null || fr.answer === undefined" class="text-slate-400">
+                  跳过/未补充
+                </div>
+                <div v-else class="text-slate-600">补充: {{ fr.answer }}</div>
+                <div v-if="fr.ts" class="text-slate-300 text-[10px]">{{ fr.ts }}</div>
               </div>
             </div>
             <!-- 确认类决策 -->
