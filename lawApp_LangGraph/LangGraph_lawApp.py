@@ -812,10 +812,13 @@ async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dic
 # 且模板可用时规划 docx 步骤), 不取 docstring 摘要
 _TOOL_DESC_OVERRIDES = {
     "generate_docx": (
-        "按法院表格模板把案件字段渲染成 Word 文书(起诉状)。"
+        "按法院表格模板把案件字段渲染成 Word 文书(起诉状/答辩状)。"
         "仅在工具清单标注\"模板可用\"时规划此步骤。"
     ),
 }
+
+# assistant 直调分支的文书文件名前缀(doc_type → 中文名); 未知类型兜底"文书"
+_DOC_TYPE_FILE_PREFIX = {"complaint": "起诉状", "defense": "答辩状"}
 
 
 def _tools_desc() -> str:
@@ -1073,7 +1076,7 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
     template = PLANNER_SYSTEM
 
     if (state.mode or "attorney") == "assistant":
-        from lawApp_LangGraph.doc_templates import template_available
+        from lawApp_LangGraph.doc_templates import doc_label, template_available
         from lawApp_LangGraph.prompts import (
             PLANNER_ASSISTANT_DOCX_STEP,
             PLANNER_ASSISTANT_SUFFIX,
@@ -1085,8 +1088,9 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
             if template_available(state.doc_type or "complaint")
             else "(无 Word 模板时不出 docx 步骤)"
         )
+        # doc_label 取 fields.yaml 全称(缺模板兜底"Word 文书"), 去 doc_type 三元硬编码
         template = PLANNER_SYSTEM + PLANNER_ASSISTANT_SUFFIX.format(
-            doc_type_label="起诉状" if state.doc_type != "defense" else "答辩状",
+            doc_type_label=doc_label(state.doc_type or "complaint"),
             docx_step_hint=docx_step_hint,
         )
 
@@ -1474,7 +1478,7 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             "args": {
                 "fields_json": json.dumps(confirmed_fields, ensure_ascii=False),
                 "doc_type": state.doc_type or "complaint",
-                "filename": f"起诉状_{safe_sid}.docx",
+                "filename": f"{_DOC_TYPE_FILE_PREFIX.get(state.doc_type or 'complaint', '文书')}_{safe_sid}.docx",
             },
             "id": f"docx_{idx}",
         }

@@ -225,6 +225,29 @@ def test_build_docx_template_reproducible(tmp_path):
     assert rebuilt == _document_xml().encode("utf-8")
 
 
+# ---- Task 3(通用化): doc_type 前缀映射 / 工具与 planner 文案 ----
+
+
+def test_docx_filename_prefix_by_doc_type():
+    """直调分支文件名前缀按 doc_type: complaint=起诉状 / defense=答辩状。"""
+    import lawApp_LangGraph.LangGraph_lawApp as app
+    # 从源码级断言太脆 — 直接驱动 executor: 简化为对前缀映射函数的断言
+    assert app._DOC_TYPE_FILE_PREFIX["complaint"] == "起诉状"
+    assert app._DOC_TYPE_FILE_PREFIX["defense"] == "答辩状"
+
+
+def test_docx_tool_and_planner_text_generalized():
+    """generate_docx 工具描述与 planner docx 末步提示均为通用文书表述
+    (起诉状/答辩状并列), 无起诉状单一字样。"""
+    import lawApp_LangGraph.LangGraph_lawApp as app
+    from lawApp_LangGraph.prompts import PLANNER_ASSISTANT_DOCX_STEP
+
+    assert "(起诉状/答辩状)" in app._TOOL_DESC_OVERRIDES["generate_docx"]
+    assert "起诉状模板" not in app._TOOL_DESC_OVERRIDES["generate_docx"]
+    assert "(起诉状/答辩状)" in PLANNER_ASSISTANT_DOCX_STEP
+    assert "按起诉状模板" not in PLANNER_ASSISTANT_DOCX_STEP
+
+
 # ---- Task 4: 图内流(docx_confirm interrupt 载荷 / 跳过 resume / 确认落盘) ----
 # 驱动模式参照 tests/test_smoke.py 的 interrupt→Command(resume) 夹具:
 # MemorySaver checkpointer + LLM 全替身(_stream_plan/_structured/finalize astream),

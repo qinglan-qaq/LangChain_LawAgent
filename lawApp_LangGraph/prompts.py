@@ -393,7 +393,7 @@ PLANNER_ASSISTANT_SUFFIX = """
 
 # docx 末步规划提示(模板可用时由 planner_node 注入 docx_step_hint 占位)
 PLANNER_ASSISTANT_DOCX_STEP = """(5)若工具列表含 generate_docx, 最后一步固定规划:
-    tool_name=generate_docx, description="按起诉状模板生成 Word 文书"(参数由系统注入, 无需规划参数)。
+    tool_name=generate_docx, description="按法院表格模板把案件字段渲染成 Word 文书(起诉状/答辩状)"(参数由系统注入, 无需规划参数)。
 """
 
 DISCLAIMER_TEXT = (
