@@ -2470,8 +2470,8 @@ def route_after_executor(state: AgentState) -> str:
     Returns:
         str: 下一节点名 —— 连续失败达阈值*(degrade_ask_count+1) →
             "hitl_degrade"(每询问一次门槛翻倍, 不再一次性永久关闭);
-            最新 AIMessage 带 tool_calls → "tools";其余按剩余步骤 →
-            "executor"(还有步骤) / "replan_check"(全部完成).
+            尾部消息为带 tool_calls 的 AIMessage(本次执行器新产出) → "tools";
+            其余按剩余步骤 → "executor"(还有步骤) / "replan_check"(全部完成).
     """
     # L15: 旧条件 ... and not state.degrade_used 一次询问后永久关闭
     if (
@@ -2479,10 +2479,12 @@ def route_after_executor(state: AgentState) -> str:
         >= settings.error_streak_threshold * (state.degrade_ask_count + 1)
     ):
         return "hitl_degrade"
-    last_ai = next(
-        (m for m in reversed(state.messages) if isinstance(m, AIMessage)), None
-    )
-    if last_ai is not None and getattr(last_ai, "tool_calls", None):
+    # 只认尾部新产出的 tool_calls: 早前工具步的 AIMessage(tool_calls) 已被 ToolMessage
+    # 消费; 反向扫描跳过 ToolMessage 会把陈旧调用再路由进 tools 重放(冒烟实测:
+    # assistant 计划工具步后接无工具步, 陈旧 analyze_legal_issue 重放占掉 merge,
+    # 吞掉后续 generate_docx 步)。
+    last_msg = state.messages[-1] if state.messages else None
+    if isinstance(last_msg, AIMessage) and getattr(last_msg, "tool_calls", None):
         return "tools"
     target = (
         "executor" if state.current_step_index < len(state.plan) else "replan_check"

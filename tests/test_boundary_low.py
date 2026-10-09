@@ -299,6 +299,40 @@ def test_l15_degrade_threshold_scales_with_ask_count():
     assert route_after_executor(s4) != "hitl_degrade"
 
 
+def test_route_after_executor_stale_tool_calls_not_rerouted():
+    """尾部已消费的陈旧 tool_calls 不得再路由 tools 重放。
+
+    冒烟实测回归: 早前工具步的 AIMessage(tool_calls) 已被 ToolMessage 跟随,
+    后续无工具步跳过(不追加消息)时, 旧实现反向扫描跳过 ToolMessage 命中陈旧
+    调用 → 重放工具且 merge 误标下一步 done, 吞掉 generate_docx 步。
+    """
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from lawApp_LangGraph.LangGraph_lawApp import route_after_executor
+    from lawApp_LangGraph.state import AgentState, PlanStep
+
+    plan = [
+        PlanStep(step_id=1, description="s1", tool_name="analyze_legal_issue"),
+        PlanStep(step_id=2, description="s2", tool_name="generate_docx"),
+    ]
+    tc = AIMessage(
+        content="",
+        tool_calls=[{"name": "analyze_legal_issue", "args": {"query": "x"}, "id": "t1"}],
+    )
+    tm = ToolMessage(content="{}", tool_call_id="t1")
+    # 尾部是 ToolMessage(调用已消费)且还有剩余步骤 → executor(旧实现错回 tools)
+    s = AgentState(query="q", messages=[tc, tm], current_step_index=1, plan=plan)
+    assert route_after_executor(s) == "executor"
+    # 尾部是新产出的 tool_calls AIMessage → tools
+    s2 = AgentState(query="q", messages=[tm, tc], current_step_index=1, plan=plan)
+    assert route_after_executor(s2) == "tools"
+    # 无 tool_calls 且步骤走完 → replan_check
+    s3 = AgentState(
+        query="q", messages=[tc, tm], current_step_index=2, plan=plan
+    )
+    assert route_after_executor(s3) == "replan_check"
+
+
 def test_l15_state_defaults_backfill_old_checkpoints():
     """旧 checkpoint 无 degrade_ask_count 字段 → Pydantic 默认 0 兼容。"""
     from lawApp_LangGraph.state import AgentState
