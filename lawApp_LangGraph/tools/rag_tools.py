@@ -59,18 +59,17 @@ def _get_llm():
     return _llm
 
 
-# Tool 1: 案例库混合检索(向量+BM25) + CrossEncoder 重排; 后端异常降级返回 status=error 不中断流程
+# Tool 1: 案例库混合检索(稠密+BM25 双路 RRF 融合) + CrossEncoder 重排; 后端异常降级返回 status=error 不中断流程
 @tool
 @traced("tool")
 async def retrieve_legal_knowledge(
     query: str,
     top_k: int = 20,
     rerank_top_n: int = 5,
-    alpha: float = 0.4,
     namespace: Optional[str] = None,
 ) -> dict:
-    """从法律案例库中检索相关判例.支持混合检索(语义向量 + BM25 关键词匹配)与
-    CrossEncoder 重排序,返回最相关的案例内容及其相关性评分.
+    """从法律案例库中检索相关判例.支持混合检索(语义向量 + BM25 关键词匹配
+    经 RRF 倒数排名融合)与 CrossEncoder 重排序,返回最相关的案例内容及其相关性评分.
 
     适用场景:
     - 查找与特定法律问题相关的历史判例
@@ -80,18 +79,21 @@ async def retrieve_legal_knowledge(
     参数:
     query: 法律问题查询语句,中文
     top_k: 初始召回数量,最多不超过 50
-    rerank_top_n: 重排序后返回数量,最多不超过 10 (从 top_k 中选出最相关的条目)
-    alpha: 混合检索中的权重参数,默认 0.4 (越接近 1 越重视语义匹配;pgvector 后端忽略此项)
+    rerank_top_n: 重排序后返回数量,最多不超过 10 (从融合候选中选出最相关的条目)
     namespace: 检索的命名空间,None 时用 settings.pinecone_namespace(env PINECONE_NAMESPACE)
+
     返回:
     结构化 dict,含 status / rag_documents 字段,
-    每个文档为 RetrievedDocument 格式(case_number / case_cause / hybrid_score / chunk_text 等)
+    每个文档为 RetrievedDocument 格式(case_number / case_cause / chunk_text /
+    relevance_score 等).其中 relevance_score 为 CrossEncoder 重排分(sigmoid 归一),
+    仅在重排序可用时存在;若文档缺少 relevance_score / hybrid_score 键,
+    表示重排序不可用,文档仅按 RRF 融合名次返回,未做相关性打分.
     """
     t0 = time.time()
     ns = namespace or settings.pinecone_namespace
     tool_log.info(
         "→ 调用工具: retrieve_legal_knowledge",
-        detail=f"query={query[:60]} | top_k={top_k} | alpha={alpha} | ns={ns}",
+        detail=f"query={query[:60]} | top_k={top_k} | ns={ns}",
     )
 
     try:
@@ -102,7 +104,6 @@ async def retrieve_legal_knowledge(
             query=query,
             top_k=top_k,
             rerank_top_n=rerank_top_n,
-            alpha=alpha,
             namespace=ns,
         )
     except Exception as e:
@@ -128,7 +129,13 @@ async def retrieve_legal_knowledge(
         )
         return {"status": "empty", "message": "未检索到相关案例", "rag_documents": []}
 
-    top_score = results[0]["hybrid_score"] if results else 0
+    # 重排可用时优先报 relevance_score; 缺键(降级)时退报 rrf 溯源分
+    first = results[0]
+    top_score = (
+        first.get("relevance_score") or first.get("rrf_score", 0)
+        if isinstance(first, dict)
+        else getattr(first, "relevance_score", None) or getattr(first, "rrf_score", 0)
+    )
     tool_log.info(
         "← 工具返回: retrieve_legal_knowledge",
         detail=f"返回{len(results)}条案例 | top_score={top_score:.3f}",
@@ -137,7 +144,7 @@ async def retrieve_legal_knowledge(
     return {"status": "success", "count": len(results), "rag_documents": results}
 
 
-# CRAG 三档评估(correct≥0.5 / ambiguous≥0.2 / incorrect), 产出 quality_verdict 判定是否需联网补充
+# CRAG 三档评估(判据 relevance_score: correct≥0.5 / ambiguous≥0.2 / incorrect), 产出 quality_verdict 判定是否需联网补充
 
 
 # dict/对象统一转 simpleRetrievedDocument(评估与上下文拼装共用)
@@ -162,22 +169,43 @@ def _to_simple_doc(doc: Any) -> simpleRetrievedDocument:
     )
 
 
+# dict/对象统一取 relevance_score; 缺键(重排不可用降级)返回 None
+def _rel_score(doc: Any) -> Optional[float]:
+    """读取文档的 relevance_score(sigmoid 重排分),dict/对象兼容.
+
+    Args:
+        doc: 检索结果文档,dict 或 RetrievedDocument 对象.
+
+    Returns:
+        relevance_score 值; 键不存在(重排不可用降级标记)时返回 None.
+    """
+    if isinstance(doc, dict):
+        val = doc.get("relevance_score")
+    else:
+        val = getattr(doc, "relevance_score", None)
+    return float(val) if val is not None else None
+
+
 @tool
 @traced("tool")
 def evaluate_case_relevance(
     documents: list[dict[str, Any]],
 ) -> dict:
-    """评估检索到的案例与用户问题的相关程度,按评分分为三档:
-    - correct (高质量):     hybrid_score >= 0.5,可直接用于法律分析
+    """评估检索到的案例与用户问题的相关程度,以 relevance_score(sigmoid 重排分)
+    为唯一判据分为三档:
+    - correct (高质量):     relevance_score >= 0.5,可直接用于法律分析
     - ambiguous (中等质量): 0.2 <= score < 0.5,可参考但需谨慎
     - incorrect (低质量):   score < 0.2,不建议使用
+
+    若所有文档均缺少 relevance_score 键(重排序不可用降级),
+    全部归入 ambiguous 并强制判定「不足,建议进行网络搜索补充」.
 
     评估报告会明确告知检索质量是否「充足」或「不足,建议进行网络搜索补充」.
     Agent 应据此决定是否调用 get_google_search 进行联网补充.
 
     参数:
     documents: retrieve_legal_knowledge 返回结果中的 rag_documents 列表
-    每项含 hybrid_score / chunk_text / case_number 等字段
+    每项含 relevance_score / chunk_text / case_number 等字段
 
     返回:
     结构化 dict,含 evaluation 键,其值为 correct/ambiguous/incorrect 分类及 quality_verdict
@@ -220,8 +248,26 @@ def evaluate_case_relevance(
 
     correct, ambiguous, incorrect = [], [], []
 
+    # 重排不可用降级: 全部文档缺 relevance_score → 全 ambiguous + 强制不足.
+    # RRF 分是名次相对分(垃圾召回也接近满分), 不能作三档判据 —
+    # 宁可诚实报不足触发联网补充, 也不拿无分文档伪装充足
+    if all(_rel_score(doc) is None for doc in documents):
+        tool_log.warning(
+            "← 工具返回: evaluate_case_relevance",
+            detail="全部文档缺 relevance_score(重排不可用), 全归 ambiguous",
+            result="verdict=不足(降级)",
+        )
+        return {
+            "evaluation": EvaluationResult(
+                total=len(documents),
+                ambiguous_count=len(documents),
+                quality_verdict="不足,建议进行网络搜索补充",
+                ambiguous=[_to_simple_doc(doc) for doc in documents],
+            )
+        }
+
     for doc in documents:
-        score = doc.get("hybrid_score", 0) if isinstance(doc, dict) else getattr(doc, "hybrid_score", 0)
+        score = _rel_score(doc) or 0.0
         sdoc = _to_simple_doc(doc)
         if score >= settings.correct_threshold:
             correct.append(sdoc)

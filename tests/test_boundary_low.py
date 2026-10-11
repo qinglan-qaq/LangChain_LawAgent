@@ -226,7 +226,7 @@ def test_l5_evaluate_case_relevance_unwraps_rag_documents():
             "case_number": "(2020)京01号",
             "case_cause": "离婚",
             "chunk_text": "案情A",
-            "hybrid_score": 0.8,
+            "relevance_score": 0.8,
         },
         {
             "id": "d2",
@@ -234,7 +234,7 @@ def test_l5_evaluate_case_relevance_unwraps_rag_documents():
             "case_number": "(2021)粤03号",
             "case_cause": "抚养",
             "chunk_text": "案情B",
-            "hybrid_score": 0.05,
+            "relevance_score": 0.05,
         },
     ]
     res = f(documents={"status": "success", "rag_documents": docs})

@@ -173,3 +173,71 @@ def test_base_signature_alpha_removed():
     for fn in (BaseRetriever.search, PgvectorRetriever.search,
                PineconeRetriever.search):
         assert "alpha" not in inspect.signature(fn).parameters
+
+
+# ── 工具面: retrieve 透传新字段 / evaluate 改判 + 降级门控 ──
+
+
+def test_retrieve_tool_signature_and_passthrough(monkeypatch):
+    """工具签名无 alpha; 假后端文档原样透传 + status=success。"""
+    import inspect
+
+    from lawApp_LangGraph.RAG_service import base as rag_base
+    from lawApp_LangGraph.tools.rag_tools import retrieve_legal_knowledge
+
+    # async 工具的 func 为 None, 形参经 .args 反射
+    assert "alpha" not in retrieve_legal_knowledge.args
+    assert "rrf" in retrieve_legal_knowledge.description.lower()
+
+    class _Fake:
+        async def search(self, query, top_k=20, rerank_top_n=5,
+                         namespace=None):
+            return [{"id": "a", "chunk_text": "x", "rrf_score": 0.03,
+                     "relevance_score": 0.9, "hybrid_score": 0.9, "rank": 1}]
+
+    monkeypatch.setattr(rag_base, "get_retriever", lambda: _Fake())
+    out = _run(retrieve_legal_knowledge.ainvoke({"query": "测试"}))
+    assert out["status"] == "success" and out["count"] == 1
+    assert out["rag_documents"][0]["relevance_score"] == 0.9
+
+
+def test_evaluate_tiers_on_relevance_score(monkeypatch):
+    """三档判 relevance_score(不再看召回分)。"""
+    from lawApp_LangGraph.config import settings
+    from lawApp_LangGraph.tools.rag_tools import evaluate_case_relevance
+
+    monkeypatch.setattr(settings, "correct_threshold", 0.7)
+    monkeypatch.setattr(settings, "incorrect_threshold", 0.3)
+    monkeypatch.setattr(settings, "min_quality_docs", 1)
+
+    docs = [
+        {"id": "a", "relevance_score": 0.95, "hybrid_score": 0.1,
+         "chunk_text": "高相关", "case_number": "n1", "year": "2023"},
+        {"id": "b", "relevance_score": 0.5, "hybrid_score": 0.9,
+         "chunk_text": "中相关", "case_number": "n2", "year": "2022"},
+        {"id": "c", "relevance_score": 0.1, "hybrid_score": 0.8,
+         "chunk_text": "低相关", "case_number": "n3", "year": "2021"},
+    ]
+    out = evaluate_case_relevance.invoke({"documents": docs})
+    ev = out["evaluation"]
+    assert ev.correct_count == 1 and ev.ambiguous_count == 1
+    assert ev.incorrect_count == 1
+    # hybrid_score 高但 relevance 低 → 不进 correct(b/c 反证旧判据已废)
+    assert [d.id for d in ev.correct] == ["a"]
+    assert ev.quality_verdict == "充足"
+
+
+def test_evaluate_degrades_all_ambiguous_when_rerank_missing():
+    """文档缺 relevance_score(rerank 不可用)→ 全 ambiguous + verdict 强制不足。"""
+    from lawApp_LangGraph.tools.rag_tools import evaluate_case_relevance
+
+    # 即使阈值宽松、数量充足也必须判不足 — 门控不骗人
+    docs = [
+        {"id": "a", "rrf_score": 0.03, "chunk_text": "x",
+         "case_number": "n1", "year": "2023"},
+    ] * 5
+    out = evaluate_case_relevance.invoke({"documents": docs})
+    ev = out["evaluation"]
+    assert ev.correct_count == 0 and ev.incorrect_count == 0
+    assert ev.ambiguous_count == 5
+    assert ev.quality_verdict == "不足,建议进行网络搜索补充"
