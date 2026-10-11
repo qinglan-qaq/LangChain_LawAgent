@@ -35,7 +35,7 @@ async def run_retrieval(label: str, baseline: str | None) -> None:
     eval_cases: list[dict] = []
     for c in cases:
         results = await retriever.search(query=c["question"], top_k=10,
-                                         rerank_top_n=10, alpha=0.4,
+                                         rerank_top_n=10,
                                          namespace=None)
         # ranked id 与 golden set 向量 id 同源(Pinecone vector id);
         # ground truth = 该案例全部 chunk 的向量 id(gen 脚本 relevant_ids)

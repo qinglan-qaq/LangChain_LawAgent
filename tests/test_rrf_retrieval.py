@@ -88,3 +88,88 @@ def test_convex_path_fully_removed():
     assert not hasattr(RAG_program.RAG_service, "search_withDenseSparse")
     assert "hybrid_convex_scale" not in src
     assert "CrossEncoder" not in src  # __init__ 重排器一并移除
+
+
+# ── PineconeRetriever 编排(gather 双路 → RRF → rerank → sigmoid 出分) ──
+
+
+def _boom():
+    raise RuntimeError("dense route down")
+
+
+def _patch_pinecone(monkeypatch, dense, sparse, rerank_scores=None,
+                    dense_error=False):
+    """装配假后端: _get_service → 假 RAG_service; embedder.rerank 可控。"""
+    from lawApp_LangGraph.RAG_service import embedder
+    from lawApp_LangGraph.RAG_service import pinecone_retriever as pr
+
+    svc = SimpleNamespace(
+        dense_recall=lambda q, ns, k: (_boom() if dense_error else dense[:k]),
+        sparse_recall=lambda q, ns, k: sparse[:k],
+    )
+    monkeypatch.setattr(pr, "_get_service", lambda: svc)
+
+    async def _fake_rerank(query, docs, text_key="chunk_text"):
+        return rerank_scores
+
+    monkeypatch.setattr(embedder, "rerank", _fake_rerank)
+    return pr
+
+
+def test_retriever_full_pipeline_rerank_scores(monkeypatch):
+    """双路融合 → rerank → sigmoid: relevance/hybrid 别名 + 排序按重排分。"""
+    from lawApp_LangGraph.RAG_service.fusion import sigmoid
+
+    dense = [_m("a", meta={"chunk_text": "甲", "year": "2023"}),
+             _m("b", meta={"chunk_text": "乙", "year": "2022"})]
+    sparse = [_m("a", meta={"chunk_text": "甲", "year": "2023"}),
+              _m("c", meta={"chunk_text": "丙", "year": "2021"})]
+    pr = _patch_pinecone(monkeypatch, dense, sparse,
+                         rerank_scores=[0.5, 3.0, -1.0])  # a,b,c 的 logits
+
+    out = _run(pr.PineconeRetriever().search("查询", top_k=10, rerank_top_n=2))
+    assert len(out) == 2
+    # rerank logits 3.0(b) > 0.5(a) → b 第一
+    assert out[0]["id"] == "b" and out[0]["rank"] == 1
+    assert out[0]["relevance_score"] == sigmoid(3.0)
+    assert out[0]["hybrid_score"] == out[0]["relevance_score"]
+    assert out[0]["rrf_score"] > 0
+    assert "chunk_text" in out[0] and len(out[0]["chunk_text"]) <= 500
+
+
+def test_retriever_rerank_unavailable_degrade(monkeypatch):
+    """rerank 返回 None → 文档不携带 relevance_score, 排序退 RRF 序。"""
+    dense = [_m("a"), _m("b")]
+    sparse = [_m("a"), _m("c")]
+    pr = _patch_pinecone(monkeypatch, dense, sparse, rerank_scores=None)
+
+    out = _run(pr.PineconeRetriever().search("查询", top_k=10, rerank_top_n=2))
+    assert len(out) == 2
+    # a 双路 rank1 → RRF 第一
+    assert out[0]["id"] == "a" and out[0]["rank"] == 1
+    assert all("relevance_score" not in d for d in out)
+    assert all("hybrid_score" not in d for d in out)
+    assert all("rrf_score" in d for d in out)
+
+
+def test_retriever_single_route_degrades_to_sparse(monkeypatch):
+    """稠密路失败 → 稀疏单路降级不抛错。"""
+    dense = [_m("a"), _m("b")]
+    pr = _patch_pinecone(monkeypatch, dense, [_m("c")], rerank_scores=None,
+                         dense_error=True)
+
+    out = _run(pr.PineconeRetriever().search("查询", top_k=10, rerank_top_n=3))
+    assert [d["id"] for d in out] == ["c"]
+
+
+def test_base_signature_alpha_removed():
+    """BaseRetriever.search / 两个后端 search 签名均无 alpha。"""
+    import inspect
+
+    from lawApp_LangGraph.RAG_service.base import BaseRetriever
+    from lawApp_LangGraph.RAG_service.pinecone_retriever import PineconeRetriever
+    from lawApp_LangGraph.RAG_service.pgvector_retriever import PgvectorRetriever
+
+    for fn in (BaseRetriever.search, PgvectorRetriever.search,
+               PineconeRetriever.search):
+        assert "alpha" not in inspect.signature(fn).parameters

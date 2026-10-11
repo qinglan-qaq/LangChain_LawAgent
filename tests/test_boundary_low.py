@@ -254,8 +254,8 @@ def test_l8_health_check_lightweight_no_search():
         def __init__(self):
             self.search_called = False
 
-        async def search(self, query, top_k=20, rerank_top_n=5, alpha=0.4,
-                          namespace=None):
+        async def search(self, query, top_k=20, rerank_top_n=5,
+                         namespace=None):
             self.search_called = True
             return []
 

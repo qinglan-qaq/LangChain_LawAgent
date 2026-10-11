@@ -31,7 +31,6 @@ class BaseRetriever(ABC):
         query: str,
         top_k: int = 20,
         rerank_top_n: int = 5,
-        alpha: float = 0.4,
         namespace: Optional[str] = None,
     ) -> list[dict]:
         """检索与 query 相关的案例块，返回 RetrievedDocument 对齐的 dict 列表.
