@@ -182,3 +182,19 @@ pgvector 侧(案例库 law_cases + 法条库 law_vector 均纯 dense)**本次
 5. 降级语义 + docstring + 监控字段收尾
 6. spec 定稿 + 全量回归 + 浏览器冒烟
 ```
+
+### 9.1 标定与回归记录(2026-10-11, 7 任务全部落地)
+
+- **回归门(rrf-post vs baseline-001)**: hit_rate@5 0.6667→0.7333(+0.0667),
+  MRR@5 0.5500→0.6667(+0.1167), precision/recall/f1 全升, 门通过。
+- **标定 run rrf-cal-1**: 30 例, pos 93 / neg 207, pos 分位数
+  0.5308/0.7225/0.7303, neg 0.5071/0.6594/0.7276, 正负分布重叠大
+  (跨案例 chunk 主题相近), 建议阈值已落 config:
+  correct_threshold=0.731, incorrect_threshold=0.5005。
+- **已知限制 — 索引形态阻塞稀疏路**: 存量索引 pinecone-test-lawapp
+  创建时显式 vector_type="dense"(纯稠密), Pinecone 拒绝纯稀疏查询
+  ([400] Cannot query index ... with only sparse vector), 全量查询实际
+  降级为密集单路 — 上述回归/标定均为降级态结果。create_index 已修
+  (去掉 vector_type 参数, 新建索引即混合可查); 存量索引须删建 + 全量
+  重传后稀疏路才生效, 届时重跑 --suite calibration 重标阈值。
+  降级语义(单路存活优先/缺键标记)按设计工作, 全量回归 250 项零失败。

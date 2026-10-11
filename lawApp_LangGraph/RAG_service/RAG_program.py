@@ -91,15 +91,21 @@ class RAG_service:
         )
 
     def create_index(self, wait_for_completion: bool = True) -> bool:
-        """
-        创建索引
-        创建混合索引
-        指定的索引方式
-        :param wait_for_completion:
-        :return:
-        """
+        """创建混合检索索引(稠密+稀疏双路可查).
 
-        # 混合索引的强制要求：metric 必须为 dotproduct,vector_type 为 dense
+        Args:
+            wait_for_completion: 是否阻塞等待索引就绪(轮询, 总超时 600s).
+
+        Returns:
+            True 表示索引就绪可用.
+
+        Raises:
+            RuntimeError: 索引进入失败态.
+            TimeoutError: 就绪等待超时.
+        """
+        # 混合索引要求 metric=dotproduct; 不传 vector_type —
+        # 新版 API 显式 vector_type="dense" 会创建纯稠密索引,
+        # 拒绝纯稀疏查询([400] ... with only sparse vector), BM25 路全灭
         target_metric = "dotproduct"
 
         # 检查索引是否存在
@@ -110,7 +116,6 @@ class RAG_service:
                 dimension=self.dimension,
                 metric=target_metric,
                 spec=ServerlessSpec(cloud=self.cloud, region=self.region),
-                vector_type="dense",
             )
         else:
             print(f"索引 '{self.index_name}' 已存在.")

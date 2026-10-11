@@ -39,8 +39,11 @@ class Settings(BaseSettings):
     error_streak_threshold: int = 2
 
     # ============ 评估阈值(CRAG 三档) ============
-    correct_threshold: float = 0.5
-    incorrect_threshold: float = 0.2
+    # rrf-cal-1 实测标定(2026-10-11, golden set 30 例/pos 93/neg 207,
+    # 密集单路降级态 — 索引重建启用稀疏路后需重标): precision≥0.7 最高切点 /
+    # 下方 relevant<5% 切点, scripts/run_eval.py --suite calibration
+    correct_threshold: float = 0.731
+    incorrect_threshold: float = 0.5005
     min_quality_docs: int = 3
 
     # ============ 综合评分(D10, env SCORE_WEIGHTS 传 JSON 可覆盖) ============

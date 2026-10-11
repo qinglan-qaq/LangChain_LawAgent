@@ -21,9 +21,9 @@ def test_config_defaults_and_env(monkeypatch):
     assert s.max_rounds == 10
     assert s.max_clarify_rounds == 5
     assert s.error_streak_threshold == 2
-    # 评估阈值(代码现值)
+    # 评估阈值(代码现值; 0.731/0.5005 为 rrf-cal-1 golden set 实测标定)
     assert (s.correct_threshold, s.incorrect_threshold, s.min_quality_docs) == (
-        0.5, 0.2, 3,
+        0.731, 0.5005, 3,
     )
     # LLM / 检索 / DB 抽查
     assert s.deepseek_pro_model == "deepseek-reasoner"
