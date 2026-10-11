@@ -2,7 +2,7 @@
 pgvector 检索后端 — 本地 PostgreSQL 案例检索
 
 流程: BGE 密集向量 → cosine 召回 top_k → (可选) CrossEncoder 重排序取 top_n。
-注意: 纯密集检索，alpha 参数不生效（仅为接口兼容保留）；
+纯密集检索(本后端不参与 RRF 改造); 参数钳制与融合工具见 fusion.py。
 数据需先经 scripts/ingest_cases_pgvector.py 入库 law_cases 表。
 """
 
@@ -12,26 +12,9 @@ import logging
 
 from lawApp_LangGraph.RAG_service.base import BaseRetriever
 from lawApp_LangGraph.RAG_service.embedder import embed_query, rerank
+from lawApp_LangGraph.RAG_service.fusion import clamp_search_params  # noqa: F401 — 钳制函数移居 fusion, 此处 re-export 保住 tests/ 既有 import 路径
 
 logger = logging.getLogger("lawApp.rag")
-
-
-def clamp_search_params(top_k: int, rerank_top_n: int) -> tuple[int, int]:
-    """检索参数钳制(M1): top_k → 1..50, rerank_top_n → 1..10。
-
-    0/负数不再把重排序切片切成空列表(假「未检索到」), 与
-    RAG_program.search_withDenseSparse 的 max(1, n) 语义对齐并加
-    上界(top_k 大值会拖垮 SQL 召回与 CrossEncoder 重排)。
-    """
-    try:
-        k = int(top_k)
-    except (TypeError, ValueError):
-        k = 20
-    try:
-        n = int(rerank_top_n)
-    except (TypeError, ValueError):
-        n = 5
-    return max(1, min(k, 50)), max(1, min(n, 10))
 
 
 class PgvectorRetriever(BaseRetriever):
