@@ -12,9 +12,7 @@ from langchain_text_splitters import (
     RecursiveCharacterTextSplitter,
 )
 from pinecone import Pinecone, ServerlessSpec
-from pinecone_text.hybrid import hybrid_convex_scale
 from pinecone_text.sparse import BM25Encoder
-from sentence_transformers import CrossEncoder
 
 from lawApp_LangGraph.config import settings
 from lawApp_LangGraph.FastAPI.logging import rag as rag_log
@@ -49,9 +47,8 @@ class RAG_service:
         初始化Pinecone
         md文档分割工具
         递归分块(段落 句子)
-        BGA向量化
+        BGE向量化
         BM25稀疏矩阵向量化
-        BAAI重排序模型
 
         :param index_name:
         :param api_key:
@@ -82,8 +79,7 @@ class RAG_service:
             add_start_index=True,
         )
 
-        # 重排序模型
-        self.reranker = CrossEncoder("BAAI/bge-reranker-large", max_length=512)
+        # 重排经 RAG_service.embedder 单例(懒加载), __init__ 不再预载 GB 级模型
 
         # 稀疏向量（BM25 参数随仓库 data/ 分发，可经 BM25_PATH 覆盖）
         self.bm25 = BM25Encoder().load(settings.bm25_path)
@@ -336,130 +332,44 @@ class RAG_service:
             self.get_index_stats()
         return fail_count == 0
 
-    def search_withDenseSparse(
-        self,
-        query: str,
-        namespace: str,
-        top_k: int = 50,
-        rerank_top_n: int = 10,
-        alpha: float = 0.5,
-    ) -> list:
-        """
-        分别获取问题的稀疏和密集向量化矩阵
-        双路查询
-        对结果和文字重排序
-        分别检索的向量对文本意思没有关联
-        交叉编码器同时接收查询‑文档对作为输入
-        通过 Transformer 的全注意力机制（Self‑Attention）让查询和文档的每个词充分交互
-        最终输出一个相关性分数
-        :param query:
-        :param namespace:
-        :param top_k:
-        :param rerank_top_n:
-        :param alpha:
-        :return:
-        """
-        t_total = time.time()
+    def dense_recall(self, query: str, namespace: str, top_k: int) -> list:
+        """稠密路独立召回(BGE 嵌入 → 纯向量查询).
 
-        # 步骤0：入参校验
+        Args:
+            query: 查询文本。
+            namespace: Pinecone 命名空间。
+            top_k: 召回条数(≥1)。
+
+        Returns:
+            Pinecone Match 列表(按本路余弦得分降序), 供 fusion.rrf_fuse 消费。
+
+        Raises:
+            RuntimeError: 索引未初始化。
+        """
         if self.index is None:
             raise RuntimeError("索引未初始化, 请先调用 create_index()")
-
-        effective_n = max(1, int(rerank_top_n))
-        effective_top_k = max(effective_n, int(top_k))
-
-        rag_log.debug(
-            "RAG 检索开始",
-            detail=f"query={query[:60]} | top_k={effective_top_k} | alpha={alpha} | ns={namespace}",
-        )
-
-        # 步骤1：获取查询的密集和稀疏向量
-        t_embed = time.time()
         dense_vec = self.embeddings.embed_query(query)
-        sparse_vec = self.bm25.encode_queries(query)
-        rag_log.debug(
-            "密集+稀疏向量编码完成",
-            detail=f"dense_dim={len(dense_vec)}",
-            result=f"elapsed={time.time() - t_embed:.2f}s",
-        )
-
-        # 使用dict格式的稀疏向量，确保兼容hybrid_convex_scale函数
-        sparse_vec_obj = {
-            "indices": sparse_vec["indices"],
-            "values": sparse_vec["values"],
-        }
-
-        # 使用官方混合凸组合函数
-        weighted_dense, weighted_sparse = hybrid_convex_scale(
-            dense_vec, sparse_vec_obj, alpha
-        )
-
-        # 步骤2：混合召回
-        t_query = time.time()
-        results = self.index.query(
-            vector=weighted_dense,
-            sparse_vector=weighted_sparse,
+        res = self.index.query(
+            vector=dense_vec,
             namespace=namespace,
-            top_k=effective_top_k,
+            top_k=max(1, int(top_k)),
             include_metadata=True,
         )
-        matches = results.matches
-        rag_log.debug(
-            "Pinecone 混合召回完成",
-            detail=f"matches={len(matches)}",
-            result=f"elapsed={time.time() - t_query:.2f}s",
+        return list(res.matches)
+
+    def sparse_recall(self, query: str, namespace: str, top_k: int) -> list:
+        """稀疏路独立召回(BM25 编码 → 纯稀疏查询).
+
+        Args/Returns/Raises 契约与 dense_recall 一致, 区别仅在向量形态:
+        encode_queries 产出 {indices, values} 稀疏向量。
+        """
+        if self.index is None:
+            raise RuntimeError("索引未初始化, 请先调用 create_index()")
+        sparse_vec = self.bm25.encode_queries(query)
+        res = self.index.query(
+            sparse_vector=sparse_vec,
+            namespace=namespace,
+            top_k=max(1, int(top_k)),
+            include_metadata=True,
         )
-
-        if not matches:
-            rag_log.info(
-                "RAG 检索结束",
-                detail="未检索到任何结果",
-                result=f"total={time.time() - t_total:.2f}s",
-            )
-            return []
-
-        # 步骤3：提取文本对(L6: metadata 缺 chunk_text 不再 KeyError)
-        texts = [m.metadata.get("chunk_text", "") if m.metadata else "" for m in matches]
-        pairs = [[query, t] for t in texts]
-
-        # 步骤4：重排序
-        t_rerank = time.time()
-        try:
-            scores = self.reranker.predict(pairs)
-            scores = list(scores) if not isinstance(scores, list) else scores
-            scores = [float(s) for s in scores]
-        except Exception as e:
-            rag_log.warning(
-                "重排序失败,降级为原始混合排序",
-                detail=str(e),
-                result=f"返回前{effective_n}条",
-            )
-            return matches[:effective_n]
-
-        rag_log.debug(
-            "CrossEncoder 重排序完成",
-            detail=f"pairs={len(pairs)} | scores_range=[{min(scores):.3f}, {max(scores):.3f}]",
-            result=f"elapsed={time.time() - t_rerank:.2f}s",
-        )
-
-        if len(scores) != len(matches):
-            rag_log.warning(
-                "重排序结果数量不匹配,降级为原始排序",
-                detail=f"scores={len(scores)} vs matches={len(matches)}",
-            )
-            return matches[:effective_n]
-
-        # 组合得分与匹配对象成元组，按得分排序，再取出匹配对象
-        reranked = [
-            match
-            for match, _ in sorted(
-                zip(matches, scores), key=lambda pair: pair[1], reverse=True
-            )
-        ]
-        top_score = max(scores) if scores else 0
-        rag_log.info(
-            "RAG 检索完成",
-            detail=f"召回{len(matches)}条 → 重排序 → 返回{min(effective_n, len(reranked))}条",
-            result=f"top_score={top_score:.3f} | total={time.time() - t_total:.2f}s",
-        )
-        return reranked[:effective_n]
+        return list(res.matches)
