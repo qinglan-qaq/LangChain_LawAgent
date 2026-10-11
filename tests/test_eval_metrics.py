@@ -54,3 +54,41 @@ def test_evaluate_aggregates_all():
 def test_empty_cases_zero():
     assert evaluate([], k=5)["hit_rate_at_5"] == 0.0
     assert evaluate([], k=5)["mrr_at_5"] == 0.0
+
+
+# ── RRF 改造: 标定辅助(纯函数) ──
+
+
+def test_split_scores_by_relevance():
+    """按 relevant_ids 把返回文档分成正/负两组(缺 relevance_score 跳过)。"""
+    from lawApp_LangGraph.eval_metrics import split_scores
+
+    docs = [
+        {"id": "a", "relevance_score": 0.9},
+        {"id": "b", "relevance_score": 0.2},
+        {"id": "c", "rrf_score": 0.03},  # rerank 不可用 → 跳过
+    ]
+    pos, neg = split_scores(docs, ["a"])
+    assert pos == [0.9] and neg == [0.2]
+
+
+def test_suggest_thresholds_operating_points():
+    """correct 线 = precision≥目标的最高切点; incorrect 线 = 下方 relevant<floor。"""
+    from lawApp_LangGraph.eval_metrics import suggest_thresholds
+
+    pos = [0.9, 0.85, 0.8]
+    neg = [0.3, 0.1, 0.05]
+    out = suggest_thresholds(pos, neg, precision_target=0.7, relevant_floor=0.05)
+    assert out["correct_threshold"] == 0.9  # t=0.9: 1 正 0 负 → p=1.0
+    assert out["incorrect_threshold"] == 0.05  # 最低切点即满足
+
+
+def test_suggest_thresholds_insufficient_data():
+    """空正例或空负例 → None 建议值(调用方沿用现值)。"""
+    from lawApp_LangGraph.eval_metrics import suggest_thresholds
+
+    out = suggest_thresholds([], [0.1])
+    assert out["correct_threshold"] is None
+    assert out["incorrect_threshold"] is None
+    out2 = suggest_thresholds([0.9], [])
+    assert out2["correct_threshold"] is None

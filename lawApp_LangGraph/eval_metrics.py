@@ -65,3 +65,70 @@ def evaluate(cases: list[dict], k: int = 5) -> dict:
         f"recall_at_{k}": recall_at_k(cases, k),
         f"f1_at_{k}": f1_at_k(cases, k),
     }
+
+
+def split_scores(docs: list[dict], relevant_ids: list) -> tuple[list, list]:
+    """把返回文档的 relevance_score 按 relevant_ids 分成正/负两组.
+
+    Args:
+        docs: retriever 返回的文档 dict 列表(含 id / relevance_score)。
+        relevant_ids: golden set 的相关向量 id 列表。
+
+    Returns:
+        (正例分数列表, 负例分数列表); 缺 relevance_score 的文档
+        (rerank 不可用)跳过, 不进任何一组。
+    """
+    rel = set(relevant_ids or [])
+    pos, neg = [], []
+    for d in docs or []:
+        s = d.get("relevance_score")
+        if s is None:
+            continue
+        (pos if d.get("id") in rel else neg).append(float(s))
+    return pos, neg
+
+
+def suggest_thresholds(
+    pos_scores: list[float],
+    neg_scores: list[float],
+    precision_target: float = 0.7,
+    relevant_floor: float = 0.05,
+) -> dict:
+    """从正/负分数分布建议 CRAG 三档切点(spec §5④ 运营点).
+
+    Args:
+        pos_scores: relevant_ids 内文档的 relevance_score 列表。
+        neg_scores: relevant_ids 外文档的 relevance_score 列表。
+        precision_target: correct 线的 precision 目标(默认 0.7, 引用安全线)。
+        relevant_floor: incorrect 线下方允许的 relevant 占比(默认 0.05)。
+
+    Returns:
+        {"correct_threshold": 最高满足 precision≥目标的切点,
+         "incorrect_threshold": 最低满足下方 relevant 占比<floor 的切点}。
+        空正例或空负例(数据不足)时对应值为 None, 调用方沿用现值。
+    """
+    if not pos_scores or not neg_scores:
+        return {"correct_threshold": None, "incorrect_threshold": None}
+
+    cuts = sorted(set(pos_scores + neg_scores), reverse=True)
+
+    correct_thr = None
+    for t in cuts:  # 降序, 首个满足即最高切点(spec §5④)
+        above_pos = sum(1 for s in pos_scores if s >= t)
+        above_neg = sum(1 for s in neg_scores if s >= t)
+        if (above_pos + above_neg) > 0 and (
+            above_pos / (above_pos + above_neg) >= precision_target
+        ):
+            correct_thr = t
+            break
+
+    incorrect_thr = None
+    for t in reversed(cuts):  # 升序找最低满足切点
+        below_pos = sum(1 for s in pos_scores if s < t)
+        below_all = sum(1 for s in pos_scores + neg_scores if s < t)
+        if below_all == 0 or below_pos / below_all < relevant_floor:
+            incorrect_thr = t  # 升序首中即最低切点
+            break
+
+    return {"correct_threshold": correct_thr,
+            "incorrect_threshold": incorrect_thr}
