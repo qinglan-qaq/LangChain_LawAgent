@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     rerank_enabled: str = "1"
     # 预计算 BM25 参数, env BM25_PATH 可覆盖
     bm25_path: Optional[str] = str(_DATA_DIR / "bm25_law_params.json")
+    # RRF 融合参数(spec §5②): k=60 平滑惯例, 两路等权起步, 标定后可调
+    rrf_k: int = 60
+    rrf_w_dense: float = 1.0
+    rrf_w_sparse: float = 1.0
 
     # ============ 数据文件 ============
     # 法律文档目录(法条 TXT + 案例 MD), env DOCUMENTS_DIR 可覆盖

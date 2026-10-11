@@ -58,6 +58,13 @@ class RetrievedDocument(BaseModel):
 
     rank: int = 0
     id: str = ""
+    # RRF 融合分 — 排名相对分, 仅日志/监控/调试溯源, 不进任何决策路径
+    # (全垃圾召回时照样高分, 不能做门控, 见 spec §4 决策记录)
+    rrf_score: float = 0.0
+    # 最终得分 = sigmoid(CrossEncoder logits), CRAG 三档唯一判据
+    relevance_score: float = 0.0
+    # 兼容别名 = relevance_score; 旧 checkpoint / tracing.rag_top_score /
+    # score.py 读它。rerank 不可用时 retriever 不写此键(缺省 0.0)
     hybrid_score: float = 0.0
     year: str = ""
     case_number: str = ""

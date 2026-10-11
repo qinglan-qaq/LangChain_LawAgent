@@ -28,3 +28,23 @@ def test_retriever_signature_namespace_default_none():
 
     for fn in (BaseRetriever.search, PineconeRetriever.search):
         assert inspect.signature(fn).parameters["namespace"].default is None
+
+
+def test_rrf_settings_and_state_fields():
+    """RRF 改造: settings 默认值 + RetrievedDocument 新字段(旧 checkpoint 兜底)."""
+    from lawApp_LangGraph.config import Settings
+    from lawApp_LangGraph.state import RetrievedDocument
+
+    s = Settings()
+    assert s.rrf_k == 60
+    assert s.rrf_w_dense == 1.0
+    assert s.rrf_w_sparse == 1.0
+
+    d = RetrievedDocument()  # 不传任何字段 — 旧 checkpoint 缺新键路径
+    assert d.rrf_score == 0.0
+    assert d.relevance_score == 0.0
+    assert d.hybrid_score == 0.0
+    d2 = RetrievedDocument(
+        id="x", rrf_score=0.03, relevance_score=0.95, hybrid_score=0.95
+    )
+    assert d2.relevance_score == 0.95 and d2.hybrid_score == 0.95
