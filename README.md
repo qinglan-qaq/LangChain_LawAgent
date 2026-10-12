@@ -1,5 +1,7 @@
 # lawApp_LangGraph — 法律智能咨询 Agent
 
+**[中文](README.md)** | **[English](README_EN.md)**
+
 <div align="center">
 
 基于 **LangGraph Plan & Execute** 架构的婚姻家庭法 AI 咨询系统，集成混合检索增强生成 (CRAG)、人机协同审批 (HITL)、长期记忆、Word 法律文书生成、对话日志审计与 Vue3 流式前端。
@@ -82,9 +84,10 @@
 
 | 亮点 | 说明 |
 |------|------|
-| **混合检索** | 密集语义匹配 (BGE) + 稀疏关键词匹配 (BM25)，可调 alpha 权重兼顾"意思相近"与"关键词命中" |
-| **CrossEncoder 重排序** | BGE-reranker-large 全注意力交互打分，非简单向量距离，Top-N 精度大幅提升 |
-| **CRAG 三档评估** | 将文档分为 correct / ambiguous / incorrect 三档，Agent 根据评估结论自主决定是否联网补充 |
+| **RRF 双路融合** | 稠密语义召回 (BGE) 与稀疏关键词召回 (BM25) 各自独立查询，客户端 RRF 倒数排名融合 (k=60，权重可调) — 名次级融合天然免疫两种分数量纲差异，无需调权重 α |
+| **CrossEncoder 重排序** | BGE-reranker-large 全注意力交互打分，logits 经 sigmoid 归一为 relevance_score (0-1)，作为 CRAG 三档唯一判据 |
+| **CRAG 三档评估** | golden set 实测标定切点 (correct ≥0.731 / 0.5005≤ambiguous<0.731 / incorrect <0.5005)，Agent 据评估结论自主决定是否联网补充 |
+| **诚实降级** | 单路召回失败降级存活路；重排不可用时文档缺 relevance_score 键 → 评估全归 ambiguous + 强制判"不足"触发联网补充，绝不拿名次分伪装充足 |
 
 ### 工程实践
 
@@ -96,7 +99,7 @@
 | **SSE 流式推送** | 实时推送推理 token、计划进度、工具调用、interrupt、文书生成事件，前端零刷新全流程可视 |
 | **对话日志审计** | 全流程事件流落库（问答/澄清/确认决策/终答/文书），聚合 API 按轮次时间线还原，支持服务端中断后前端无损恢复 |
 | **LLM 追踪** | `traced` 装饰器包裹全节点/工具/LLM 调用，trace run/span 落 PostgreSQL，兼容 LangSmith 观测 |
-| **测试背书** | 16 个测试文件、197 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界），回归全绿 |
+| **测试背书** | 25 个测试文件、250 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界 + RRF 融合/检索/标定），回归全绿 |
 | **并发安全** | 基于 LangGraph PostgreSQL 检查点实现会话级隔离与中断恢复 |
 
 ---
@@ -186,29 +189,50 @@ START → ingest → risk_gate ──[风险确认]──→ interrupt → resum
 
 ## 检索系统
 
-### 混合检索管线
+### RRF 混合检索管线
 
 ```text
 用户 Query
-  ├─→ BGE-large-zh-v1.5 (密集向量, 1024 维)
-  ├─→ BM25Encoder (稀疏向量, 预计算参数)
-  └─→ convex_scale(alpha=0.7) 融合
-       ↓
-  Pinecone 混合查询 (dotproduct)
-       ↓
-  BGE-reranker-large CrossEncoder 重排序
-       ↓
-  返回 Top-N 结果
+  ├─→ dense_recall:  BGE-large-zh-v1.5 (密集向量, 1024 维) → Pinecone 语义查询
+  ├─→ sparse_recall: BM25Encoder (稀疏向量, 预计算参数)   → Pinecone 关键词查询
+  │        (两路 asyncio.gather 并发)
+  ▼
+rrf_fuse 倒数排名融合: rrf(d) = Σ w/(k + rank_route),  k=60, 权重可调
+  │        (取融合 top max(2×rerank_top_n, 20) 候选)
+  ▼
+BGE-reranker-large CrossEncoder 重排 → sigmoid(logits) → relevance_score
+  ▼
+返回 Top-N (默认 5): relevance_score = 决策判据, rrf_score = 溯源
 ```
+
+### 得分语义
+
+| 字段 | 来源 | 用途 |
+|------|------|------|
+| `relevance_score` | sigmoid(CrossEncoder logits) | **CRAG 三档唯一判据**（绝对分，可判断"全是垃圾"） |
+| `hybrid_score` | = relevance_score 兼容别名 | 旧监控/评分代码 (`tracing.py` / `score.py`) 零改动继续可读 |
+| `rrf_score` | Σ w/(k+rank) | 仅溯源与监控展示，不进任何决策 — 名次相对分，垃圾召回也接近满分 |
+
+RRF 融合只决定"哪些候选进入重排"，最终排序与质量判定完全交给 CrossEncoder 绝对分。
+
+### 降级语义
+
+| 异常 | 行为 |
+|------|------|
+| 单路召回失败 | 降级存活路（日志 warning），双路全挂抛错走工具层固定中文文案 |
+| 重排不可用 | 文档缺 relevance_score/hybrid_score 键（缺键即标记）→ 评估全归 ambiguous + quality_verdict 强制"不足，建议进行网络搜索补充" |
+
+三档阈值经 golden set 实测标定（`scripts/run_eval.py --suite calibration`，label `rrf-cal-1`）：correct ≥0.731（precision≥0.7 最高切点）、incorrect <0.5005（下方相关占比<5% 切点），可经 `CORRECT_THRESHOLD` / `INCORRECT_THRESHOLD` 环境变量覆盖。
 
 ### 关键参数
 
 | 组件 | 选型 | 说明 |
 |------|------|------|
-| 向量数据库 | Pinecone Serverless (us-east-1) | 密集 + 稀疏双向量存储 |
+| 向量数据库 | Pinecone Serverless (us-east-1) | 稠密 + 稀疏双向量存储（新建索引勿指定 vector_type，纯 dense 类型会拒绝稀疏查询） |
 | 嵌入模型 | BAAI/bge-large-zh-v1.5 | 1024 维，中文语义优化，归一化输出 |
-| 重排序 | BAAI/bge-reranker-large | CrossEncoder 全注意力架构 |
-| 稀疏编码 | pinecone-text BM25Encoder | 预计算参数 ~387KB，启动即用 |
+| 重排序 | BAAI/bge-reranker-large | CrossEncoder 全注意力架构，客户端单例懒加载 |
+| 稀疏编码 | pinecone-text BM25Encoder | 预计算参数 ~387KB 随仓库分发，启动即用 |
+| RRF 融合 | 融合层纯函数 `fusion.py` | k=60（`RRF_K` 可调）、稠密/稀疏权重 1.0（`RRF_W_DENSE`/`RRF_W_SPARSE`） |
 | 文本分割 | MarkdownHeaderTextSplitter + RecursiveCharTextSplitter | chunk_size=512, overlap=50 |
 
 ### 数据规模
@@ -216,6 +240,16 @@ START → ingest → risk_gate ──[风险确认]──→ interrupt → resum
 - **11 个** 年度法院案例文件（2014-2024，婚姻家庭与继承纠纷）
 - **约 5,030 条** 向量记录
 - **7 部** 相关法律文本（民法典、反家暴法、妇女权益保障法等）
+
+### 检索评测
+
+```bash
+python scripts/gen_golden_set.py            # 生成 golden set (30 例, 按案由分层抽样)
+python scripts/run_eval.py --suite retrieval --label <标签> [--baseline <旧标签>]   # 指标回归门
+python scripts/run_eval.py --suite calibration --label <标签>                      # 三档阈值标定
+```
+
+`eval_metrics.py` 提供 hit_rate@k / MRR@k / P / R / F1 与标定辅助（split_scores / suggest_thresholds），评测结果落 `eval_runs` 表供监控页对比。
 
 ---
 
@@ -267,8 +301,8 @@ START → ingest → risk_gate ──[风险确认]──→ interrupt → resum
 
 | 工具 | 分类 | 功能 |
 |------|------|------|
-| `retrieve_legal_knowledge` | CRAG | Pinecone 混合检索法律案例，支持 top_k / alpha / namespace 参数调优 |
-| `evaluate_case_relevance` | CRAG | 三档质量评估（correct ≥0.7 / ambiguous 0.3~0.7 / incorrect <0.3） |
+| `retrieve_legal_knowledge` | CRAG | RRF 双路混合检索法律案例（稠密+BM25→RRF 融合→CrossEncoder 重排），支持 top_k / rerank_top_n / namespace 参数调优 |
+| `evaluate_case_relevance` | CRAG | 三档质量评估（判据 relevance_score：correct ≥0.731 / ambiguous ≥0.5005 / incorrect），重排不可用全归 ambiguous 并强制判不足 |
 | `analyze_legal_issue` | CRAG | 角色化法律分析生成，整合案例、法条与网络资料 |
 | `get_google_search` | 外部搜索 | SerpAPI 联网搜索，最多 8 条结构化结果 |
 | `search_memory` | 长期记忆 | PostgreSQL + pgvector 语义记忆搜索 (cosine 相似度) |
@@ -338,7 +372,7 @@ QueryResponse(
 
 ```python
 # A. 工具返回层
-RetrievedDocument  # rank, rerank_score, hybrid_score, year, case_number, chunk_text
+RetrievedDocument  # rank, id, rrf_score(溯源), relevance_score(判据), hybrid_score(兼容别名), year, case_number, case_cause, chunk_text
 EvaluationResult   # correct/ambiguous/incorrect 计数与列表, quality_verdict
 WebSearchResult    # title, link, snippet
 
@@ -392,9 +426,16 @@ AgentState         # 会话标识 · 请求上下文 · 计划执行 · 输出 �
 
 ### 环境要求
 
-- Python 3.11+
-- PostgreSQL 15（需 pgvector 扩展）
-- wkhtmltopdf（PDF 生成依赖）
+| 依赖 | 版本/说明 | 用途 |
+|------|-----------|------|
+| Python | 3.11+ | 后端运行时（依赖版本锁定见 `requirements.lock` / conda 导出 `environment.lock`） |
+| Node.js | 18+ | 前端构建（Vue 3 + Vite 7 + Tailwind v4） |
+| PostgreSQL 15 + pgvector | 推荐 docker 部署 | 会话 checkpoint / 对话日志 / LLM 追踪 / 长期记忆 / 法条检索 / 评测记录 |
+| Pinecone | Serverless 账号 | 案例混合检索（稠密+稀疏双向量索引） |
+| DeepSeek API Key | — | LLM 规划（Pro）与执行（Flash） |
+| SerpAPI Key | 可选 | 联网搜索补充（无 key 时检索不足的回答会少此来源） |
+| wkhtmltopdf | — | PDF 报告生成 |
+| HuggingFace 模型 | 首次运行自动下载 | `BAAI/bge-large-zh-v1.5`（~1.3GB，嵌入）+ `BAAI/bge-reranker-large`（~2.2GB，重排），缓存目录经 `HF_HOME` 指定，国内可设 `HF_ENDPOINT` 镜像 |
 
 ### 安装
 
@@ -402,30 +443,65 @@ AgentState         # 会话标识 · 请求上下文 · 计划执行 · 输出 �
 # 1. 克隆仓库
 git clone <repo-url> && cd LangChain_LawAgent-main
 
-# 2. 安装依赖（在仓库根目录执行，requirements.txt 位于根目录）
+# 2. 安装 Python 依赖（在仓库根目录执行，requirements.txt 位于根目录）
 pip install -r requirements.txt
+# 或复现锁定版本: pip install -r requirements.lock
 
-# 3. 配置环境变量
+# 3. 启动 PostgreSQL (pgvector)
+docker run -d --name postgres-vector \
+  -e POSTGRES_USER=my_pgsql -e POSTGRES_PASSWORD=123123 -e POSTGRES_DB=Law_app \
+  -p 15432:5432 ankane/pgvector:latest
+
+# 4. 配置环境变量
 cp lawApp_LangGraph/.env.example lawApp_LangGraph/.env
-# 编辑 .env 填入 API Key 与数据库信息
+# 编辑 .env 填入 API Key 与数据库连接（见下表）
 ```
 
 ### 环境变量
 
+`lawApp_LangGraph/.env`（pydantic-settings 读取，优先级：进程 env > .env > `config.py` 默认值）：
+
 ```ini
+# —— 必填 ——
 DEEPSEEK_API_KEY=sk-xxx
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-PINECONE_API_KEY=xxx
-PINECONE_INDEX_NAME=pinecone-law-agent   # 示例值，默认见 config.py (pinecone-test-lawapp)
-SERPAPI_API_KEY=xxx
-DB_NAME=Law_app
-DB_USER=postgres
-DB_PASSWORD=xxx
+PINECONE_API_KEY=xxx                      # 案例混合检索
 DB_HOST=localhost
-DB_PORT=5433
+DB_PORT=15432
+DB_NAME=Law_app
+DB_USER=my_pgsql
+DB_PASSWORD=xxx
+
+# —— 按需 ——
+PINECONE_INDEX_NAME=pinecone-test-lawapp  # 索引名
+PINECONE_NAMESPACE=Law_test_namespace      # 命名空间
+SERPAPI_API_KEY=xxx                       # 联网搜索(可选)
+RETRIEVER_BACKEND=pinecone                # pinecone(默认) / pgvector
+HF_HOME=E:/huggingface_cache               # 模型缓存目录
+MCP_SERVER_URL=http://127.0.0.1:9381/mcp  # MCP 工具挂载(掉线自动降级)
+
+# —— 可调参数(均有默认值, 同名大写覆盖 config.py) ——
+# RRF_K=60 / RRF_W_DENSE=1.0 / RRF_W_SPARSE=1.0    # RRF 融合
+# CORRECT_THRESHOLD=0.731 / INCORRECT_THRESHOLD=0.5005  # CRAG 三档(golden set 标定)
+# RECURSION_LIMIT=60 / MAX_ROUNDS=10 / MAX_CLARIFY_ROUNDS=5
 ```
 
-其余可配置项（RECURSION_LIMIT / MAX_ROUNDS / CRAG 三档阈值 / 日志级别等）见 `docs/PROJECT_OVERVIEW.md` §15 配置一览表，字段与同名大写环境变量一一对应。
+完整配置清单（30+ 项）见 `docs/PROJECT_OVERVIEW.md` §15。
+
+### 数据入库（首次部署）
+
+```bash
+# A. Pinecone 案例库(混合检索): 建混合索引 + 全量上传
+#    create_index() 已默认建混合可查索引(勿手动指定 vector_type="dense")
+#    上传入口: lawApp_LangGraph/RAG_service/RAG_program.py 的 add_document()
+#    (Markdown 分块 → BGE 密集向量 + BM25 稀疏向量 → 批量 upsert, 见 notebooks/RAG_Service_Test.ipynb)
+
+# B. pgvector 案例库(法条检索/备用后端)
+python scripts/ingest_cases_pgvector.py          # 幂等, 重跑覆盖同 id
+
+# C. 评测 golden set(可选, 30 例)
+python scripts/gen_golden_set.py
+```
 
 ### 启动
 
@@ -457,13 +533,30 @@ npm run dev      # http://localhost:5173（/api 前缀由 vite proxy 转发到 1
 npm run build    # 产物 dist/，可由任意静态服务托管（/api 需网关承担同样转发）
 ```
 
+### MCP server（可选）
+
+```bash
+python -m lawApp_LangGraph.mcp.mcp_server          # 默认 127.0.0.1:9381
+MCP_PORT=9382 python -m lawApp_LangGraph.mcp.mcp_server
+```
+
+law-search 工具经 MCP 挂载（http / stdio 双传输），server 掉线时客户端优雅降级，不阻断主流程。
+
+### 测试与评测
+
+```bash
+python -m pytest tests/ -q                  # 全量回归(250 用例, 需 PG 在线)
+python scripts/run_eval.py --suite retrieval --label <标签> [--baseline <旧标签>]  # 检索指标
+python scripts/run_eval.py --suite calibration --label <标签>                      # 三档阈值标定
+```
+
 ---
 
 ## 项目结构
 
 ```text
 LangChain_LawAgent-main/
-├── README.md
+├── README.md / README_EN.md     # 中 / 英文文档（顶部互链）
 ├── requirements.txt             # Python 依赖（直接安装）
 ├── requirements.lock            # 锁定版本，复现环境用
 ├── environment.lock             # conda 环境导出
@@ -498,11 +591,12 @@ LangChain_LawAgent-main/
 │   │   └── db_tools.py          # 长期记忆 + 法条检索 (pgvector)
 │   │
 │   └── RAG_service/             # RAG 检索服务
-│       ├── RAG_program.py       # RAG_service 类：混合检索 + BM25 + CrossEncoder 重排序
-│       ├── base.py              # 检索器抽象基类
-│       ├── embedder.py          # BGE 嵌入 / 重排序模型懒加载单例
-│       ├── pinecone_retriever.py # Pinecone 混合检索封装
-│       └── pgvector_retriever.py # pgvector 法条检索封装
+│       ├── RAG_program.py       # RAG_service 类：索引/分块/上传 + dense_recall/sparse_recall 双路召回
+│       ├── base.py               # 检索器抽象基类 (get_retriever 按 RETRIEVER_BACKEND 分发)
+│       ├── fusion.py             # RRF 融合纯函数层 (rrf_fuse / sigmoid / clamp_search_params)
+│       ├── embedder.py           # BGE 嵌入 / 重排序模型懒加载单例
+│       ├── pinecone_retriever.py # Pinecone 编排：双路并发召回 → RRF 融合 → CrossEncoder 出分
+│       └── pgvector_retriever.py # pgvector 法条检索封装 (纯稠密, 不参与 RRF 改造)
 │
 ├── data/                        # 数据文件
 │   ├── Documents/
@@ -510,6 +604,7 @@ LangChain_LawAgent-main/
 │   │   └── MarkDownFiles/       # 11 个案例 MD (2014-2024)
 │   ├── doc_templates/
 │   │   └── complaint/           # Word 文书模板 (source.docx + fields.yaml + template.docx)
+│   ├── eval/                    # 检索评测 golden set (retrieval.jsonl, 可重生成)
 │   ├── bm25_law_params.json     # 预计算 BM25 参数（随仓库分发）
 │   └── sample_law.txt
 │
@@ -521,20 +616,26 @@ LangChain_LawAgent-main/
 │   ├── prompts_test.ipynb       # 提示词
 │   └── tools_test.ipynb         # 工具集
 │
-├── tests/                       # pytest（157 用例，根目录执行 python -m pytest tests/ -q）
+├── tests/                       # pytest（250 用例，根目录执行 python -m pytest tests/ -q）
 │   ├── test_engineering.py      # 配置 / 导入 / 工程约束
 │   ├── test_smoke.py            # 冒烟（含图拓扑 / 工具注册表断言）
 │   ├── test_boundary_*.py       # 边界用例（高/中/低后端）
+│   ├── test_fusion.py            # RRF 融合纯函数（8 用例）
+│   ├── test_rrf_retrieval.py    # 双路召回 / 编排 / 工具面契约（10 用例）
+│   ├── test_eval_metrics.py     # 指标 + 阈值标定辅助
+│   ├── test_p0_retrieval.py     # 后端抽象 / state 得分语义
 │   ├── test_hitl_single_question.py # HITL 问诊 payload / resume 归一化
 │   ├── test_dialogue_events.py  # 对话日志事件流 + 聚合（真实 PG）
 │   ├── test_docx_generation.py  # Word 文书全链（模板/工具/图内/API, 28 用例）
 │   ├── test_tracing.py / test_trace_db.py / test_trace_e2e.py # LLM 追踪
 │   ├── test_mcp.py              # MCP 挂载与 stdio 端到端
 │   └── ...
-│
+
 ├── scripts/
 │   ├── run_nb.py                # 批量执行 notebook
-│   ├── ingest_cases_pgvector.py # 案例语料切块 + BGE 嵌入 + pgvector 入库
+│   ├── ingest_cases_pgvector.py # 案例语料切块 + BGE 嵌入 + pgvector 入库（幂等）
+│   ├── gen_golden_set.py        # 检索评测 golden set 生成（Pinecone 全量拉取 + 分层抽样 + LLM 提问）
+│   ├── run_eval.py              # 评测 runner：--suite retrieval（指标回归门）/ calibration（三档阈值标定）
 │   ├── build_docx_template.py  # Word 模板重建脚本 (source.docx → template.docx)
 │   └── run_pytest_timeout_skip.py # PG 停机批次超时跳过执行器
 │
@@ -561,11 +662,11 @@ LangChain_LawAgent-main/
 
 | 层级 | 技术 | 说明 |
 |------|------|------|
-| Agent 框架 | LangGraph | StateGraph 编排 + MemorySaver 检查点 |
+| Agent 框架 | LangGraph | StateGraph 编排 + PostgreSQL 检查点（HITL 中断恢复） |
 | LLM | DeepSeek (langchain-openai) | Pro 规划 / Flash 执行，双模型架构 |
 | Web 服务 | FastAPI + Uvicorn | REST API + SSE 流式 |
 | 数据模型 | Pydantic v2 | 全链路类型约束 |
-| 向量检索 | Pinecone Serverless | 密集 + 稀疏混合查询 |
+| 向量检索 | Pinecone Serverless | 稠密 + 稀疏双路独立召回，客户端 RRF 倒数排名融合 (k=60) |
 | 嵌入 & 重排 | BGE-large-zh-v1.5 / BGE-reranker-large | HuggingFace + sentence-transformers |
 | 稀疏编码 | pinecone-text BM25Encoder | 关键词匹配 |
 | 前端 | Vue 3 + Vite + Tailwind v4 | 单界面双模式（代理律师 / 律师助理），axios + fetch SSE |
