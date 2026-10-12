@@ -1,0 +1,87 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# pytest 缓存
+.pytest_cache/
+
+# Jupyter Notebook 检查点文件夹
+.ipynb_checkpoints/
+
+# PyCharm 运行时支持库（版本号会变化，使用通配符忽略）
+*-pycharm-support-libs/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# 环境变量
+.env
+*.env
+env_backup.txt
+
+# 日志与运行时产物
+logs/
+*.log
+pdf_outputs/
+.DS_Store
+
+# tests/test_mcp.py 运行期生成的 stdio 入口,正常路径下测试会自行删除,
+# 进程被强杀时会残留,故不入库
+lawApp_LangGraph/mcp/mcp_server_stdio.py
+
+# 工具链本地配置
+.claude/
+.vscode/
+# .cursor/mcp.json 是对外交付的 MCP server 挂载配置,保留入库;忽略其余 cursor 本地文件
+.cursor/*
+!.cursor/mcp.json
+# .cursor/rules/ 是随仓库分发的 AI 协作规则,与 AGENTS.md 等一并入库
+!.cursor/rules/
+
+# PyCharm 相关
+.idea/
+*-pycharm-support-libs/
+
+243_26053_29-pycharm-support-libs/
+253_32098_74-pycharm-support-libs/
+
+# 虚拟环境
+venv/
+env/
+ENV/
+.venv
+
+# 数据文件（可选）
+*.csv
+*.xlsx
+*.db
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

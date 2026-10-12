@@ -23,7 +23,12 @@ env_backup.txt
 logs/
 *.log
 pdf_outputs/
+# docx 文书生成运行时产物(同 pdf_outputs, 不入库)
+docx_outputs/
 .DS_Store
+
+# ZCode 会话本地数据(plans 等, 不入库; .zcodeignore 忽略配置保留入库)
+.zcode/
 
 # tests/test_mcp.py 运行期生成的 stdio 入口,正常路径下测试会自行删除,
 # 进程被强杀时会残留,故不入库
