@@ -100,6 +100,39 @@ class Settings(BaseSettings):
     # "0"/"false"/"no" 禁用(保持原字符串语义, 非 bool)
     mcp_tools_enabled: str = "1"
 
+    # ============ minorStates 内容监控 ============
+    minor_states_enabled: bool = True
+    minor_input_text_limit: int = 2000
+    minor_output_text_limit: int = 2000
+    minor_json_max_bytes: int = 65536
+    minor_doc_preview_count: int = 3
+    minor_writer_queue_max: int = 1000
+    minor_writer_batch: int = 20
+    minor_writer_flush_ms: int = 200
+
+    # ============ 短期记忆 ============
+    memory_recent_turns: int = 2
+    memory_per_msg_limit: int = 400
+    memory_total_limit: int = 1500
+    memory_compress_after_turns: int = 3
+    memory_compress_timeout_s: float = 3.0
+    memory_digest_limit: int = 3
+    memory_compress_enabled: bool = True
+
+    # ============ 统一上下文信封(段级预算) ============
+    context_case_elements_limit: int = 1500
+    context_user_supplements_limit: int = 2000
+    context_history_limit: int = 1500
+    context_retrieval_digest_limit: int = 300
+    context_rag_limit: int = 2000
+    context_laws_limit: int = 1500
+    context_web_limit: int = 900
+    context_query_limit: int = 1000
+    context_case_detail_mode: str = "auto"  # raw | compressed | auto
+
+    # ============ 要素补全 ============
+    max_element_fill_rounds: int = 2
+
     # ============ DB / 持久化 ============
     checkpoint_backend: str = "auto"
     database_url: Optional[str] = None

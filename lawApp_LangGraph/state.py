@@ -286,6 +286,8 @@ class PlanStep(BaseModel):
     step_id: int
     description: str
     tool_name: Optional[str] = None
+    # planner 伪工具参数(request_element_fill 等)
+    args: Dict[str, Any] = Field(default_factory=dict)
     status: StepStatus = "pending"
     retry_count: int = 0
 
@@ -364,6 +366,13 @@ class AgentState(BaseModel):
     degrade_ask_count: int = 0
     # 最近一次 interrupt 事件(覆盖语义)
     hitl_event: Optional[Dict[str, Any]] = None
+
+    # 2026-10-23: 短期记忆(结构化摘要 + recent + retrieval_digest)
+    conversation_memory: Dict[str, Any] = Field(default_factory=dict)
+    # planner 伪工具 request_element_fill 的待补 key(executor 写入, 路由读取)
+    pending_fill_keys: List[str] = Field(default_factory=list)
+    # element_fill 中断轮数(ingest 归零)
+    element_fill_rounds: int = 0
 
     # Agent显式输出结果
 
