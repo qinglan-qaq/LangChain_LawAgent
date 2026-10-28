@@ -72,6 +72,8 @@ from lawApp_LangGraph.state import (
     default_case_elements,
 )
 from lawApp_LangGraph import dialogue_log  # 方案c: JSON 会话历史事件流落 PG
+from lawApp_LangGraph import memory as memory_mod
+from lawApp_LangGraph.context import build_context, context_json, render_context
 from lawApp_LangGraph.tools import ALL_TOOLS
 from lawApp_LangGraph.FastAPI.utils import is_command_word
 
@@ -82,6 +84,7 @@ from lawApp_LangGraph.config import settings
 #  Task 3: 提示词统一改用 prompts.py 单一来源(旧版常量已于 Task 6 删除).
 from lawApp_LangGraph.prompts import (
     BUDGET_CONFIRM_MSG,
+    CHITCHAT_PERSONA_BLOCK,
     CHITCHAT_PROMPT,
     DEGRADE_CONFIRM_MSG,
     ELEMENT_ASSESS_PROMPT,
@@ -201,6 +204,10 @@ def _schema_models():
         description: str = Field(default="", description="步骤的自然语言描述")
         tool_name: Optional[str] = Field(
             default=None, description="要执行的工具名;不需要工具则填 null"
+        )
+        args: Dict[str, Any] = Field(
+            default_factory=dict,
+            description="工具参数;request_element_fill 用 {keys:[...]}",
         )
 
     class PlanSchema(BaseModel):
@@ -440,6 +447,8 @@ def ingest_node(state: AgentState) -> dict:
         "degrade_used": False,
         "degrade_ask_count": 0,
         "pending_questions": [],
+        "pending_fill_keys": [],
+        "element_fill_rounds": 0,
         # 咨询分类归位(防止上一轮 chitchat 残留路由到闲聊节点)
         "question_category": "marriage_legal",
         # 累积语义字段 → RESET 清空
@@ -449,6 +458,21 @@ def ingest_node(state: AgentState) -> dict:
         "law_results": RESET,
         "clarify_history": RESET,
     }
+
+
+async def ingest_async_node(state: AgentState) -> dict:
+    """异步入口: 先惰性压缩记忆/固化跨轮检索结论, 再做原同步重置。"""
+    out = ingest_node(state)
+    try:
+        mem = await memory_mod.maybe_compress(state)
+        # 本轮 ingest 先固化上一轮 top-3 检索结论, 再由 ingest_node 清空原文
+        mem = await memory_mod.digest_previous_retrieval(
+            state.model_copy(update={"conversation_memory": mem})
+        )
+        out["conversation_memory"] = mem
+    except Exception as e:  # 记忆旁路: 不阻塞主流程
+        debug.warning("记忆压实失败(旁路)", detail=str(e)[:120])
+    return out
 
 
 # Node 0.5a: Risk Gate — 高风险话题确认 (HITL)
@@ -572,8 +596,7 @@ async def element_assess_node(state: AgentState, config: RunnableConfig = None) 
         )
         v = await chain.ainvoke(
             {
-                "query": state.query[:2000],
-                "elements_digest": ce.digest(),
+                "context_json": context_json(state, "element_assess"),
                 "last_question": last_q,
                 "last_answer": last_a or "(尚未反问)",
                 "round": state.clarify_rounds + 1,
@@ -743,7 +766,7 @@ def ask_element_node(state: AgentState, config: RunnableConfig = None) -> dict:
             "element_keys": keys,
         },
     )
-    return {
+    out = {
         "clarify_rounds": state.clarify_rounds + 1,
         "clarify_history": [
             ClarifyExchange(
@@ -761,9 +784,156 @@ def ask_element_node(state: AgentState, config: RunnableConfig = None) -> dict:
             "at": datetime.now().isoformat(),
         },
     }
+    # D8: HITL 回答额外以 [补充] 消息入历史(压缩时不可丢)
+    out.update(memory_mod.hitl_message_update(state, answer))
+    return out
 
 
-# Node 0.5d: Chitchat — 闲聊轻量应答(question_category=chitchat 专用)
+# Node 0.5d: Element Fill — planner 伪工具触发的要素补全(HITL-7)
+
+
+def element_fill_node(state: AgentState, config: RunnableConfig = None) -> dict:
+    """执行期要素补全: 只补 pending_fill_keys 中第一个缺失要素.
+
+    planner 可规划 `request_element_fill` 伪工具步; executor 不调工具,
+    只写 pending_fill_keys 并路由至此。本节点 interrupt 收集回答后写
+    user_supplements / clarify_history / [补充] 消息, 推进步骤索引;
+    无缺口或已达 max_element_fill_rounds → 不中断直接推进。
+
+    Returns:
+        dict: pending_fill_keys 清空 + current_step_index 推进;
+            有回答时附 case_elements(provided)、clarify_history、hitl_event。
+    """
+    keys = list(state.pending_fill_keys or [])
+    ce = state.case_elements.model_copy(deep=True)
+    valid = {e.key for e in ce.elements}
+    target = next(
+        (
+            e
+            for e in ce.elements
+            if e.key in keys
+            and e.key in valid
+            and e.status in ("missing", "partial")
+        ),
+        None,
+    )
+    advanced = state.current_step_index + 1
+
+    if target is None:
+        debug.info("← Element Fill: 无缺失要素, 直接推进步骤")
+        return {"pending_fill_keys": [], "current_step_index": advanced}
+
+    if state.element_fill_rounds >= settings.max_element_fill_rounds:
+        debug.info(
+            "← Element Fill: 达补全轮数上限, 不再中断",
+            detail=f"rounds={state.element_fill_rounds}/{settings.max_element_fill_rounds}",
+        )
+        return {
+            "pending_fill_keys": [],
+            "current_step_index": advanced,
+            "hitl_event": {
+                "type": "element_fill",
+                "skipped": True,
+                "reason": "fill_cap_reached",
+                "at": datetime.now().isoformat(),
+            },
+        }
+
+    round_no = state.clarify_rounds + state.element_fill_rounds + 1
+    question_text = f"为更准确地分析, 请补充{target.label}:"
+    payload = {
+        "type": "element_fill",
+        "round": f"{state.element_fill_rounds + 1}/{settings.max_element_fill_rounds}",
+        "key": target.key,
+        "label": target.label,
+        "question": question_text,
+        "options": [],
+        "allow_other": True,
+    }
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "round_question",
+        {"round": round_no, "question": question_text, "options": []},
+        dedupe_on=("round", "question"),
+    )
+    answer = interrupt(payload)
+    answer = str(answer).strip() if answer and not isinstance(answer, bool) else ""
+
+    if not answer:
+        dialogue_log.log_event(
+            _dialogue_sid(config),
+            "round_answer",
+            {
+                "round": round_no,
+                "question": question_text,
+                "options": [],
+                "selected": None,
+                "selected_type": "skipped",
+                "free_text": None,
+                "element_keys": [target.key],
+            },
+        )
+        debug.info("← Element Fill: 用户跳过", detail=f"key={target.key}")
+        return {
+            "pending_fill_keys": [],
+            "current_step_index": advanced,
+            "element_fill_rounds": state.element_fill_rounds + 1,
+            "hitl_event": {
+                "type": "element_fill",
+                "skipped": True,
+                "reason": "user_skip",
+                "at": datetime.now().isoformat(),
+            },
+        }
+
+    ce.update(target.key, answer, by="element_fill")
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "round_answer",
+        {
+            "round": round_no,
+            "question": question_text,
+            "options": [],
+            "selected": answer,
+            "selected_type": "free_text",
+            "free_text": answer,
+            "element_keys": [target.key],
+        },
+    )
+    debug.info(
+        "← Element Fill 完成",
+        detail=f"key={target.key} answer={answer[:60]}",
+        result=f"rounds={state.element_fill_rounds + 1}/{settings.max_element_fill_rounds}",
+    )
+    out = {
+        "pending_fill_keys": [],
+        "current_step_index": advanced,
+        "element_fill_rounds": state.element_fill_rounds + 1,
+        "case_elements": ce,
+        "clarify_history": [
+            ClarifyExchange(
+                round=round_no,
+                question=question_text,
+                answer=answer,
+                element_keys=[target.key],
+            )
+        ],
+        "user_supplements": [
+            *(getattr(state, "user_supplements", None) or []),
+            answer,
+        ],
+        "hitl_event": {
+            "type": "element_fill",
+            "question": question_text,
+            "key": target.key,
+            "at": datetime.now().isoformat(),
+        },
+    }
+    out.update(memory_mod.hitl_message_update(state, answer))
+    return out
+
+
+# Node 0.5e: Chitchat — 闲聊轻量应答(question_category=chitchat 专用)
 
 
 async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dict:
@@ -786,9 +956,12 @@ async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dic
 
     chain = PromptTemplate.from_template(CHITCHAT_PROMPT) | get_executor_llm()
     parts: list[str] = []
-    # L13: 闲聊也走统一查询视图(带最近对话历史, 能回应「刚才问了什么」类指代)
+    # L13: 闲聊也走统一上下文(带最近对话历史, 能回应「刚才问了什么」类指代)
     async for chunk in chain.astream(
-        {"query": _query_with_supplements(state, 1000)}
+        {
+            "persona": CHITCHAT_PERSONA_BLOCK,
+            "context_json": context_json(state, "chitchat"),
+        }
     ):
         parts.append(chunk.content or "")
     answer = "".join(parts).strip()
@@ -821,12 +994,19 @@ _TOOL_DESC_OVERRIDES = {
 # 注: 刻意用短文件名形, 与 doc_label() 的 fields.yaml 全称(民事答辩状（离婚纠纷）)用途不同
 _DOC_TYPE_FILE_PREFIX = {"complaint": "起诉状", "defense": "答辩状"}
 
+# 伪工具: 只用于 planner 表达「执行中要素缺口」, 不进 ALL_TOOLS / ToolNode
+_ELEMENT_FILL_TOOL = "request_element_fill"
+
 
 def _tools_desc() -> str:
     lines = []
     for t in ALL_TOOLS():
         desc = _TOOL_DESC_OVERRIDES.get(t.name) or (t.description or "")[:120]
         lines.append(f"- {t.name}: {desc}")
+    lines.append(
+        f"- {_ELEMENT_FILL_TOOL}: 请求用户补充缺失案件要素; "
+        'args={"keys": ["要素key"]}。执行时不调工具, 转 HITL 要素补全节点。'
+    )
     return "\n".join(lines)
 
 
@@ -836,13 +1016,14 @@ def _normalize_plan(schema) -> list[PlanStep]:
     steps: list[PlanStep] = []
     for p in schema.plan:
         tn = p.tool_name
-        if tn and _tool_by_name(tn) is None:
+        if tn and tn != _ELEMENT_FILL_TOOL and _tool_by_name(tn) is None:
             tn = None
         steps.append(
             PlanStep(
                 step_id=p.step_id or len(steps) + 1,
                 description=p.description,
                 tool_name=tn,
+                args=dict(getattr(p, "args", None) or {}),
             )
         )
     return steps
@@ -938,16 +1119,83 @@ def _query_with_supplements(state: AgentState, limit: int = 0) -> str:
     return "\n".join(parts)
 
 
-# regex 截 JSON 主体 + PlanSchema 校验; 失败直接 raise(用户约束: 不做兜底)
-def _parse_plan_json(raw: str) -> "PlanSchema":
-    """解析 reasoner 流式累积的 content 为 PlanSchema;失败直接抛错(不做兜底)。"""
-    import json
-    import re
+# planner JSON 解析: 容忍已知模型畸形, 其余失败直接 raise(用户约束: 不做兜底)
+def _strip_json_fence(raw: str) -> str:
+    """去掉模型偶尔加的 ``` 代码栅栏, 保留正文。"""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    return text.strip()
 
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not m:
+
+def _repair_stray_delimiter_quote(text: str) -> str:
+    """删除字符串外、紧跟 `]`/`}` 的孤立引号。
+
+    reasoner 偶发在数组/对象结束后多吐一个 `"`:
+        {"reasoning": ["..."], "plan": ...}   → 正确
+        {"reasoning": ["..."]", "plan": ...}  → 实际输出(多一个引号)
+    只在 JSON 字符串外且前一非空字符为 `]`/`}` 时跳过该引号;
+    字符串内部的 `]"` 不受影响。
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    prev_sig = ""
+
+    for ch in text:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            if prev_sig in ("]", "}"):
+                continue
+            in_string = True
+            out.append(ch)
+            prev_sig = ch
+            continue
+
+        out.append(ch)
+        if not ch.isspace():
+            prev_sig = ch
+
+    return "".join(out)
+
+
+def _parse_plan_json(raw: str) -> "PlanSchema":
+    """解析 reasoner 流式累积的 content 为 PlanSchema;失败直接抛错(不做兜底)。
+
+    先修复已知的模型畸形(数组/对象后多余引号), 再用 raw_decode 只取
+    第一个完整 JSON 对象, 避免尾部示例/说明被贪婪正则一并吞入。
+    """
+    import json
+
+    text = _strip_json_fence(raw)
+    start = text.find("{")
+    if start < 0:
         raise ValueError(f"Planner 输出中未找到 JSON 对象: {raw[:200]!r}")
-    return PlanSchema.model_validate(json.loads(m.group(0)))
+
+    candidate = _repair_stray_delimiter_quote(text[start:])
+    if candidate != text[start:]:
+        debug.warning(
+            "Planner JSON 畸形已修复",
+            detail="删除数组/对象结束符后的多余引号",
+        )
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(candidate)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Planner JSON 解析失败: {e}; raw={raw[:300]!r}"
+        ) from e
+    return PlanSchema.model_validate(obj)
 
 
 # M2: planner/replanner 共用的裸 openai 客户端 — 模块级懒加载单例。
@@ -1096,10 +1344,9 @@ async def planner_node(state: AgentState, config: RunnableConfig) -> dict:
         )
 
     prompt = PromptTemplate.from_template(template).format(
-        # M8: 原问题截断后拼用户补充信息(HITL 答案不再改写 query)
-        query=_query_with_supplements(state, 3000),
         available_tools=_tools_desc(),
-        elements_digest=state.case_elements.digest(),
+        # M8/§9: 统一 JSON 上下文(历史+补充+要素), 旧自由文本视图仅保底
+        context_json=context_json(state, "planner"),
     )
 
     result, _cot = await _stream_plan(prompt, "planner", config)
@@ -1274,6 +1521,23 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             for i, s in enumerate(plan)
         ]
         return {"plan": done, "current_step_index": idx + 1}
+
+    # 伪工具 request_element_fill: 不调 LLM/工具, 只把缺口交给 element_fill 节点。
+    # 步骤不前进: 由 element_fill 在 resume/无缺口/达上限后统一推进。
+    if step.tool_name == _ELEMENT_FILL_TOOL:
+        raw = (step.args or {}).get("keys") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        valid = {e.key for e in state.case_elements.elements}
+        keys = [str(k) for k in raw if str(k) in valid]
+        if not keys:
+            keys = [e.key for e in state.case_elements.critical_missing()]
+        debug.info(
+            "← Executor 请求要素补全",
+            detail=f"keys={keys or '无'}",
+            result="→ element_fill",
+        )
+        return {"pending_fill_keys": keys}
 
     # HITL-3: PDF 生成前确认(前端单选+确认/跳过; 自由文本由 LLM 语义判断归一为 bool)
     if step.tool_name == "markdown_to_pdf" and not state.pdf_confirmed:
@@ -1525,14 +1789,9 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
             "error_streak": state.error_streak + 1,
             "messages": [AIMessage(content="")],
         }
-    summaries = _step_summaries(state)
     prompt = EXECUTOR_PROMPT.format(
-        step_description=step.description,
         tool_name=step.tool_name,
-        # M8: 决策用 query 统一走带用户补充的视图
-        user_query=_query_with_supplements(state),
-        elements_digest=state.case_elements.digest(),
-        **summaries,
+        context_json=context_json(state, "executor"),
     )
 
     ai_msg: Optional[AIMessage] = None
@@ -1795,8 +2054,7 @@ async def replan_check_node(state: AgentState, config: RunnableConfig = None) ->
         )
         result = await chain.ainvoke(
             {
-                # M8: 决策用 query 统一走带用户补充的视图
-                "user_query": _query_with_supplements(state, 1000),
+                "context_json": context_json(state, "replan_check"),
                 "executed_summary": "\n".join(steps_desc) or "无已执行步骤",
                 "doc_count": len(state.rag_documents),
                 "quality_verdict": quality_verdict,
@@ -1892,7 +2150,7 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
         )
         v = await chain.ainvoke(
             {
-                "query": state.query[:1500],
+                "context_json": context_json(state, "generic"),
                 "top_docs_summary": top_docs,
             }
         )
@@ -1954,7 +2212,7 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
             "element_keys": [v.element_key],
         },
     )
-    return {
+    out = {
         "mid_clarify_used": True,
         "user_supplements": [
             *(getattr(state, "user_supplements", None) or []),
@@ -1967,6 +2225,10 @@ async def mid_clarify_node(state: AgentState, config: RunnableConfig = None) -> 
             "at": datetime.now().isoformat(),
         },
     }
+    out.update(
+        memory_mod.hitl_message_update(state, f"{v.question}\n{answer}")
+    )
+    return out
 
 
 # 已执行工具及结果摘要(replanner 提示词上下文, 用户决策 v4)
@@ -2112,27 +2374,10 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             if state.doc_type == "defense"
             else FINALIZE_COMPLAINT_PROMPT
         )
-        laws_digest = (
-            "\n".join(
-                f"{l.law_title} {l.article_number}: {l.content}"
-                for l in (state.law_results or [])[:5]
-            )
-            or "无"
-        )
-        cases_digest = (
-            "\n".join(d.chunk_text for d in (state.rag_documents or [])[:3])
-            or "无"
-        )
         chain = PromptTemplate.from_template(template) | get_executor_llm()
         parts = []
         async for chunk in chain.astream(
-            {
-                "elements_digest": state.case_elements.digest(),
-                # M8: 带用户补充的视图(与旧"补充拼进 query"的行为对齐)
-                "query": _query_with_supplements(state, 3000),
-                "laws_digest": laws_digest,
-                "cases_digest": cases_digest,
-            }
+            {"context_json": context_json(state, "finalize_assistant")}
         ):
             parts.append(chunk.content or "")
         answer = "".join(parts)
@@ -2157,11 +2402,10 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         return out
 
     if state.rag_documents:
-        docs = "\n".join(f"- {d.chunk_text}" for d in state.rag_documents[:3])
         chain = FINALIZE_CASE_PROMPT | get_executor_llm()
         parts: list[str] = []
         async for chunk in chain.astream(
-            {"docs": docs, "query": _query_with_supplements(state)}
+            {"context_json": context_json(state, "finalize_attorney")}
         ):
             parts.append(chunk.content or "")
         answer = "".join(parts)
@@ -2188,7 +2432,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
     chain = FINALIZE_DIRECT_PROMPT | get_executor_llm()
     parts = []
     async for chunk in chain.astream(
-        {"query": _query_with_supplements(state)}
+        {"context_json": context_json(state, "finalize_attorney")}
     ):
         parts.append(chunk.content or "")
     answer = "".join(parts)
@@ -2479,6 +2723,9 @@ def route_after_executor(state: AgentState) -> str:
         >= settings.error_streak_threshold * (state.degrade_ask_count + 1)
     ):
         return "hitl_degrade"
+    # 伪工具步: executor 只登记缺口, 交由 element_fill 做 HITL 补全
+    if state.pending_fill_keys:
+        return "element_fill"
     # 只认尾部新产出的 tool_calls: 早前工具步的 AIMessage(tool_calls) 已被 ToolMessage
     # 消费; 反向扫描跳过 ToolMessage 会把陈旧调用再路由进 tools 重放(冒烟实测:
     # assistant 计划工具步后接无工具步, 陈旧 analyze_legal_issue 重放占掉 merge,
@@ -2607,12 +2854,15 @@ def build_graph(checkpointer=None, store=None):
 
     #  节点观测(决策 3): traced("node") 包装注册 — 记名称/时延/前后成果/结果
     #  (显式 name = 注册名: 函数名带 _node 后缀会与 values 回填的 pending_nodes 对不上)
-    builder.add_node("ingest", traced("node", "ingest")(ingest_node))
+    builder.add_node("ingest", traced("node", "ingest")(ingest_async_node))
     builder.add_node("risk_gate", traced("node", "risk_gate")(risk_gate_node))
     builder.add_node(
         "element_assess", traced("node", "element_assess")(element_assess_node)
     )
     builder.add_node("ask_element", traced("node", "ask_element")(ask_element_node))
+    builder.add_node(
+        "element_fill", traced("node", "element_fill")(element_fill_node)
+    )
     builder.add_node("planner", traced("node", "planner")(planner_node))
     builder.add_node("executor", traced("node", "executor")(executor_node))
     builder.add_node("tools", traced("node", "tools")(_build_tools_node()))
@@ -2659,8 +2909,10 @@ def build_graph(checkpointer=None, store=None):
             "executor": "executor",
             "replan_check": "replan_check",
             "hitl_degrade": "hitl_degrade",
+            "element_fill": "element_fill",
         },
     )
+    builder.add_edge("element_fill", "executor")
     builder.add_edge("tools", "merge")
     builder.add_conditional_edges(
         "merge",
