@@ -99,14 +99,14 @@ User request → FastAPI → LangGraph StateGraph
 | **SSE streaming** | Real-time push of reasoning tokens, plan progress, tool calls, interrupts, document events — zero-refresh full-process visibility in the frontend |
 | **Dialogue-log audit** | Full event stream persisted (Q&A / clarification / confirmation decisions / final answer / documents), aggregate API restores per-round timelines; frontend recovers losslessly after server interruption |
 | **LLM tracing** | `traced` decorator wraps all nodes/tools/LLM calls; trace runs/spans stored in PostgreSQL, LangSmith-compatible |
-| **Test-backed** | 25 test files, 250 cases (real PostgreSQL end-to-end + in-graph flows + security boundaries + RRF fusion/retrieval/calibration), all green |
+| **Test-backed** | 34 test files, 311 cases (real PostgreSQL end-to-end + in-graph flows + security boundaries + RRF fusion/retrieval/calibration), all green |
 | **Concurrency safety** | Session-level isolation and interrupt recovery built on LangGraph PostgreSQL checkpoints |
 
 ---
 
 ## Agent Workflow
 
-`LangGraph StateGraph` contains **14 nodes** covering intake, risk gating, the CRAG execution loop, and HITL interrupts:
+`LangGraph StateGraph` contains **16 nodes** covering intake, risk gating, the CRAG execution loop, execution-time element completion, and HITL interrupts:
 
 ### Nodes
 
@@ -116,6 +116,7 @@ User request → FastAPI → LangGraph StateGraph
 | `risk_gate` | Flash | High-risk consultation detection, triggers interrupt for lawyer confirmation |
 | `chitchat` | Flash | Chitchat short-circuit — answers directly, skips the pipeline |
 | `ask_element` | Flash | Case-element intake completion (can raise interrupt option cards) |
+| `element_fill` | — | Execution-time element completion: planner emits pseudo-tool `request_element_fill`; the node interrupts, writes the answer to `user_supplements` / `[补充]` message and advances the step |
 | `planner` | DeepSeek Pro (t=0.4, 4096 tokens) | Analyzes the question, outputs JSON reasoning chain + step plan |
 | `executor` | DeepSeek Flash (t=0.25, 2048 tokens) | Calls tools per step; supports LLM function calling with parameter-mapping fallback |
 | `tools` | — | ToolNode executes tool calls uniformly and writes back state |
@@ -171,11 +172,12 @@ User: "Can I get my betrothal gifts back after divorce?"
 
 ## Human-in-the-Loop (HITL)
 
-7 interrupt-resume interactions, all built on `interrupt()` / PostgreSQL checkpoints — the server pauses and waits, the stream resumes losslessly after the lawyer's decision:
+8 interrupt-resume interactions, all built on `interrupt()` / PostgreSQL checkpoints — the server pauses and waits, the stream resumes losslessly after the lawyer's decision:
 
 | Interrupt | Node | Scenario | Resume options |
 |----------|------|----------|----------|
 | `ask_element` | ask_element | Missing case elements (claims, children, etc.), intake completion | Options / free text |
+| `element_fill` | element_fill | Key element gap found during execution (planner pseudo-tool step) | Free text / skip |
 | `mid_clarify` | mid_clarify | Information gap found mid-execution | Options / free text |
 | `risk_confirm` | risk_gate | High-risk consultation (suspected crime, personal safety) | Continue / abort |
 | `degrade_confirm` | hitl_degrade | Clarification still insufficient after rounds, confirm degraded execution | Continue / abort |
@@ -421,6 +423,15 @@ Console format (ANSI colored):
 - Prefix-tree aggregated metrics (node latency / tokens / error rates), LangSmith-compatible
 - When PG is offline, tracing degrades to a no-op implementation with zero business intrusion
 
+### Node-level content monitoring (`minor_state.py` + `minor_states`)
+
+- **1:1 content extension**: every `stage_chain` row (SCD2 lifecycle) has one `minor_states` row with input/output projections, `output_json`, context-envelope meta, route, error and refs; missing rows are synthesized as placeholders so the timeline never shows empty rows
+- **Single-transaction writer**: `MonitorWriter` uses one queue / one consumer / one transaction per batch; a full queue drops observations and never blocks the main flow
+- **Projection safety**: whitelist + blacklist sanitization, 2000-char text / 64KB JSON caps; raw detail is referenced back to `trace_spans`
+- **Chained timeline**: `GET /monitor/runs/{run_id}/timeline?chain=1` follows `parent_run_id` up to 3 layers and inserts a "user answer" divider between HITL resumes; returns execution / wait-human / overhead composition
+- **Incremental + detail**: `GET /monitor/runs/{run_id}/minor-states?after_stage_id=` for 2s frontend polling; `GET /monitor/stages/{stage_id}/detail` returns content + raw span + full final answer; `GET /monitor/config` ships calibrated thresholds and text limits
+- **Frontend**: vertical timeline + duration composition bars + detail panel below the timeline (`MonitorTimeline` / `MinorStateCard` / `MinorStateDetail` / `ContextMetaPanel`), with `#run=<id>&stage=<id>` deep links
+
 ---
 
 ## Quick Start
@@ -546,7 +557,7 @@ The law-search tool is mounted via MCP (http / stdio transports); if the server 
 ### Tests & Evaluation
 
 ```bash
-python -m pytest tests/ -q                  # full regression (250 cases, requires PG online)
+python -m pytest tests/ -q                  # full regression (311 cases, requires PG online)
 python scripts/run_eval.py --suite retrieval --label <label> [--baseline <old-label>]  # retrieval metrics
 python scripts/run_eval.py --suite calibration --label <label>                          # tier-threshold calibration
 ```
@@ -564,7 +575,7 @@ LangChain_LawAgent-main/
 ├── langgraph.json               # LangGraph CLI config
 │
 ├── lawApp_LangGraph/            # main package (import from repo root)
-│   ├── LangGraph_lawApp.py      # main entry: StateGraph definition (14 nodes, HITL interrupts)
+│   ├── LangGraph_lawApp.py      # main entry: StateGraph definition (16 nodes, HITL interrupts)
 │   ├── state.py                 # Pydantic data models (three-layer system)
 │   ├── config.py                # runtime config center (pydantic-settings, env override)
 │   ├── prompts.py               # centralized prompts (dual-mode planner suffixes)
@@ -612,9 +623,10 @@ LangChain_LawAgent-main/
 │
 ├── notebooks/                   # experiment & debug notebooks
 │
-├── tests/                       # pytest (250 cases; run from root: python -m pytest tests/ -q)
+├── tests/                       # pytest (311 cases; run from root: python -m pytest tests/ -q)
 │   ├── test_engineering.py      # config / imports / engineering constraints
 │   ├── test_smoke.py            # smoke (graph topology / tool registry assertions)
+│   ├── test_plan_parse.py       # planner JSON parsing / malformed-output repair / fail-loud
 │   ├── test_boundary_*.py       # boundary cases (high/medium/low backend)
 │   ├── test_fusion.py           # RRF fusion pure functions (8 cases)
 │   ├── test_rrf_retrieval.py   # dual-route recall / orchestration / tool-surface contracts (10 cases)

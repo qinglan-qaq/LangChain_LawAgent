@@ -99,14 +99,14 @@
 | **SSE 流式推送** | 实时推送推理 token、计划进度、工具调用、interrupt、文书生成事件，前端零刷新全流程可视 |
 | **对话日志审计** | 全流程事件流落库（问答/澄清/确认决策/终答/文书），聚合 API 按轮次时间线还原，支持服务端中断后前端无损恢复 |
 | **LLM 追踪** | `traced` 装饰器包裹全节点/工具/LLM 调用，trace run/span 落 PostgreSQL，兼容 LangSmith 观测 |
-| **测试背书** | 25 个测试文件、250 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界 + RRF 融合/检索/标定），回归全绿 |
+| **测试背书** | 34 个测试文件、311 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界 + RRF 融合/检索/标定 + 监控 v2），回归全绿 |
 | **并发安全** | 基于 LangGraph PostgreSQL 检查点实现会话级隔离与中断恢复 |
 
 ---
 
 ## Agent 工作流
 
-`LangGraph StateGraph` 包含 **14 个节点**，覆盖问诊、风险门控、CRAG 执行环与人机协同中断：
+`LangGraph StateGraph` 包含 **16 个节点**，覆盖问诊、风险门控、CRAG 执行环、执行期要素补全与人机协同中断：
 
 ### 节点
 
@@ -116,6 +116,7 @@
 | `risk_gate` | Flash | 高风险咨询识别，触发 interrupt 请求律师确认 |
 | `chitchat` | Flash | 闲聊短路，直接回答不过管线 |
 | `ask_element` | Flash | 案情要素问诊补全（可出 interrupt 选项题） |
+| `element_fill` | — | 执行期要素补全：planner 以伪工具 `request_element_fill` 规划，节点 interrupt 收集缺失要素后回写 `user_supplements` / `[补充]` 消息并推进步骤 |
 | `planner` | DeepSeek Pro (t=0.4, 4096 tokens) | 分析用户问题，输出 JSON 推理链 + 分步计划 |
 | `executor` | DeepSeek Flash (t=0.25, 2048 tokens) | 按步骤调用工具，支持 LLM Function Calling 与直接参数映射降级 |
 | `tools` | — | ToolNode 统一执行工具调用并回写状态 |
@@ -171,11 +172,12 @@ START → ingest → risk_gate ──[风险确认]──→ interrupt → resum
 
 ## 人机协同 HITL
 
-7 类中断-恢复交互，全部基于 `interrupt()` / PostgreSQL checkpoint 实现，服务端暂停等待、律师决策后无损续流：
+8 类中断-恢复交互，全部基于 `interrupt()` / PostgreSQL checkpoint 实现，服务端暂停等待、律师决策后无损续流：
 
 | 中断类型 | 触发节点 | 场景 | 恢复选项 |
 |----------|----------|------|----------|
 | `ask_element` | ask_element | 案情要素缺失（如诉讼请求、子女情况），问诊补全 | 选项题 / 自由输入 |
+| `element_fill` | element_fill | 执行期发现关键要素缺口（planner 伪工具步） | 自由输入 / 跳过 |
 | `mid_clarify` | mid_clarify | 执行中发现信息缺口，向律师中途澄清 | 选项题 / 自由输入 |
 | `risk_confirm` | risk_gate | 高风险咨询识别（如涉嫌犯罪、人身安全） | 继续 / 终止 |
 | `degrade_confirm` | hitl_degrade | 多轮澄清仍不足，确认降级执行 | 继续 / 终止 |
@@ -420,6 +422,15 @@ AgentState         # 会话标识 · 请求上下文 · 计划执行 · 输出 �
 - 前缀树聚合指标（节点耗时 / token / 错误率），兼容 LangSmith 遥测
 - PG 掉线时 tracing 自动降级为空实现，零侵入业务
 
+### 节点级内容监控（`minor_state.py` + `minor_states` 表）
+
+- **1:1 内容扩展**：`stage_chain`(SCD2 生命周期) 每行配一条 `minor_states`，记录输入/输出投影、`output_json`、上下文信封 meta、route、error 与 refs；缺失行由 API 合成占位，时间轴不留空行
+- **单事务写入**：`MonitorWriter` 单队列 / 单消费者 / 单事务批量落库，满队列丢弃，观测旁路不阻断主流程
+- **投影安全**：白名单 + 黑名单清洗，文本 2000 字 / JSON 64KB 上限，原始 detail 通过 `refs` 指回 `trace_spans`
+- **链式时间轴**：`GET /monitor/runs/{run_id}/timeline?chain=1` 沿 `parent_run_id` 最多回溯 3 层，HITL 续跑之间插入“用户回答”分隔条；返回执行/等待人工/开销三段时长构成
+- **增量与详情**：`GET /monitor/runs/{run_id}/minor-states?after_stage_id=` 供前端 2s 轮询；`GET /monitor/stages/{stage_id}/detail` 返回阶段内容 + span 原文 + 完整终答；`GET /monitor/config` 下发标定阈值与文本上限
+- **前端**：垂直时间轴 + 耗时占比条 + 时间轴下方详情面板（`MonitorTimeline` / `MinorStateCard` / `MinorStateDetail` / `ContextMetaPanel`），支持 `#run=<id>&stage=<id>` 深链
+
 ---
 
 ## 快速开始
@@ -545,7 +556,7 @@ law-search 工具经 MCP 挂载（http / stdio 双传输），server 掉线时�
 ### 测试与评测
 
 ```bash
-python -m pytest tests/ -q                  # 全量回归(250 用例, 需 PG 在线)
+python -m pytest tests/ -q                  # 全量回归(311 用例, 需 PG 在线)
 python scripts/run_eval.py --suite retrieval --label <标签> [--baseline <旧标签>]  # 检索指标
 python scripts/run_eval.py --suite calibration --label <标签>                      # 三档阈值标定
 ```
@@ -563,7 +574,7 @@ LangChain_LawAgent-main/
 ├── langgraph.json               # LangGraph CLI 配置
 │
 ├── lawApp_LangGraph/            # 主体代码包（从仓库根目录导入）
-│   ├── LangGraph_lawApp.py      # 主入口：StateGraph 定义 (14 节点, 含 HITL 中断)
+│   ├── LangGraph_lawApp.py      # 主入口：StateGraph 定义 (16 节点, 含 HITL 中断)
 │   ├── state.py                 # Pydantic 数据模型 (三层体系)
 │   ├── config.py                # 运行时配置中心 (pydantic-settings, env 同名覆盖)
 │   ├── prompts.py               # 提示词集中定义 (双模式 planner 后缀)
@@ -616,9 +627,10 @@ LangChain_LawAgent-main/
 │   ├── prompts_test.ipynb       # 提示词
 │   └── tools_test.ipynb         # 工具集
 │
-├── tests/                       # pytest（250 用例，根目录执行 python -m pytest tests/ -q）
+├── tests/                       # pytest（311 用例，根目录执行 python -m pytest tests/ -q）
 │   ├── test_engineering.py      # 配置 / 导入 / 工程约束
 │   ├── test_smoke.py            # 冒烟（含图拓扑 / 工具注册表断言）
+│   ├── test_plan_parse.py       # planner JSON 解析 / 模型畸形修复 / 失败必须 raise
 │   ├── test_boundary_*.py       # 边界用例（高/中/低后端）
 │   ├── test_fusion.py            # RRF 融合纯函数（8 用例）
 │   ├── test_rrf_retrieval.py    # 双路召回 / 编排 / 工具面契约（10 用例）
