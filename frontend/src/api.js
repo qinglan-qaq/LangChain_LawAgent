@@ -32,5 +32,25 @@ export const getMonitorRuns = (limit = 20, offset = 0) =>
 export const getMonitorRunDetail = (runId) =>
   http.get(`/monitor/runs/${runId}/stages`).then((r) => r.data)
 
+// minorStates v2: 时间轴(chain=1 串起 HITL 续跑父 run)、增量内容行、
+// 阶段详情、阈值配置(前端不硬编码标定值)
+export const getMonitorTimeline = (runId, chain = true) =>
+  http
+    .get(`/monitor/runs/${runId}/timeline`, { params: { chain: chain ? 1 : 0 } })
+    .then((r) => r.data)
+
+export const getMonitorMinorStates = (runId, afterStageId = 0) =>
+  http
+    .get(`/monitor/runs/${runId}/minor-states`, {
+      params: { after_stage_id: afterStageId },
+    })
+    .then((r) => r.data)
+
+export const getMonitorStageDetail = (stageId) =>
+  http.get(`/monitor/stages/${stageId}/detail`).then((r) => r.data)
+
+export const getMonitorConfig = () =>
+  http.get('/monitor/config').then((r) => r.data)
+
 export const getMonitorEvals = () =>
   http.get('/monitor/evals').then((r) => r.data)
