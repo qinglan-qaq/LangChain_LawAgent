@@ -14,10 +14,12 @@ Legal Consultation API v3.0.0 (upgrade-v1)
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,15 +43,22 @@ from lawApp_LangGraph.FastAPI.model import (
     AssistantStreamRequest,
     AttorneyAskRequest,
     FeedbackRequest,
+    MinorState,
+    MonitorConfig,
     MonitorEval,
     MonitorOverview,
     MonitorRunDetail,
     MonitorRunItem,
     MonitorSpan,
     MonitorStage,
+    MonitorStageDetail,
+    MonitorTimeline,
     QueryRequest,
     QueryResponse,
     ResumeRequest,
+    TimelineComposition,
+    TimelineItem,
+    TimelineRun,
     ToolInfo,
 )
 from lawApp_LangGraph.FastAPI.utils import (
@@ -184,6 +193,32 @@ async def _require_pending_interrupt(sid: str) -> dict:
     if interrupt_req is None:
         raise HTTPException(status_code=400, detail="no_pending_interrupt")
     return interrupt_req
+
+
+async def _validate_parent_run_id(sid: str, parent_run_id: str | None) -> str | None:
+    """resume 的 parent_run_id 校验: 同 session 且 interrupted, 否则降级 NULL。"""
+    if not parent_run_id:
+        return None
+    try:
+        from lawApp_LangGraph.db import get_pool
+
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM trace_runs WHERE run_id=%s AND session_id=%s "
+                "AND status='interrupted'",
+                (parent_run_id, sid),
+            )
+            if await cur.fetchone():
+                return parent_run_id
+    except Exception as e:  # 观测旁路: 校验失败不阻塞恢复
+        logger.warning("parent_run_id 校验失败(降级 NULL): %s", e)
+        return None
+    flow.warning(
+        "parent_run_id 无效, 降级 NULL",
+        detail=f"parent={parent_run_id} session={sid}",
+    )
+    return None
 
 
 async def _normalize_resume_with_degrade(
@@ -551,11 +586,13 @@ async def ask_resume_stream(request: ResumeRequest):
         or ""
     )
     resume_value = await _normalize_resume_with_degrade(itype, request.answer, request_text)
+    parent_run_id = await _validate_parent_run_id(sid, request.parent_run_id)
 
     # H4: 同会话并发流防护 —— 抢锁失败 409, 成功后由 _run_sse finally 释放
     lock = await _acquire_session_lock(sid)
     return _run_sse(
-        sid, Command(resume=resume_value), mode="attorney", session_lock=lock
+        sid, Command(resume=resume_value), mode="attorney", session_lock=lock,
+        parent_run_id=parent_run_id,
     )
 
 
@@ -731,11 +768,35 @@ def _merge_tool_summary(updates: dict) -> Optional[str]:
 _SSE_PING_SECONDS = 15
 
 
+_ROUTE_REASONS = {
+    ("ingest", "risk_gate"): "固定边",
+    ("risk_gate", "element_assess"): "无高风险",
+    ("risk_gate", "finalize"): "高风险被拒",
+    ("element_assess", "ask_element"): "pending_questions>0",
+    ("element_assess", "planner"): "要素已足够",
+    ("element_assess", "chitchat"): "question_category=chitchat",
+    ("ask_element", "element_assess"): "继续评估",
+    ("ask_element", "planner"): "clarify_rounds 达上限",
+    ("planner", "executor"): "plan 非空",
+    ("planner", "finalize"): "plan 为空",
+    ("executor", "tools"): "tail AIMessage 含 tool_calls",
+    ("executor", "element_fill"): "pending_fill_keys 非空",
+    ("executor", "hitl_degrade"): "error_streak 达阈值",
+    ("executor", "replan_check"): "步骤执行完成",
+    ("tools", "merge"): "固定边",
+    ("merge", "hitl_degrade"): "error_streak 达阈值",
+    ("merge", "element_fill"): "pending_fill_keys 非空",
+    ("element_fill", "executor"): "补全完成",
+    ("mid_clarify", "replanner"): "固定边",
+}
+
+
 def _run_sse(
     sid: str,
     astream_input,
     mode: str = "",
     session_lock: asyncio.Lock | None = None,
+    parent_run_id: str | None = None,
 ) -> StreamingResponse:
     """SSE 流式工厂: astream_input(新提问 dict 或 Command(resume=...)) 驱动图。
 
@@ -764,7 +825,18 @@ def _run_sse(
             session_id=sid, run_type=run_type, mode=mode,
             query=(astream_input.get("query") or "")
             if isinstance(astream_input, dict) else "",
+            parent_run_id=parent_run_id,
         ))
+        # run 开始即落库(spec §1.3): runs 列表可看到进行中 run
+        try:
+            from lawApp_LangGraph import db as _db
+
+            await _db.start_trace_run(
+                trace_run.run_id, sid, run_type, mode, trace_run.query,
+                parent_run_id,
+            )
+        except Exception as e:  # 观测旁路
+            logger.warning("start_trace_run 失败(旁路): %s", e)
 
         out_q: asyncio.Queue = asyncio.Queue()
         reasoning_q = open_reasoning_channel(sid)
@@ -786,6 +858,7 @@ def _run_sse(
             # values 流回填(决策 5): 本 super-step 更新过的节点名,
             # 下一帧 values 到达时对应 node span 补 state 快照
             pending_nodes: list[str] = []
+            last_node: str | None = None
             try:
                 async for stream_mode, chunk in graph.astream(
                     astream_input,
@@ -867,6 +940,25 @@ def _run_sse(
                         pending_nodes.extend(
                             str(n) for n in (chunk or {}) if isinstance(n, str)
                         )
+                        # route 回填: 上一已闭行 → 本 super-step 节点(spec §2.4)
+                        names = [str(n) for n in (chunk or {}) if isinstance(n, str)]
+                        if last_node and names and names[0] != last_node:
+                            try:
+                                from lawApp_LangGraph import minor_state as _ms
+
+                                _ms.enqueue_route(
+                                    trace_run.run_id,
+                                    last_node,
+                                    trace_run.node_seq.get(last_node, 1),
+                                    names[0],
+                                    _ROUTE_REASONS.get(
+                                        (last_node, names[0]), "super-step"
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                        if names:
+                            last_node = names[-1]
                     elif stream_mode == "values":
                         final_state = chunk or final_state
                         # values 流回填: 本 super-step 后的完整 state → 对应 node span
@@ -1257,8 +1349,9 @@ async def monitor_overview():
     from lawApp_LangGraph.db import get_pool
 
     by_status: dict = {}
-    running = limit_hit = 0
+    running = limit_hit = running_minor = 0
     fails: list = []
+    minor_fails: list = []
     dist: dict = {}
     try:
         pool = await get_pool()
@@ -1273,6 +1366,20 @@ async def monitor_overview():
                 "SELECT COUNT(*) FROM stage_chain WHERE ended_at IS NULL"
             )
             running = (await cur.fetchone())[0]
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM minor_states "
+                "WHERE phase IN ('running', 'waiting_human')"
+            )
+            running_minor = (await cur.fetchone())[0]
+            cur = await conn.execute(
+                "SELECT s.node_name, COUNT(*) FROM minor_states m "
+                "JOIN stage_chain s ON s.id = m.stage_id "
+                "WHERE m.phase = 'done' AND m.error IS NOT NULL "
+                "AND s.started_at > NOW() - INTERVAL '24 hours' "
+                "GROUP BY s.node_name ORDER BY 2 DESC LIMIT 5"
+            )
+            minor_fails = [{"node_name": r[0], "errors": r[1]}
+                           for r in await cur.fetchall()]
             cur = await conn.execute(
                 "SELECT COUNT(*) FROM trace_runs "
                 "WHERE metrics->>'limit_hit' = 'true'"
@@ -1299,7 +1406,9 @@ async def monitor_overview():
         return MonitorOverview()
     return MonitorOverview(runs_by_status=by_status, running_stages=running,
                            limit_hit_runs=limit_hit, node_fail_top=fails,
-                           score_distribution=dist)
+                           score_distribution=dist,
+                           running_minor_nodes=running_minor,
+                           minor_fail_top=minor_fails)
 
 
 @app.get("/monitor/runs", response_model=list[MonitorRunItem])
@@ -1323,7 +1432,11 @@ async def monitor_runs(limit: int = 50, offset: int = 0, status: Optional[str] =
         "(SELECT COUNT(*) FROM stage_chain s WHERE s.run_id = r.run_id "
         " AND s.status = 'ok'), "
         "(SELECT COUNT(*) FROM stage_chain s WHERE s.run_id = r.run_id "
-        " AND s.ended_at IS NULL) "
+        " AND s.ended_at IS NULL), "
+        "r.parent_run_id, r.current_node, "
+        "(SELECT COUNT(*) FROM minor_states m JOIN stage_chain s "
+        " ON s.id = m.stage_id WHERE s.run_id = r.run_id), "
+        "(r.status = 'running' AND r.started_at < NOW() - INTERVAL '2 hours') "
         f"FROM trace_runs r WHERE {where} "
         "ORDER BY r.started_at DESC LIMIT %s OFFSET %s"
     )
@@ -1349,6 +1462,9 @@ async def monitor_runs(limit: int = 50, offset: int = 0, status: Optional[str] =
             ended_at=str(r[6]) if r[6] else None,
             stage_total=r[8] or 0, stage_ok=r[9] or 0,
             stage_running=r[10] or 0, metrics=r[7] or {},
+            parent_run_id=r[11], current_node=r[12],
+            minor_total=r[13] or 0, content_available=bool(r[13]),
+            stale=bool(r[14]),
         )
         for r in rows
     ]
@@ -1402,6 +1518,356 @@ async def monitor_run_detail(run_id: str):
                         started_at=str(s[8]) if s[8] else None)
             for s in spans
         ],
+    )
+
+
+#  时间轴 / 内容层查询 helper(2026-10-23 minorStates v2)
+
+_MINOR_SELECT = (
+    "SELECT s.id, s.run_id, s.node_name, s.seq, s.status, s.started_at, "
+    "s.ended_at, s.latency_ms, m.attempt, m.phase, m.input_text, "
+    "m.output_text, m.output_json, m.context_meta, m.metrics, m.route, "
+    "m.route_reason, m.error, m.refs, m.parent_stage_id, m.content_source "
+    "FROM stage_chain s LEFT JOIN minor_states m ON m.stage_id = s.id "
+)
+
+
+def _json_obj(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+def _iso(value) -> Optional[str]:
+    return str(value) if value else None
+
+
+def _minor_state_from_row(row) -> MinorState:
+    """stage_chain LEFT JOIN minor_states 行 → MinorState(缺行给占位)。"""
+    (
+        stage_id, run_id, node_name, seq, status, started_at, ended_at,
+        latency_ms, attempt, phase, input_text, output_text, output_json,
+        context_meta, metrics, route, route_reason, error, refs,
+        parent_stage_id, content_source,
+    ) = row
+    available = attempt is not None or content_source is not None
+    if not available:
+        phase = (
+            "waiting_human" if status == "interrupted"
+            else "running" if status == "running"
+            else "done"
+        )
+        content_source = "fallback_placeholder"
+        output_json = {"reason": "minor_row_missing"}
+        error = "minor_row_missing"
+        attempt = 1
+    success = True if status == "ok" else False if status == "error" else None
+    return MinorState(
+        stage_id=stage_id,
+        node_exec_id=f"{run_id}:{node_name}:{seq}",
+        node_name=node_name,
+        seq=seq,
+        attempt=attempt or 1,
+        phase=phase or "running",
+        status=status,
+        success=success,
+        started_at=_iso(started_at) or "",
+        ended_at=_iso(ended_at),
+        latency_ms=latency_ms,
+        input_text=input_text,
+        output_text=output_text,
+        output_json=_json_obj(output_json),
+        context_meta=_json_obj(context_meta),
+        metrics=_json_obj(metrics),
+        route=route,
+        route_reason=route_reason,
+        error=error,
+        refs=_json_obj(refs),
+        parent_stage_id=parent_stage_id,
+        content_source=content_source or "fallback_placeholder",
+    )
+
+
+def _ms_between(start, end) -> int:
+    if not start:
+        return 0
+    if not end:
+        from datetime import datetime as _dt
+
+        end = _dt.now(start.tzinfo) if getattr(start, "tzinfo", None) else _dt.now()
+    try:
+        return max(0, int((end - start).total_seconds() * 1000))
+    except Exception:
+        return 0
+
+
+def _stage_latency(row) -> int:
+    """单 stage 耗时: 表内 latency_ms 优先, 缺失按 started/ended 计算。"""
+    if row[7] is not None:
+        return max(0, int(row[7]))
+    return _ms_between(row[5], row[6])
+
+
+def _composition(
+    wall_ms: int, execution_ms: int, wait_human_ms: int
+) -> TimelineComposition:
+    overhead = max(0, wall_ms - execution_ms - wait_human_ms)
+    total = wall_ms or 1
+
+    def pct(value: int) -> float:
+        return round(value / total * 100, 2) if wall_ms else 0.0
+
+    return TimelineComposition(
+        wall_clock_ms=wall_ms,
+        execution_ms=execution_ms,
+        wait_human_ms=wait_human_ms,
+        overhead_ms=overhead,
+        execution_pct=pct(execution_ms),
+        wait_pct=pct(wait_human_ms),
+        overhead_pct=pct(overhead),
+    )
+
+
+async def _load_chain(conn, run_id: str, chain: bool):
+    """当前 run + 沿 parent_run_id 向上最多 3 层(时间升序)。"""
+    ids = [run_id]
+    if chain:
+        cursor = run_id
+        for _ in range(2):  # 链头 + 至多 2 个父 run = 3 层
+            cur = await conn.execute(
+                "SELECT parent_run_id FROM trace_runs WHERE run_id = %s",
+                (cursor,),
+            )
+            row = await cur.fetchone()
+            if not row or not row[0] or row[0] in ids:
+                break
+            ids.append(row[0])
+            cursor = row[0]
+    cur = await conn.execute(
+        "SELECT run_id, session_id, status, started_at, ended_at, "
+        "parent_run_id, current_node FROM trace_runs WHERE run_id = ANY(%s)",
+        (ids,),
+    )
+    runs = {
+        r[0]: {
+            "run_id": r[0], "session_id": r[1], "status": r[2],
+            "started_at": r[3], "ended_at": r[4], "parent_run_id": r[5],
+            "current_node": r[6],
+        }
+        for r in await cur.fetchall()
+    }
+    ordered = [runs[i] for i in ids if i in runs]
+    ordered.sort(key=lambda x: (x["started_at"] or x["ended_at"] or datetime.min))
+    cur = await conn.execute(
+        _MINOR_SELECT + "WHERE s.run_id = ANY(%s) "
+        "ORDER BY s.started_at, s.seq",
+        (ids,),
+    )
+    rows = await cur.fetchall()
+    return ordered, rows
+
+
+def _run_answer(rows: list) -> str:
+    """取一个 run 内最后一次 HITL 回答(用于 run 间分隔条文案)。"""
+    for row in reversed(rows):
+        out = _json_obj(row[12])
+        answer = out.get("answer")
+        if answer:
+            return str(answer)[:120]
+    return ""
+
+
+@app.get("/monitor/runs/{run_id}/timeline", response_model=MonitorTimeline)
+async def monitor_timeline(run_id: str, chain: int = 0):
+    """节点时间轴: stage_chain LEFT JOIN minor_states + run 间等待分隔条。"""
+    from lawApp_LangGraph.db import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            runs, rows = await _load_chain(conn, run_id, bool(chain))
+            if not runs:
+                raise HTTPException(status_code=404,
+                                    detail=f"run {run_id} 不存在")
+    except HTTPException:
+        raise
+    except Exception as e:
+        flow.error("monitor timeline 降级", detail=str(e))
+        raise HTTPException(status_code=503, detail="监控数据暂不可用")
+
+    by_run: dict[str, list] = {r["run_id"]: [] for r in runs}
+    for row in rows:
+        if not row[2]:  # 空 node_name 脏数据: 不返回空 item
+            flow.warning("timeline 跳过空 node_name", detail=f"stage={row[0]}")
+            continue
+        by_run.setdefault(row[1], []).append(row)
+
+    now_index = {}
+    for r in runs:
+        exec_ms = sum(_stage_latency(x) for x in by_run.get(r["run_id"], []))
+        wall_ms = _ms_between(r["started_at"], r["ended_at"])
+        now_index[r["run_id"]] = (exec_ms, wall_ms)
+
+    items: list[TimelineItem] = []
+    timeline_runs: list[TimelineRun] = []
+    for i, r in enumerate(runs):
+        exec_ms, wall_ms = now_index[r["run_id"]]
+        timeline_runs.append(
+            TimelineRun(
+                run_id=r["run_id"], parent_run_id=r["parent_run_id"],
+                status=r["status"], started_at=_iso(r["started_at"]),
+                ended_at=_iso(r["ended_at"]),
+                composition=_composition(wall_ms, exec_ms, 0),
+            )
+        )
+        if i > 0:
+            prev = runs[i - 1]
+            answer = _run_answer(by_run.get(prev["run_id"], []))
+            items.append(
+                TimelineItem(
+                    kind="divider", run_id=r["run_id"],
+                    text=f"用户回答: {answer}" if answer else "用户回答后继续",
+                )
+            )
+        for row in by_run.get(r["run_id"], []):
+            latency = _stage_latency(row)
+            items.append(
+                TimelineItem(
+                    kind="node", run_id=r["run_id"],
+                    state=_minor_state_from_row(row),
+                    percent_of_run=(
+                        round(latency / wall_ms * 100, 2) if wall_ms else None
+                    ),
+                    percent_of_execution=(
+                        round(latency / exec_ms * 100, 2) if exec_ms else None
+                    ),
+                )
+            )
+
+    # 链聚合: wall = 首 start → 末 end(运行中按 now); wait = run 间空档
+    total_wall = 0
+    total_exec = sum(v[0] for v in now_index.values())
+    total_wait = 0
+    if runs:
+        first = runs[0]["started_at"]
+        last = runs[-1]["ended_at"]
+        total_wall = _ms_between(first, last)
+        for prev, nxt in zip(runs, runs[1:]):
+            total_wait += _ms_between(prev["ended_at"], nxt["started_at"])
+
+    return MonitorTimeline(
+        run_id=runs[-1]["run_id"] if runs else run_id,
+        runs=timeline_runs,
+        items=items,
+        total_composition=_composition(total_wall, total_exec, total_wait),
+    )
+
+
+@app.get("/monitor/runs/{run_id}/minor-states", response_model=list[MinorState])
+async def monitor_minor_states(run_id: str, after_stage_id: int = 0):
+    """增量拉取节点内容行(运行中 2s 轮询), 按 started_at, seq 升序。"""
+    from lawApp_LangGraph.db import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM trace_runs WHERE run_id = %s", (run_id,)
+            )
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404,
+                                    detail=f"run {run_id} 不存在")
+            cur = await conn.execute(
+                _MINOR_SELECT + "WHERE s.run_id = %s AND s.id > %s "
+                "ORDER BY s.started_at, s.seq",
+                (run_id, max(after_stage_id, 0)),
+            )
+            rows = await cur.fetchall()
+    except HTTPException:
+        raise
+    except Exception as e:
+        flow.error("monitor minor-states 降级", detail=str(e))
+        raise HTTPException(status_code=503, detail="监控数据暂不可用")
+    return [_minor_state_from_row(r) for r in rows]
+
+
+@app.get("/monitor/stages/{stage_id}/detail", response_model=MonitorStageDetail)
+async def monitor_stage_detail(stage_id: int):
+    """单阶段详情: minor 行 + span 原文 + run 完整回答。"""
+    from lawApp_LangGraph.db import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                _MINOR_SELECT + "WHERE s.id = %s", (stage_id,)
+            )
+            row = await cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404,
+                                    detail=f"stage {stage_id} 不存在")
+            state = _minor_state_from_row(row)
+            cur = await conn.execute(
+                "SELECT span_type, name, status, input, output, state, "
+                "latency_ms, token_usage, started_at FROM trace_spans "
+                "WHERE run_id = %s AND name = %s "
+                "ORDER BY started_at DESC LIMIT 1",
+                (row[1], row[2]),
+            )
+            span_row = await cur.fetchone()
+            cur = await conn.execute(
+                "SELECT final_answer FROM trace_runs WHERE run_id = %s",
+                (row[1],),
+            )
+            answer_row = await cur.fetchone()
+            refs_resolved: dict = {}
+            span_ids = state.refs.get("trace_span_ids") or []
+            if isinstance(span_ids, list) and span_ids:
+                cur = await conn.execute(
+                    "SELECT id, span_type, name, input, output FROM trace_spans "
+                    "WHERE id = ANY(%s)",
+                    ([int(x) for x in span_ids if str(x).isdigit()],),
+                )
+                refs_resolved["trace_spans"] = [
+                    {"id": s[0], "span_type": s[1], "name": s[2],
+                     "input": s[3], "output": s[4]}
+                    for s in await cur.fetchall()
+                ]
+    except HTTPException:
+        raise
+    except Exception as e:
+        flow.error("monitor stage detail 降级", detail=str(e))
+        raise HTTPException(status_code=503, detail="监控数据暂不可用")
+
+    span = None
+    if span_row:
+        span = MonitorSpan(
+            span_type=span_row[0], name=span_row[1], status=span_row[2],
+            input=span_row[3], output=span_row[4], state=span_row[5],
+            latency_ms=span_row[6], token_usage=span_row[7],
+            started_at=_iso(span_row[8]),
+        )
+    return MonitorStageDetail(
+        state=state,
+        span=span,
+        final_answer=(answer_row[0] if answer_row else None),
+        refs_resolved=refs_resolved,
+    )
+
+
+@app.get("/monitor/config", response_model=MonitorConfig)
+async def monitor_config():
+    """标定阈值与文本上限(前端展示用, 避免双份硬编码)。"""
+    return MonitorConfig(
+        correct_threshold=settings.correct_threshold,
+        incorrect_threshold=settings.incorrect_threshold,
+        minor_text_limit=settings.minor_output_text_limit,
     )
 
 

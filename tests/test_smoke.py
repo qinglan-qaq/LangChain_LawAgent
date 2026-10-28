@@ -284,6 +284,7 @@ def test_graph_topology():
         "risk_gate",
         "element_assess",
         "ask_element",
+        "element_fill",
         "planner",
         "executor",
         "tools",
@@ -293,9 +294,13 @@ def test_graph_topology():
         "hitl_degrade",
         "hitl_budget",
         "replanner",
+        "chitchat",
         "finalize",
     }
     assert expected <= nodes, f"missing: {expected - nodes}"
+    assert len(expected) == 16
+    graph_edges = {(e.source, e.target) for e in g.get_graph().edges}
+    assert ("element_fill", "executor") in graph_edges
 
 
 def test_runtime_inmemory_backend():
@@ -378,7 +383,60 @@ def test_interrupt_resume(no_llm):
     asyncio.run(run())
 
 
-#  5. 重启续聊: 同 thread_id 跨图实例的状态保持 + 请求间字段重置
+#  4b. 执行期补全链: planner 伪工具 → executor → element_fill interrupt
+#      → resume → executor → replan_check → finalize
+
+
+def test_element_fill_graph_chain(no_llm):
+    from types import SimpleNamespace
+
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+
+    import lawApp_LangGraph.LangGraph_lawApp as lg
+
+    no_llm["plan_result"] = _FakeVerdict(
+        done=True,
+        questions=(),
+        plan=(
+            SimpleNamespace(
+                step_id=1,
+                description="补充婚姻现状",
+                tool_name="request_element_fill",
+                args={"keys": ["marriage_status"]},
+            ),
+        ),
+    )
+
+    async def run():
+        g = lg.build_graph(checkpointer=MemorySaver())
+        cfg = {"configurable": {"thread_id": "t-element-fill-chain"}}
+        result = await g.ainvoke({"query": "我想离婚"}, config=cfg)
+        assert not result.get("final_answer")
+
+        snap = await g.aget_state(cfg)
+        intr = next(iter(snap.interrupts), None)
+        assert intr and intr.value["type"] == "element_fill"
+        assert intr.value["key"] == "marriage_status"
+
+        # resume: element_fill 收口 → executor 继续(步骤已推进) → replan → finalize
+        no_llm["plan_result"] = _FakeVerdict(done=True, plan=[])
+        result2 = await g.ainvoke(Command(resume="2020年结婚"), config=cfg)
+        assert result2.get("final_answer") == "测试回答"
+        assert result2["user_supplements"] == ["2020年结婚"]
+        assert result2["element_fill_rounds"] == 1
+        assert result2["current_step_index"] == 1
+        elem = next(
+            e for e in result2["case_elements"].elements
+            if e.key == "marriage_status"
+        )
+        assert elem.status == "known" and elem.value == "2020年结婚"
+        assert any(
+            getattr(m, "content", "") == "[补充] 2020年结婚"
+            for m in result2["messages"]
+        ), "HITL 答案必须落 [补充] 消息"
+
+    asyncio.run(run())
 
 
 def test_restart_same_thread(no_llm):

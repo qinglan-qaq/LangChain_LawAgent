@@ -615,7 +615,9 @@ def test_m8_planner_prompt_includes_supplements(monkeypatch):
     _run(app.planner_node(state, {"configurable": {"thread_id": "T-M8"}}))
     assert captured, "planner 必须组装 prompt"
     assert "原始问题" in captured[0]
-    assert "[用户补充信息] 结婚三年有一子" in captured[0], "补充内容必须进 planner prompt"
+    # v2 §9: 统一 JSON 上下文 — 补充原文进 critical_facts.user_supplements
+    assert "结婚三年有一子" in captured[0], "补充内容必须进 planner prompt"
+    assert '"user_supplements"' in captured[0]
 
 
 # ── M9: 异常原文不进对话 ──

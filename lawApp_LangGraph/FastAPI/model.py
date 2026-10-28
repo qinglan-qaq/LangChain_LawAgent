@@ -51,6 +51,10 @@ class ResumeRequest(BaseModel):
         max_length=3000,
         description="用户的回复内容;y/是 确认,n/否/跳过 拒绝",
     )
+    parent_run_id: Optional[str] = Field(
+        default=None,
+        description="发生 interrupt 的上一 run_id; 用于监控时间轴串联",
+    )
 
 
 class FeedbackRequest(BaseModel):
@@ -144,6 +148,12 @@ class MonitorRunItem(BaseModel):
     stage_ok: int = 0
     stage_running: int = 0
     metrics: Dict[str, Any] = Field(default_factory=dict)
+    # 2026-10-23 minorStates: run 串联与内容就绪度
+    parent_run_id: Optional[str] = None
+    current_node: Optional[str] = None
+    minor_total: int = 0
+    content_available: bool = False
+    stale: bool = False
 
 
 class MonitorRunDetail(MonitorRunItem):
@@ -161,6 +171,8 @@ class MonitorOverview(BaseModel):
     limit_hit_runs: int = 0
     node_fail_top: List[Dict[str, Any]] = Field(default_factory=list)
     score_distribution: Dict[str, int] = Field(default_factory=dict)
+    running_minor_nodes: int = 0
+    minor_fail_top: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class MonitorEval(BaseModel):
@@ -171,3 +183,93 @@ class MonitorEval(BaseModel):
     label: str
     metrics: Dict[str, Any] = Field(default_factory=dict)
     created_at: Optional[str] = None
+
+
+#  minorStates 内容层(v2) — 节点级时间轴与详情
+
+
+class MinorState(BaseModel):
+    """minor_states 1:1 stage_chain 内容行(缺失时由 API 合成占位)。"""
+
+    stage_id: int
+    node_exec_id: str
+    node_name: str
+    seq: int
+    attempt: int = 1
+    phase: str = "running"  # running|waiting_human|done
+    status: str = "running"
+    success: Optional[bool] = None
+    started_at: str
+    ended_at: Optional[str] = None
+    latency_ms: Optional[int] = None
+    input_text: Optional[str] = None
+    output_text: Optional[str] = None
+    output_json: Dict[str, Any] = Field(default_factory=dict)
+    context_meta: Dict[str, Any] = Field(default_factory=dict)
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    route: Optional[str] = None
+    route_reason: Optional[str] = None
+    error: Optional[str] = None
+    refs: Dict[str, Any] = Field(default_factory=dict)
+    parent_stage_id: Optional[int] = None
+    content_source: str = "projected"
+
+
+class TimelineItem(BaseModel):
+    """时间轴条目: 节点卡或等待人工分隔条。"""
+
+    kind: str  # node | divider
+    run_id: str
+    state: Optional[MinorState] = None
+    text: Optional[str] = None
+    percent_of_run: Optional[float] = None
+    percent_of_execution: Optional[float] = None
+
+
+class TimelineComposition(BaseModel):
+    """单 run 时长构成(毫秒 + 百分比)。"""
+
+    wall_clock_ms: int = 0
+    execution_ms: int = 0
+    wait_human_ms: int = 0
+    overhead_ms: int = 0
+    execution_pct: float = 0.0
+    wait_pct: float = 0.0
+    overhead_pct: float = 0.0
+
+
+class TimelineRun(BaseModel):
+    """链视图中的单个 run。"""
+
+    run_id: str
+    parent_run_id: Optional[str] = None
+    status: str
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    composition: TimelineComposition = Field(default_factory=TimelineComposition)
+
+
+class MonitorTimeline(BaseModel):
+    """时间轴响应: 链头 run + 链 runs + 节点/分隔条目 + 链聚合构成。"""
+
+    run_id: str
+    runs: List[TimelineRun] = Field(default_factory=list)
+    items: List[TimelineItem] = Field(default_factory=list)
+    total_composition: Optional[TimelineComposition] = None
+
+
+class MonitorConfig(BaseModel):
+    """前端阈值/文本上限(标定值下发, 避免两处硬编码)。"""
+
+    correct_threshold: float
+    incorrect_threshold: float
+    minor_text_limit: int
+
+
+class MonitorStageDetail(BaseModel):
+    """单阶段详情: minor 行 + 按需展开的 span 原文/完整回答。"""
+
+    state: MinorState
+    span: Optional[MonitorSpan] = None
+    final_answer: Optional[str] = None
+    refs_resolved: Dict[str, Any] = Field(default_factory=dict)
