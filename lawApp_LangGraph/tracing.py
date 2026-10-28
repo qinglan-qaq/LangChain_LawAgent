@@ -55,16 +55,24 @@ class RunContext:
     # 阶段拉链(Task2): 节点回环重跑计数 node_name → 已开行次数
     node_seq: dict[str, int] = field(default_factory=dict)
     started_at: float = field(default_factory=time.time)
+    # 2026-10-23 spec: resume 串联 + 各 purpose 的上下文段字符数
+    parent_run_id: Optional[str] = None
+    context_meta: dict[str, dict] = field(default_factory=dict)
+    attempt_bumped: bool = False
 
     def add(self, span: Span) -> None:
         self.spans.append(span)
 
     def metrics(self) -> dict:
+        """指标语义修正(spec §五): 节点耗时单计, 澄清轮数分拆。"""
+        node_latency = sum(
+            s.latency_ms for s in self.spans if s.span_type == "node"
+        )
         return {
             "node_count": sum(1 for s in self.spans if s.span_type == "node"),
             "tool_count": sum(1 for s in self.spans if s.span_type == "tool"),
             "llm_count": sum(1 for s in self.spans if s.span_type == "llm"),
-            "total_latency_ms": sum(s.latency_ms for s in self.spans),
+            "total_latency_ms": node_latency,
             "token_prompt": sum(
                 (s.token_usage or {}).get("prompt") or 0 for s in self.spans
             ),
@@ -74,7 +82,17 @@ class RunContext:
             "clarify_rounds": sum(
                 1
                 for s in self.spans
-                if s.span_type == "node" and s.name in ("ask_element", "mid_clarify")
+                if s.span_type == "node" and s.name == "ask_element"
+            ),
+            "mid_clarify_rounds": sum(
+                1
+                for s in self.spans
+                if s.span_type == "node" and s.name == "mid_clarify"
+            ),
+            "element_fill_rounds": sum(
+                1
+                for s in self.spans
+                if s.span_type == "node" and s.name == "element_fill"
             ),
             # 监控扩展(D9): replan 回环轮数 / 工具错误数
             "replan_rounds": sum(
@@ -171,6 +189,111 @@ def _pack(args: tuple, kwargs: dict) -> Any:
     return {"args": list(args), "kwargs": dict(kwargs)}
 
 
+#  node → build_context purpose; close 时把对应段级 meta 落 minor_states
+_CONTEXT_PURPOSE = {
+    "element_assess": "element_assess",
+    "planner": "planner",
+    "executor": "executor",
+    "replan_check": "replan_check",
+    "finalize": "finalize",
+    "chitchat": "chitchat",
+}
+
+
+def _minor_context_meta(run: Optional["RunContext"], node_name: str) -> dict:
+    if run is None:
+        return {}
+    purpose = _CONTEXT_PURPOSE.get(node_name)
+    if purpose and purpose in run.context_meta:
+        return dict(run.context_meta[purpose])
+    return {}
+
+
+def _open_minor(run: "RunContext", node_name: str, seq: int, state: Any) -> None:
+    """节点入口: 投影输入 + 入队 open(stage/minor 同事务)。"""
+    try:
+        from lawApp_LangGraph.minor_state import enqueue_open, project_input
+
+        attempt = 1
+        if run.parent_run_id and not run.attempt_bumped:
+            attempt = 2
+            run.attempt_bumped = True
+        text, meta = project_input(
+            node_name, state, _minor_context_meta(run, node_name)
+        )
+        enqueue_open(
+            run.run_id,
+            run.session_id,
+            node_name,
+            seq,
+            attempt=attempt,
+            input_text=text,
+            context_meta=meta,
+            parent_run_id=run.parent_run_id,
+        )
+    except Exception as e:  # 观测旁路
+        logger.warning("minor 开行投影失败(旁路): %s", e)
+
+
+def _close_minor(
+    run: "RunContext",
+    node_name: str,
+    seq: int,
+    status: str,
+    latency_ms: int,
+    ret: Any,
+    state: Any,
+) -> None:
+    """节点出口: 投影输出 + 入队 close; 异常/中断分支同样落行。"""
+    try:
+        from lawApp_LangGraph.minor_state import enqueue_close, project_output
+
+        if status == "interrupted":
+            phase = "waiting_human"
+            q = ""
+            try:
+                qs = getattr(state, "pending_questions", None) or []
+                first = qs[0] if qs else None
+                q = getattr(first, "question", "") if first is not None else ""
+            except Exception:
+                q = ""
+            text = f"等待用户回答: {q}" if q else "等待用户回答"
+            out = {"question": q, "phase": "waiting_human"}
+            error = None
+        elif status in ("error", "cancelled"):
+            phase = "done"
+            text = ""
+            out = {"error": repr(ret)[:500]}
+            error = repr(ret)[:500]
+        else:
+            phase = "done"
+            text, out = project_output(node_name, ret, state)
+            error = None
+
+        refs = {"trace_span": {"node_name": node_name, "seq": seq}}
+        truncated = out.pop("_truncated_chars", None) if isinstance(out, dict) else None
+        if truncated:
+            refs["truncated_chars"] = truncated
+        if isinstance(out, dict) and out.pop("_json_truncated", None):
+            refs["json_truncated"] = True
+        enqueue_close(
+            run.run_id,
+            node_name,
+            seq,
+            status=status,
+            latency_ms=latency_ms,
+            phase=phase,
+            output_text=text,
+            output_json=out if isinstance(out, dict) else {"output": str(out)[:500]},
+            context_meta=_minor_context_meta(run, node_name),
+            metrics={},
+            error=error,
+            refs=refs,
+        )
+    except Exception as e:  # 观测旁路
+        logger.warning("minor 闭行投影失败(旁路): %s", e)
+
+
 def _is_interrupt(e: Exception) -> bool:
     try:
         from langgraph.errors import GraphInterrupt
@@ -215,10 +338,7 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                 if span_type == "node" and run is not None and _zipper_on():
                     stage_seq = run.node_seq.get(node_name, 0) + 1
                     run.node_seq[node_name] = stage_seq
-                    _fire_stage(
-                        db.open_stage(run.run_id, run.session_id,
-                                       node_name, stage_seq)
-                    )
+                    _open_minor(run, node_name, stage_seq, args[0] if args else None)
                 try:
                     out = await fn(*args, **kwargs)
                 except BaseException as e:
@@ -235,14 +355,18 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                     span.output = {"exception": repr(e)}
                     span.latency_ms = int((time.perf_counter() - t0) * 1000)
                     _emit(span)
-                    _close_zipper(db, run, node_name, stage_seq,
-                                  span.status, span.latency_ms, e)
+                    if run is not None and stage_seq is not None:
+                        _close_minor(run, node_name, stage_seq, span.status,
+                                     span.latency_ms, e,
+                                     args[0] if args else None)
                     raise
                 span.output = out
                 span.latency_ms = int((time.perf_counter() - t0) * 1000)
                 _emit(span)
-                _close_zipper(db, run, node_name, stage_seq,
-                              "ok", span.latency_ms, out)
+                if run is not None and stage_seq is not None:
+                    _close_minor(run, node_name, stage_seq, "ok",
+                                 span.latency_ms, out,
+                                 args[0] if args else None)
                 return out
 
             return awrapper
@@ -267,10 +391,7 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
             if span_type == "node" and run is not None and _zipper_on():
                 stage_seq = run.node_seq.get(node_name, 0) + 1
                 run.node_seq[node_name] = stage_seq
-                _fire_stage(
-                    db.open_stage(run.run_id, run.session_id,
-                                   node_name, stage_seq)
-                )
+                _open_minor(run, node_name, stage_seq, args[0] if args else None)
             try:
                 out = fn(*args, **kwargs)
             except Exception as e:
@@ -278,14 +399,18 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                 span.output = {"exception": repr(e)}
                 span.latency_ms = int((time.perf_counter() - t0) * 1000)
                 _emit(span)
-                _close_zipper(db, run, node_name, stage_seq,
-                              span.status, span.latency_ms, e)
+                if run is not None and stage_seq is not None:
+                    _close_minor(run, node_name, stage_seq, span.status,
+                                 span.latency_ms, e,
+                                 args[0] if args else None)
                 raise
             span.output = out
             span.latency_ms = int((time.perf_counter() - t0) * 1000)
             _emit(span)
-            _close_zipper(db, run, node_name, stage_seq,
-                          "ok", span.latency_ms, out)
+            if run is not None and stage_seq is not None:
+                _close_minor(run, node_name, stage_seq, "ok",
+                             span.latency_ms, out,
+                             args[0] if args else None)
             return out
 
         return wrapper
@@ -414,21 +539,31 @@ async def flush_run(run: RunContext) -> None:
         from lawApp_LangGraph.score import composite_score
 
         metrics = run.metrics()
-        metrics["limit_hit"] = bool(
-            metrics.get("clarify_rounds", 0) >= settings.max_clarify_rounds
-            or metrics.get("replan_rounds", 0) >= settings.max_rounds
-            or metrics.get("node_count", 0) >= settings.recursion_limit
-        )
+        metrics["wall_clock_ms"] = int((time.time() - run.started_at) * 1000)
+        reasons = []
+        if metrics.get("clarify_rounds", 0) >= settings.max_clarify_rounds:
+            reasons.append("max_clarify_rounds")
+        if metrics.get("replan_rounds", 0) >= settings.max_rounds:
+            reasons.append("max_rounds")
+        if metrics.get("node_count", 0) >= settings.recursion_limit:
+            reasons.append("recursion_limit")
+        metrics["limit_hit"] = bool(reasons)
+        metrics["limit_hit_reasons"] = reasons
         rag_scores = []
         for s in run.spans:
             if s.span_type == "tool" and isinstance(s.output, dict):
                 docs = s.output.get("rag_documents")
                 if isinstance(docs, list) and docs:
                     rag_scores.extend(
-                        d.get("hybrid_score", 0)
+                        d.get("relevance_score")
+                        if d.get("relevance_score") is not None
+                        else d.get("hybrid_score", 0)
                         for d in docs
                         if isinstance(d, dict)
                     )
+                ev = s.output.get("evaluation")
+                if isinstance(ev, dict) and ev.get("quality_verdict"):
+                    metrics["rag_verdict"] = ev["quality_verdict"]
         if rag_scores:
             metrics["rag_top_score"] = max(rag_scores)
         metrics["composite_score"] = composite_score(
@@ -464,6 +599,9 @@ async def flush_run(run: RunContext) -> None:
         ]
         if rows:
             await db.insert_trace_spans(rows)
+        from lawApp_LangGraph.minor_state import drain as drain_minor
+
+        await drain_minor(2.0)
     except Exception:
         logger.error("trace 落库失败(观测旁路, 不阻塞业务)", exc_info=True)
 

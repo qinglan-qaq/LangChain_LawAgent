@@ -221,6 +221,30 @@ async def ensure_tables(conn: AsyncConnection) -> None:
             ON stage_chain (ended_at) WHERE ended_at IS NULL;
         CREATE INDEX IF NOT EXISTS idx_stage_chain_session
             ON stage_chain (session_id, started_at);
+        -- minorStates 内容扩展表(1:1 stage_chain): 生命周期字段仍在 stage_chain
+        CREATE TABLE IF NOT EXISTS minor_states (
+            stage_id        BIGINT PRIMARY KEY REFERENCES stage_chain(id) ON DELETE CASCADE,
+            attempt         INT NOT NULL DEFAULT 1,
+            phase           TEXT NOT NULL DEFAULT 'running',
+            input_text      TEXT,
+            output_text     TEXT,
+            output_json     JSONB DEFAULT '{}'::jsonb,
+            context_meta    JSONB DEFAULT '{}'::jsonb,
+            metrics         JSONB DEFAULT '{}'::jsonb,
+            route           TEXT,
+            route_reason    TEXT,
+            error           TEXT,
+            refs            JSONB DEFAULT '{}'::jsonb,
+            parent_stage_id BIGINT REFERENCES stage_chain(id),
+            content_source  TEXT NOT NULL DEFAULT 'projected'
+        );
+        CREATE INDEX IF NOT EXISTS idx_minor_states_source
+            ON minor_states (content_source);
+        -- run 生命周期提前落库 + resume 串联(2026-10-23 spec §1.2/1.3)
+        ALTER TABLE trace_runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
+        ALTER TABLE trace_runs ADD COLUMN IF NOT EXISTS current_node TEXT;
+        CREATE INDEX IF NOT EXISTS idx_trace_runs_parent
+            ON trace_runs (parent_run_id);
         -- 评测批次表(P2, 2026-09-20 spec 决策 2 原样)
         CREATE TABLE IF NOT EXISTS eval_runs (
             id          BIGSERIAL PRIMARY KEY,
@@ -317,6 +341,31 @@ def _trace_json(value: Any) -> "Json":
     from psycopg.types.json import Json
 
     return Json(value, dumps=lambda o: json.dumps(o, default=_json_default, ensure_ascii=False))
+
+
+async def start_trace_run(
+    run_id: str,
+    session_id: str,
+    run_type: str,
+    mode: str = "",
+    query: str = "",
+    parent_run_id: Optional[str] = None,
+) -> None:
+    """run 开始即插入 running 行(spec §1.3): /monitor/runs 天然含进行中 run。"""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO trace_runs
+                (run_id, session_id, run_type, mode, status, query,
+                 parent_run_id, started_at)
+            VALUES (%s, %s, %s, %s, 'running', %s, %s, NOW())
+            ON CONFLICT (run_id) DO UPDATE SET
+                parent_run_id = COALESCE(EXCLUDED.parent_run_id, trace_runs.parent_run_id)
+            """,
+            (run_id, session_id, run_type, mode, query, parent_run_id),
+        )
+        await conn.commit()
 
 
 async def insert_trace_run(

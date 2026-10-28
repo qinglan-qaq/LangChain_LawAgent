@@ -99,8 +99,12 @@ def test_metrics_aggregation():
     m = run.metrics()
     assert m == {
         "node_count": 3, "tool_count": 1, "llm_count": 1,
-        "total_latency_ms": 190, "token_prompt": 110,
-        "token_completion": 55, "clarify_rounds": 2,
+        # D8: 总耗时只累 node span(110), tool/llm 不重复计
+        "total_latency_ms": 110, "token_prompt": 110,
+        "token_completion": 55,
+        # D8: clarify_rounds 只数 ask_element; mid 单列
+        "clarify_rounds": 1, "mid_clarify_rounds": 1,
+        "element_fill_rounds": 0,
         "replan_rounds": 0, "tool_error_count": 0,
     }
 
