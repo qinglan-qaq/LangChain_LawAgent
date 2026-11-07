@@ -6,7 +6,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
@@ -79,16 +78,16 @@ class RAG_service:
             add_start_index=True,
         )
 
-        # 重排经 RAG_service.embedder 单例(懒加载), __init__ 不再预载 GB 级模型
+        # 重排/嵌入经 RAG_service.embedder 单例(懒加载), __init__ 不再预载 GB 级模型
+        # BM25 同样懒加载: 当前 dense 单路模式不需要稀疏编码器
+        self._bm25 = None
 
-        # 稀疏向量（BM25 参数随仓库 data/ 分发，可经 BM25_PATH 覆盖）
-        self.bm25 = BM25Encoder().load(settings.bm25_path)
-
-        # 密集向量
-        model_name = "BAAI/bge-large-zh-v1.5"
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=model_name, encode_kwargs={"normalize_embeddings": True}
-        )
+    @property
+    def bm25(self):
+        """BM25 稀疏编码器(仅 hybrid 模式使用, 首次访问时加载)。"""
+        if self._bm25 is None:
+            self._bm25 = BM25Encoder().load(settings.bm25_path)
+        return self._bm25
 
     def create_index(self, wait_for_completion: bool = True) -> bool:
         """创建混合检索索引(稠密+稀疏双路可查).
@@ -249,8 +248,10 @@ class RAG_service:
                 # 独有的
                 record_id = f"lawCase_{file_hash}_{DocuID}_chunk{i}"
 
-                # 密集向量
-                dense_vector = self.embeddings.embed_query(chunk)
+                # 密集向量(与检索/记忆共用 BGE 单例, 不再重复加载模型)
+                from lawApp_LangGraph.RAG_service.embedder import embed_query_sync
+
+                dense_vector = embed_query_sync(chunk)
 
                 # 返回 {"indices": [...], "values": [...]}
                 sparse_vector = self.bm25.encode_documents(chunk)
@@ -353,7 +354,9 @@ class RAG_service:
         """
         if self.index is None:
             raise RuntimeError("索引未初始化, 请先调用 create_index()")
-        dense_vec = self.embeddings.embed_query(query)
+        from lawApp_LangGraph.RAG_service.embedder import embed_query_sync
+
+        dense_vec = embed_query_sync(query)
         res = self.index.query(
             vector=dense_vec,
             namespace=namespace,

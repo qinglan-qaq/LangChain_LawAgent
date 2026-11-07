@@ -13,9 +13,10 @@
 from __future__ import annotations
 
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import Optional
+
+from lawApp_LangGraph.config import settings
 
 logger = logging.getLogger("lawApp.rag")
 
@@ -53,13 +54,14 @@ def get_retriever() -> BaseRetriever:
     """按环境变量返回检索后端单例（懒加载）。"""
     global _retriever
     if _retriever is None:
-        backend = os.getenv("RETRIEVER_BACKEND", "pgvector").lower().strip()
+        backend = settings.retriever_backend.lower().strip()
         if backend == "pinecone":
             from lawApp_LangGraph.RAG_service.pinecone_retriever import (
                 PineconeRetriever,
             )
 
-            logger.info("检索后端: Pinecone (混合检索)")
+            mode = settings.pinecone_query_mode.lower().strip()
+            logger.info("检索后端: Pinecone (%s)", "混合检索" if mode == "hybrid" else "稠密单路")
             _retriever = PineconeRetriever()
         elif backend == "pgvector":
             from lawApp_LangGraph.RAG_service.pgvector_retriever import (

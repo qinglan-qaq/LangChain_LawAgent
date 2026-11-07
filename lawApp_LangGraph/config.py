@@ -81,12 +81,23 @@ class Settings(BaseSettings):
     # 法律文档目录(法条 TXT + 案例 MD), env DOCUMENTS_DIR 可覆盖
     documents_dir: str = str(_DATA_DIR / "Documents")
 
+    # ============ 检索: 后端选择 ============
+    # pgvector(本地) | pinecone;env RETRIEVER_BACKEND 覆盖
+    retriever_backend: str = "pgvector"
+    # 后台预热: 启动后异步加载 BGE/CrossEncoder/Pinecone, 不阻塞首个请求
+    rag_warmup_enabled: bool = True
+
     # ============ 检索: Pinecone ============
     pinecone_index_name: str = "pinecone-test-lawapp"
     pinecone_namespace: str = "law_cases"
     pinecone_api_key: Optional[str] = None
     pinecone_cloud: str = "aws"
     pinecone_region: str = "us-east-1"
+    # dense = 仅稠密向量(当前索引未建稀疏字段);hybrid = 双路 RRF 融合.
+    # hybrid 使用 pinecone_hybrid_namespace(未配置时回退 pinecone_namespace),
+    # 为后续新建混合索引 namespace 预留切换位.
+    pinecone_query_mode: str = "dense"
+    pinecone_hybrid_namespace: Optional[str] = None
 
     # ============ 日志 ============
     log_dir: str = "./logs"
@@ -118,6 +129,8 @@ class Settings(BaseSettings):
     memory_compress_timeout_s: float = 3.0
     memory_digest_limit: int = 3
     memory_compress_enabled: bool = True
+    # 每轮终答自动写入长期记忆(PostgresStore / InMemoryStore), 供 search_memory 召回
+    memory_auto_write: bool = True
 
     # ============ 统一上下文信封(段级预算) ============
     context_case_elements_limit: int = 1500

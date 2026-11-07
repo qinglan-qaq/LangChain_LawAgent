@@ -1,26 +1,15 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { Motion } from 'motion-v'
-import { state, useTypewriter, COLLAPSE_LEN } from '../store'
+import { state, COLLAPSE_LEN } from '../store'
 import MarkdownView from './MarkdownView.vue'
 import MessageThinking from './MessageThinking.vue'
 
-// 流式目标: 最后一条普通 assistant 消息(打字机只对它生效);
-// HITL 追问/回答消息(kind=hitl_*)不参与打字机, 静态整段渲染
+// 流式目标: 最后一条普通 assistant 消息;
+// token 由后端 SSE 实时推送, 直接渲染, 不再叠加前端打字机延迟
 const lastAssistant = computed(
   () => [...state.value.messages].reverse().find((m) => m.role === 'assistant' && !m.kind) || null,
 )
-const full = computed(() => lastAssistant.value?.text ?? '')
-const shown = ref('')
-const tw = useTypewriter(full, shown)
-
-// token 流入时启动追平; 换新一条 assistant 消息时清空已显示文本
-watch(full, () => {
-  if (full.value) tw.start()
-})
-watch(lastAssistant, () => {
-  shown.value = ''
-})
 
 // 气泡样式: HITL 追问用淡琥珀边框(区分普通回答), 其余按角色
 function bubbleClass(m) {
@@ -99,7 +88,7 @@ function hitlTag(m) {
           <!-- assistant 消息: 流式期打字机原文 + 光标; done 后 md 渲染最终结果。
                超长回答同用户气泡模糊折叠(限高+底部渐变, 阈值同 COLLAPSE_LEN), 点击展开 -->
           <template v-else>
-            <span v-if="m === lastAssistant && !m.done" class="whitespace-pre-wrap">{{ shown }}</span>
+            <span v-if="m === lastAssistant && !m.done" class="whitespace-pre-wrap">{{ m.text }}</span>
             <div
               v-else-if="m.text.length > COLLAPSE_LEN && !m.expanded"
               class="result-llm-collapsed relative max-h-24 overflow-hidden"

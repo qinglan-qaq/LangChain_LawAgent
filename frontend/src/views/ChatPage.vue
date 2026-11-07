@@ -187,6 +187,12 @@ async function submit({ text, docType }) {
 // 失败保护(H11): interrupt 不预清, 首个成功流事件后才清; 失败/断流时恢复面板(本地副本优先, 服务端兜底)
 async function resumeHITL(answer) {
   const savedInterrupt = state.value.interrupt // 失败恢复用(首个成功流事件前不清)
+  // 新回合清空上一轮 plan/steps/tools, 避免思考区串写; 要素面板沿用
+  const savedElements = state.value.elements
+  const savedCaseQuery = state.value.caseQuery
+  resetTurn()
+  state.value.elements = savedElements
+  state.value.caseQuery = savedCaseQuery
   // docx 确认: 选「确认」后生成耗时较长, 先开全局生成中弹窗(docx_done/error 帧收)
   if (savedInterrupt?.type === 'docx_confirm' && answer === '确认') {
     state.value.docxGenerating = true

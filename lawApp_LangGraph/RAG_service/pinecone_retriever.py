@@ -1,12 +1,12 @@
 """
-Pinecone 检索后端 — RRF 混合检索(双路独立召回 + 客户端融合 + CrossEncoder 出分)
+Pinecone 检索后端 — 稠密单路 / RRF 混合检索(可切换)
 
-流程: dense_recall/sparse_recall 双路并发独立召回 → fusion.rrf_fuse 倒数排名
-融合 → embedder.rerank(CrossEncoder)重排 → sigmoid 出分(relevance_score)。
-复用 legacy RAG_service 的嵌入/BM25 管线, 但:
-    - 懒加载(首次 search 时才初始化模型与连接)
-    - 不在检索路径上自动建索引(ingest 脚本负责)
-    - 返回统一 dict 格式
+dense 模式(当前默认): BGE 稠密召回 → CrossEncoder 重排 → sigmoid 出分。
+hybrid 模式: dense_recall/sparse_recall 双路并发独立召回 → fusion.rrf_fuse
+倒数排名融合 → CrossEncoder 重排。混合模式使用
+settings.pinecone_hybrid_namespace(未配置时回退 pinecone_namespace),
+为后续新建 Pinecone 混合索引 namespace 预留切换位。
+
 设计: docs/superpowers/specs/2026-10-11-rrf-hybrid-retrieval-design.md §5
 """
 
@@ -52,6 +52,55 @@ def _get_service():
     return _service
 
 
+async def warmup_rag() -> None:
+    """后台预热 BGE / CrossEncoder / Pinecone 连接, 不阻塞 API 启动。
+
+    模型加载与首次推理放在线程池; Pinecone 只做 describe_index 连通性检查。
+    失败仅记日志, 首个检索请求仍会按懒加载路径重试。
+    """
+    if not settings.rag_warmup_enabled:
+        return
+
+    import asyncio
+    import time
+
+    from lawApp_LangGraph.FastAPI.logging import system as system_log
+
+    t0 = time.time()
+    system_log.info(
+        "RAG 预热开始",
+        detail=f"embed={settings.memory_embed_model} | rerank={settings.rerank_model} | backend={settings.retriever_backend}",
+    )
+
+    def _warm_models() -> None:
+        from lawApp_LangGraph.RAG_service.embedder import get_embedder, get_reranker
+
+        embedder = get_embedder()
+        embedder.encode("婚姻家庭法律咨询预热", normalize_embeddings=True)
+        reranker = get_reranker()
+        if reranker is not None:
+            reranker.predict([["婚姻家庭法律咨询预热", "夫妻共同财产分割"]])
+        system_log.info("RAG 预热: BGE/CrossEncoder 就绪", detail=f"elapsed={time.time()-t0:.1f}s")
+
+    def _warm_pinecone() -> None:
+        if settings.retriever_backend.lower().strip() != "pinecone":
+            return
+        svc = _get_service()
+        svc.pc.describe_index(svc.index_name)
+        system_log.info("RAG 预热: Pinecone 就绪", detail=f"index={svc.index_name}")
+
+    results = await asyncio.gather(
+        asyncio.to_thread(_warm_models),
+        asyncio.to_thread(_warm_pinecone),
+        return_exceptions=True,
+    )
+    for label, result in zip(("models", "pinecone"), results):
+        if isinstance(result, Exception):
+            logger.warning("RAG 预热 %s 失败(不影响服务): %s", label, result)
+            system_log.warning("RAG 预热失败", detail=f"{label}: {str(result)[:160]}")
+    system_log.info("RAG 后台预热结束", detail=f"elapsed={time.time()-t0:.1f}s")
+
+
 class PineconeRetriever(BaseRetriever):
     async def search(
         self,
@@ -60,24 +109,25 @@ class PineconeRetriever(BaseRetriever):
         rerank_top_n: int = 5,
         namespace: Optional[str] = None,
     ) -> list[dict]:
-        """RRF 混合检索编排: 双路并发召回 → 客户端融合 → CrossEncoder 出分.
+        """按 pinecone_query_mode 执行稠密单路或 RRF 混合检索.
 
         Args:
             query: 查询文本, 中文。
             top_k: 每路召回条数(钳制 1..50)。
             rerank_top_n: 重排后返回条数(钳制 1..10)。
-            namespace: 检索命名空间, None 时以 settings.pinecone_namespace 兜底。
+            namespace: 检索命名空间; None 时 dense 用 pinecone_namespace,
+                hybrid 用 pinecone_hybrid_namespace(未配置回退前者)。
 
         Returns:
             RetrievedDocument 对齐的 dict 列表。rerank 可用时每项含
             rrf_score / relevance_score(sigmoid 重排分) / hybrid_score
             (= relevance_score 兼容别名) / rank(重排名次); rerank 不可
-            用时缺 relevance_score 与 hybrid_score 两键, rank 为 RRF 名次
+            用时缺 relevance_score 与 hybrid_score 两键, rank 为召回名次
             — 缺键即 evaluate_case_relevance 全 ambiguous 门控的标记
             (spec §5⑤), 排序不骗人。
 
         Raises:
-            RuntimeError: 双路召回全部失败(调用方 rag_tools 兜 status=error)。
+            RuntimeError: 召回失败(调用方 rag_tools 兜 status=error)。
         """
         import asyncio
 
@@ -88,27 +138,40 @@ class PineconeRetriever(BaseRetriever):
             sigmoid,
         )
 
-        ns = namespace or settings.pinecone_namespace
+        hybrid = settings.pinecone_query_mode.lower().strip() == "hybrid"
+        default_ns = (
+            settings.pinecone_hybrid_namespace
+            if hybrid and settings.pinecone_hybrid_namespace
+            else settings.pinecone_namespace
+        )
+        ns = namespace or default_ns
         top_k, rerank_top_n = clamp_search_params(top_k, rerank_top_n)
         svc = _get_service()
 
-        # 双路并发召回(SDK 同步, 各自让出事件循环); 单路失败降级单路
-        results = await asyncio.gather(
-            asyncio.to_thread(svc.dense_recall, query, ns, top_k),
-            asyncio.to_thread(svc.sparse_recall, query, ns, top_k),
-            return_exceptions=True,
-        )
-        dense_m, sparse_m = [], []
-        if isinstance(results[0], list):
-            dense_m = results[0]
+        dense_m: list = []
+        sparse_m: list = []
+        if hybrid:
+            # 双路并发召回(SDK 同步, 各自让出事件循环); 单路失败降级单路
+            results = await asyncio.gather(
+                asyncio.to_thread(svc.dense_recall, query, ns, top_k),
+                asyncio.to_thread(svc.sparse_recall, query, ns, top_k),
+                return_exceptions=True,
+            )
+            if isinstance(results[0], list):
+                dense_m = results[0]
+            else:
+                logger.warning("稠密路召回失败, 降级稀疏单路: %s", results[0])
+            if isinstance(results[1], list):
+                sparse_m = results[1]
+            else:
+                logger.warning("稀疏路召回失败, 降级稠密单路: %s", results[1])
+            if not dense_m and not sparse_m:
+                raise RuntimeError(f"双路召回全部失败: {results!r}")
         else:
-            logger.warning("稠密路召回失败, 降级稀疏单路: %s", results[0])
-        if isinstance(results[1], list):
-            sparse_m = results[1]
-        else:
-            logger.warning("稀疏路召回失败, 降级稠密单路: %s", results[1])
-        if not dense_m and not sparse_m:
-            raise RuntimeError(f"双路召回全部失败: {results!r}")
+            # 当前 Pinecone 索引为纯稠密索引, 纯稀疏查询会被 400 拒绝
+            dense_m = await asyncio.to_thread(svc.dense_recall, query, ns, top_k)
+            if not dense_m:
+                raise RuntimeError("稠密召回失败或为空")
 
         candidates = rrf_fuse(
             dense_m,

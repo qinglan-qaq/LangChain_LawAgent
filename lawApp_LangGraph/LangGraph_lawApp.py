@@ -42,6 +42,7 @@ v2 变更 (upgrade-v1):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -2330,6 +2331,43 @@ async def replanner_node(state: AgentState, config: RunnableConfig) -> dict:
 
 # Node 7: Finalize — 组装最终回答
 
+# 长期记忆命名空间(与 tools/db_tools.py 的 MEM_NAMESPACE 保持一致)
+_MEM_NAMESPACE = ("law_agent", "memories")
+
+
+async def _persist_turn_memory(
+    state: AgentState, config: RunnableConfig | None, answer: str
+) -> None:
+    """终答写入 BaseStore(PostgresStore / InMemoryStore), 供 search_memory 跨会话召回。
+
+    键由 session + query + 答案前缀派生: 同轮重放/resume 覆盖同一 key, 不重复膨胀。
+    写入失败只记旁路日志, 不影响回答返回。
+    """
+    if not settings.memory_auto_write or not answer.strip():
+        return
+    try:
+        from langgraph.config import get_store
+
+        store = get_store()
+        if store is None:
+            return
+        sid = _dialogue_sid(config)
+        seed = f"{sid}:{state.query}:{answer[:200]}".encode("utf-8")
+        key = hashlib.sha256(seed).hexdigest()[:32]
+        value = {
+            "summary": (state.query or "")[:200],
+            "content": answer[:2000],
+            "memory_type": "consultation_turn",
+            "session_id": sid,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if state.case_elements:
+            value["elements"] = state.case_elements.digest()[:500]
+        await store.aput(_MEM_NAMESPACE, key, value)
+        debug.info("长期记忆已写入", detail=f"key={key[:12]} | sid={sid}")
+    except Exception as e:  # 记忆是旁路, 失败不阻断终答
+        debug.warning("长期记忆写入失败(旁路)", detail=str(e)[:160])
+
 # 方案c: final_answer 事件的引用来源列表(law_results 法条 + rag_documents
 # 案例的标题/编号名称, 空则 [])
 def _final_citations(state: AgentState) -> list:
@@ -2361,6 +2399,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             result=f"elapsed={time.time() - t0:.2f}s",
         )
         # L13: 已有答案同样入对话历史(幂等防重)
+        await _persist_turn_memory(state, config, state.final_answer)
         return _assistant_message_update(state, state.final_answer)
 
     if (state.mode or "attorney") == "assistant":
@@ -2377,7 +2416,8 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         chain = PromptTemplate.from_template(template) | get_executor_llm()
         parts = []
         async for chunk in chain.astream(
-            {"context_json": context_json(state, "finalize_assistant")}
+            {"context_json": context_json(state, "finalize_assistant")},
+            config=config,
         ):
             parts.append(chunk.content or "")
         answer = "".join(parts)
@@ -2397,6 +2437,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             },
         )
         # L13: 答案入对话历史
+        await _persist_turn_memory(state, config, answer)
         out = {"final_answer": answer}
         out.update(_assistant_message_update(state, answer))
         return out
@@ -2405,7 +2446,8 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         chain = FINALIZE_CASE_PROMPT | get_executor_llm()
         parts: list[str] = []
         async for chunk in chain.astream(
-            {"context_json": context_json(state, "finalize_attorney")}
+            {"context_json": context_json(state, "finalize_attorney")},
+            config=config,
         ):
             parts.append(chunk.content or "")
         answer = "".join(parts)
@@ -2425,6 +2467,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
             },
         )
         # L13: 答案入对话历史
+        await _persist_turn_memory(state, config, answer)
         out = {"final_answer": answer}
         out.update(_assistant_message_update(state, answer))
         return out
@@ -2432,7 +2475,8 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
     chain = FINALIZE_DIRECT_PROMPT | get_executor_llm()
     parts = []
     async for chunk in chain.astream(
-        {"context_json": context_json(state, "finalize_attorney")}
+        {"context_json": context_json(state, "finalize_attorney")},
+        config=config,
     ):
         parts.append(chunk.content or "")
     answer = "".join(parts)
@@ -2452,6 +2496,7 @@ async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dic
         },
     )
     # L13: 答案入对话历史
+    await _persist_turn_memory(state, config, answer)
     out = {"final_answer": answer}
     out.update(_assistant_message_update(state, answer))
     return out

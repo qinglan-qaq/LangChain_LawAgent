@@ -94,9 +94,12 @@ async def _setup_postgres():
     from langgraph.store.postgres.aio import AsyncPostgresStore
 
     from lawApp_LangGraph.RAG_service.embedder import embed_fn_for_store
-    from lawApp_LangGraph.db import build_dsn
+    from lawApp_LangGraph.db import build_dsn, get_pool
 
     dsn = build_dsn()
+    # 先建业务池: 注册 pgvector 扩展 + sessions/trace/stage 等表,
+    # 保证后续 store.setup() 的向量列可用
+    await get_pool()
 
     # ── checkpointer:AsyncPostgresSaver 直接受 AsyncConnectionPool ──
     # autocommit 必须: saver.setup() 迁移含 CREATE INDEX CONCURRENTLY, 不能在事务内跑

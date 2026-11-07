@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from langchain_core.messages import AIMessageChunk
 from langgraph.types import Command
 
 from lawApp_LangGraph.config import settings
@@ -111,9 +112,25 @@ async def lifespan(app: FastAPI):
             "DEEPSEEK_API_KEY 未配置: LLM 全链路(规划/分析/语义确认)不可用, "
             "请在 lawApp_LangGraph/.env 配置后重启服务"
         )
+
+    # 后台预热 BGE/CrossEncoder/Pinecone: 不阻塞启动, 首个检索请求不再冷启动
+    warmup_task = None
+    if settings.rag_warmup_enabled:
+        from lawApp_LangGraph.RAG_service.pinecone_retriever import warmup_rag
+
+        warmup_task = asyncio.create_task(warmup_rag(), name="rag-warmup")
+        app.state.rag_warmup_task = warmup_task
+        system.info("RAG 后台预热已启动", detail="models + pinecone")
+
     yield
     from lawApp_LangGraph import runtime
 
+    if warmup_task is not None and not warmup_task.done():
+        warmup_task.cancel()
+        try:
+            await warmup_task
+        except asyncio.CancelledError:
+            pass
     await runtime.teardown_runtime()
     from lawApp_LangGraph.db import close_pool
 
@@ -855,6 +872,7 @@ def _run_sse(
             """消费 graph.astream, 事件形态与既有 /ask/stream 完全一致。"""
             final_state: dict = {}
             seen_steps: set[str] = set()
+            streamed_answer_chars = 0
             # values 流回填(决策 5): 本 super-step 更新过的节点名,
             # 下一帧 values 到达时对应 node span 补 state 快照
             pending_nodes: list[str] = []
@@ -868,11 +886,19 @@ def _run_sse(
                     if stream_mode == "messages":
                         msg, meta = chunk
                         content = getattr(msg, "content", "")
+                        node_name = (meta or {}).get("langgraph_node")
+                        # 只透出终答相关 token: finalize / 终答工具(tools) /
+                        # 闲聊 chitchat; planner 的结构化输出不污染气泡
+                        # 必须是 AIMessageChunk(增量); 节点输出整段 AIMessage
+                        # 的 type 也是 "ai", 放进来会变成"一次性假流式"
                         if (
-                            isinstance(content, str)
+                            node_name in (None, "finalize", "tools", "chitchat")
+                            and isinstance(msg, AIMessageChunk)
+                            and isinstance(content, str)
                             and content.strip()
                             and not getattr(msg, "tool_calls", None)
                         ):
+                            streamed_answer_chars += len(content)
                             await out_q.put(("token", content))
                     elif stream_mode == "updates":
                         for node_name, updates in (chunk or {}).items():
@@ -980,7 +1006,8 @@ def _run_sse(
                 else:
                     answer = (final_state.get("final_answer") or "").strip()
                     trace_run.final_answer = answer
-                    if answer:
+                    # token 已边说边发时不再补发整段 answer, 避免前端重置文本
+                    if answer and streamed_answer_chars == 0:
                         await out_q.put(("answer", answer))
                     await out_q.put(("session_id", sid))
 

@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any, List, Optional
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from lawApp_LangGraph.FastAPI.logging import (
@@ -90,7 +91,12 @@ async def retrieve_legal_knowledge(
     表示重排序不可用,文档仅按 RRF 融合名次返回,未做相关性打分.
     """
     t0 = time.time()
-    ns = namespace or settings.pinecone_namespace
+    hybrid = settings.pinecone_query_mode.lower().strip() == "hybrid"
+    ns = namespace or (
+        settings.pinecone_hybrid_namespace
+        if hybrid and settings.pinecone_hybrid_namespace
+        else settings.pinecone_namespace
+    )
     tool_log.info(
         "→ 调用工具: retrieve_legal_knowledge",
         detail=f"query={query[:60]} | top_k={top_k} | ns={ns}",
@@ -243,7 +249,7 @@ def evaluate_case_relevance(
             "evaluation": EvaluationResult(
                 error="输入为空,没有可评估的文档",
                 quality_verdict="不足,建议进行网络搜索补充",
-            )
+            ).model_dump(mode="json")
         }
 
     correct, ambiguous, incorrect = [], [], []
@@ -263,7 +269,7 @@ def evaluate_case_relevance(
                 ambiguous_count=len(documents),
                 quality_verdict="不足,建议进行网络搜索补充",
                 ambiguous=[_to_simple_doc(doc) for doc in documents],
-            )
+            ).model_dump(mode="json")
         }
 
     for doc in documents:
@@ -298,7 +304,7 @@ def evaluate_case_relevance(
             correct=correct,
             ambiguous=ambiguous,
             incorrect=incorrect,
-        )
+        ).model_dump(mode="json")
     }
 
 
@@ -347,6 +353,7 @@ def _build_analysis_context(pr: PromptsRecord) -> str:
 async def analyze_legal_issue(
     query: str,
     prompts_record: Any = None,
+    config: RunnableConfig = None,
     **kwargs: Any,
 ) -> dict:
     """基于法律案例、法律条文和网络资料,生成专业的法律分析和建议.
@@ -394,7 +401,9 @@ async def analyze_legal_issue(
 
     # 流式生成:token 经 langgraph astream(stream_mode="messages") 回调透出
     answer_parts: list[str] = []
-    async for chunk in llm.astream(final_prompt):
+    # 必须透传 LangGraph config: 否则 token 不进入 astream(messages),
+    # 前端只能在结束后收到整段 answer(表现为假打字机)
+    async for chunk in llm.astream(final_prompt, config=config):
         raw = chunk.content if hasattr(chunk, "content") else str(chunk)
         if isinstance(raw, list):
             raw = "".join(
@@ -423,5 +432,7 @@ async def analyze_legal_issue(
     return {
         "final_answer": answer,
         "final_prompts": final_prompt,
-        "prompts_record": pr,
+        # 统一转纯 dict: ToolNode 对含 Pydantic 对象的 dict 会 json.dumps(str)
+        # 成不可解析字符串, merge 节点会静默丢失 prompts_record
+        "prompts_record": pr.model_dump(mode="json"),
     }

@@ -276,7 +276,9 @@ async def fetch_laws(query: str, top_k: int = 5) -> dict:
         result=f"top_similarity={top_sim:.3f} | elapsed={time.time() - t0:.2f}s",
     )
     return {
-        "law_results": laws,
+        # 纯 dict 返回: ToolNode 序列化含 Pydantic 的 dict 会变不可解析字符串,
+        # 导致 merge 节点丢失 law_results / PromptsRecord
+        "law_results": [law.model_dump(mode="json") for law in laws],
         "status": "success" if laws else "empty",
         "count": len(laws),
     }
