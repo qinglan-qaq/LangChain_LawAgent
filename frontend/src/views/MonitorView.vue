@@ -7,15 +7,24 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
-  getMonitorConfig, getMonitorEvals, getMonitorMinorStates, getMonitorOverview,
-  getMonitorRuns, getMonitorStageDetail, getMonitorTimeline,
+  getAuditDetail, getAuditView, getMonitorConfig, getMonitorEvals,
+  getMonitorMinorStates, getMonitorOverview, getMonitorRuns,
+  getMonitorStageDetail, getMonitorTimeline,
 } from '../api'
+import AuditContextMatrix from '../components/audit/AuditContextMatrix.vue'
+import AuditEvidenceBoard from '../components/audit/AuditEvidenceBoard.vue'
+import AuditNodeDrawer from '../components/audit/AuditNodeDrawer.vue'
+import AuditPerformancePanel from '../components/audit/AuditPerformancePanel.vue'
+import AuditRunHeader from '../components/audit/AuditRunHeader.vue'
+import AuditTimeline from '../components/audit/AuditTimeline.vue'
+import AuditVerdictBar from '../components/audit/AuditVerdictBar.vue'
 import MinorStateDetail from '../components/MinorStateDetail.vue'
 import MonitorTimeline from '../components/MonitorTimeline.vue'
 import { fmtCST } from '../lib/time'
 
 const PAGE_SIZE = 20
 const POLL_MS = 2000
+const AUDIT_ON = import.meta.env.VITE_MONITOR_AUDIT !== '0'
 
 const overview = ref({})
 const runs = ref([])
@@ -30,6 +39,13 @@ const timelineLoading = ref(false)
 const selectedStageId = ref(null)
 const stageDetail = ref(null)
 const detailLoading = ref(false)
+
+// 统一审计视图(flag 关闭时回退旧时间轴/详情面板)
+const auditView = ref(null)
+const auditLoading = ref(false)
+const auditDetail = ref(null)
+const auditRawLoading = ref(false)
+const auditTab = ref('overview')
 
 const phaseFilter = ref('')
 const nodeFilter = ref('')
@@ -55,6 +71,10 @@ const currentStageId = computed(() => {
   const last = own[own.length - 1]
   return last?.state?.stage_id ?? null
 })
+const auditRunning = computed(() =>
+  auditView.value?.run?.status === 'running'
+  || (auditView.value?.chain || []).some((r) => r.status === 'running')
+)
 
 async function fetchRuns() {
   const { rows, total } = await getMonitorRuns(
@@ -79,6 +99,22 @@ async function loadTimeline() {
   }
 }
 
+// 统一审计: 一次拿结论卡/时间轴/证据/上下文/性能; 失败保留旧快照
+async function loadAudit(after = 0) {
+  if (!selectedRunId.value) return
+  if (!auditView.value) auditLoading.value = true
+  try {
+    auditView.value = await getAuditView(selectedRunId.value, {
+      chain: true, afterStageId: after,
+    })
+    monitorError.value = ''
+  } catch (e) {
+    monitorError.value = e?.response?.data?.detail || '审计视图加载失败'
+  } finally {
+    auditLoading.value = false
+  }
+}
+
 // 返回 { patched, fresh }: fresh>0 表示出现了时间轴里还没有的 stage 行
 function patchTimelineStates(rows) {
   if (!timeline.value || !rows?.length) return { patched: 0, fresh: 0 }
@@ -98,6 +134,17 @@ function patchTimelineStates(rows) {
 async function pollSelected() {
   const rid = selectedRunId.value
   if (!rid) return
+  if (AUDIT_ON) {
+    await loadAudit()
+    if (selectedStageId.value) {
+      try {
+        auditDetail.value = await getAuditDetail(selectedStageId.value, false)
+      } catch {
+        // 单节点刷新失败保留旧详情; 下个 tick 重试
+      }
+    }
+    return
+  }
   try {
     const rows = await getMonitorMinorStates(rid, 0)
     const result = patchTimelineStates(rows)
@@ -150,7 +197,8 @@ async function tick() {
 }
 
 function ensureTimer(rs = runs.value) {
-  const any = (rs || []).some((r) => r.status === 'running')
+  const any = auditRunning.value
+    || (rs || []).some((r) => r.status === 'running')
     || timelineNodes.value.some((x) => x.state.phase === 'running')
     || selectedRun.value?.status === 'running'
   if (any && !timer.value) timer.value = setInterval(tick, POLL_MS)
@@ -172,7 +220,10 @@ function hashParams() {
 function syncHash() {
   const p = new URLSearchParams()
   if (selectedRunId.value) p.set('run', selectedRunId.value)
-  if (selectedStageId.value) p.set('stage', String(selectedStageId.value))
+  if (selectedStageId.value) {
+    p.set('stage', String(selectedStageId.value))
+    if (AUDIT_ON && auditTab.value !== 'overview') p.set('tab', auditTab.value)
+  }
   const q = p.toString()
   const url = `${window.location.pathname}${q ? `#${q}` : ''}`
   window.history.replaceState(null, '', url)
@@ -182,19 +233,35 @@ async function applyHash() {
   const p = hashParams()
   const run = p.get('run')
   const stage = p.get('stage')
-  if (run && run !== selectedRunId.value) await openRun(run, stage)
+  const tab = p.get('tab') || 'overview'
+  if (run && run !== selectedRunId.value) await openRun(run, stage, tab)
   else if (run && stage && Number(stage) !== selectedStageId.value) {
-    await selectStage(Number(stage))
+    await selectStage(Number(stage), tab)
   }
 }
 
-async function openRun(runId, stageId = null) {
+async function openRun(runId, stageId = null, tab = 'overview') {
   selectedRunId.value = runId
   selectedStageId.value = null
   stageDetail.value = null
+  auditView.value = null
+  auditDetail.value = null
+  auditTab.value = 'overview'
   nodeFilter.value = ''
   phaseFilter.value = ''
   monitorError.value = ''
+  stopTimer()
+  if (AUDIT_ON) {
+    await loadAudit()
+    if (stageId) await selectStage(Number(stageId), tab)
+    syncHash()
+    ensureTimer()
+    await nextTick()
+    document.getElementById('audit-section-timeline')?.scrollIntoView({
+      behavior: 'smooth', block: 'start',
+    })
+    return
+  }
   await loadTimeline()
   if (stageId) await selectStage(Number(stageId))
   await pollSelected()
@@ -204,8 +271,23 @@ async function openRun(runId, stageId = null) {
   detailSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
-async function selectStage(stageId) {
+async function selectStage(stageId, tab = 'overview') {
   selectedStageId.value = stageId
+  auditTab.value = tab || 'overview'
+  if (AUDIT_ON) {
+    detailLoading.value = true
+    try {
+      auditDetail.value = await getAuditDetail(stageId, false)
+      monitorError.value = ''
+    } catch (e) {
+      auditDetail.value = null
+      monitorError.value = e?.response?.data?.detail || '节点审计详情加载失败'
+    } finally {
+      detailLoading.value = false
+    }
+    syncHash()
+    return
+  }
   detailLoading.value = true
   try {
     stageDetail.value = await getMonitorStageDetail(stageId)
@@ -222,12 +304,50 @@ async function selectStage(stageId) {
   })
 }
 
+function closeStage() {
+  selectedStageId.value = null
+  auditDetail.value = null
+  auditTab.value = 'overview'
+  syncHash()
+}
+
+async function loadRaw() {
+  if (!selectedStageId.value || auditRawLoading.value) return
+  auditRawLoading.value = true
+  try {
+    auditDetail.value = await getAuditDetail(selectedStageId.value, true)
+  } catch (e) {
+    monitorError.value = e?.response?.data?.detail || '原始数据加载失败'
+  } finally {
+    auditRawLoading.value = false
+  }
+}
+
+function locateEvidence({ stageId, evidenceId } = {}) {
+  if (!stageId) return
+  selectStage(stageId, evidenceId ? 'evidence' : 'overview')
+}
+
+function jumpSection(section) {
+  const id = `audit-section-${section === 'timeline' ? 'timeline' : section}`
+  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function setAuditTab(tab) {
+  auditTab.value = tab
+  if (tab === 'raw' && !auditDetail.value?.raw) loadRaw()
+  syncHash()
+}
+
 function closeRun() {
   stopTimer()
   selectedRunId.value = ''
   selectedStageId.value = null
   timeline.value = null
   stageDetail.value = null
+  auditView.value = null
+  auditDetail.value = null
+  auditTab.value = 'overview'
   monitorError.value = ''
   syncHash()
 }
@@ -416,7 +536,7 @@ onUnmounted(() => {
       <header id="monitor-detail-header" class="flex flex-wrap items-center gap-2 rounded border bg-white p-3">
         <div class="min-w-0">
           <h2 id="monitor-detail-title" class="truncate text-base font-semibold text-slate-700">
-            时间轴 — {{ selectedRunId }}
+            {{ AUDIT_ON ? '统一审计' : '时间轴' }} — {{ selectedRunId }}
           </h2>
           <p class="text-xs text-slate-400">
             {{ selectedRun?.status || '—' }} ·
@@ -430,45 +550,120 @@ onUnmounted(() => {
                 @click="closeRun">✕ 关闭</button>
       </header>
 
-      <div id="monitor-timeline-filters" class="flex flex-wrap items-center gap-2 text-xs">
-        <label class="text-slate-500">相位
-          <select id="monitor-filter-phase" v-model="phaseFilter"
-                  class="ml-1 rounded border bg-white px-1 py-0.5">
-            <option value="">全部</option>
-            <option value="running">执行中</option>
-            <option value="waiting_human">等待人工</option>
-            <option value="done">完成</option>
-          </select>
-        </label>
-        <label class="text-slate-500">节点
-          <select id="monitor-filter-node" v-model="nodeFilter"
-                  class="ml-1 rounded border bg-white px-1 py-0.5">
-            <option value="">全部</option>
-            <option v-for="n in nodeOptions" :key="n" :value="n">{{ n }}</option>
-          </select>
-        </label>
-        <span class="text-slate-400">显示 {{ timelineNodes.length }} 个节点</span>
-        <span v-if="currentStageId" class="ml-auto text-slate-400">当前节点 stage #{{ currentStageId }}</span>
-      </div>
+      <!-- 统一审计: 结论卡 + 五段式 -->
+      <template v-if="AUDIT_ON">
+        <div v-if="auditLoading" id="monitor-audit-loading"
+             class="rounded border bg-white p-6 text-center text-sm text-slate-400">
+          加载审计视图…
+        </div>
 
-      <div v-if="timelineLoading" id="monitor-timeline-loading"
-           class="rounded border bg-white p-6 text-center text-sm text-slate-400">
-        加载时间轴…
-      </div>
-      <MonitorTimeline
-        v-else
-        :timeline="timeline"
-        :selected-stage-id="selectedStageId"
-        :phase-filter="phaseFilter"
-        :node-filter="nodeFilter"
-        @select="selectStage"
-      />
+        <template v-else-if="auditView">
+          <AuditRunHeader :run="auditView.run" :chain="auditView.chain"
+                          :degraded="auditView.degraded" />
+          <AuditVerdictBar :verdicts="auditView.verdicts" @jump="jumpSection" />
 
-      <MinorStateDetail
-        :detail="stageDetail"
-        :loading="detailLoading"
-        :config="config"
-      />
+          <section id="audit-section-timeline" class="space-y-2 rounded-lg border bg-slate-50 p-2">
+            <h3 class="text-sm font-semibold text-slate-600">
+              执行时间轴
+              <span class="ml-1 text-xs font-normal text-slate-400">
+                {{ auditView.timeline?.length || 0 }} 组 / {{ auditView.run?.stage_count || 0 }} 阶段
+              </span>
+            </h3>
+            <AuditTimeline :groups="auditView.timeline"
+                           :selected-stage-id="selectedStageId"
+                           @select="selectStage" />
+          </section>
+
+          <section id="audit-section-evidence" class="space-y-2 rounded-lg border bg-slate-50 p-2">
+            <h3 class="text-sm font-semibold text-slate-600">证据链</h3>
+            <AuditEvidenceBoard :evidence="auditView.evidence" @locate="locateEvidence" />
+          </section>
+
+          <section id="audit-section-context" class="space-y-2 rounded-lg border bg-slate-50 p-2">
+            <h3 class="text-sm font-semibold text-slate-600">上下文矩阵</h3>
+            <AuditContextMatrix :context="auditView.context"
+                                :selected-stage-id="selectedStageId"
+                                @select="selectStage" />
+          </section>
+
+          <section id="audit-section-performance" class="space-y-2 rounded-lg border bg-slate-50 p-2">
+            <h3 class="text-sm font-semibold text-slate-600">性能与异常</h3>
+            <AuditPerformancePanel :performance="auditView.performance" @select="selectStage" />
+            <div v-if="auditView.anomalies?.length" class="rounded-lg border bg-white p-2 text-xs">
+              <p class="font-medium text-slate-600">异常/缺口({{ auditView.anomalies.length }})</p>
+              <ul class="mt-1 space-y-0.5">
+                <li v-for="(a, i) in auditView.anomalies" :key="i"
+                    class="flex flex-wrap items-center gap-2">
+                  <span class="rounded px-1 text-[10px]"
+                        :class="a.severity === 'error' ? 'bg-red-50 text-red-700'
+                          : a.severity === 'warn' ? 'bg-amber-50 text-amber-700'
+                          : 'bg-slate-50 text-slate-500'">{{ a.code }}</span>
+                  <span class="text-slate-600">{{ a.title || a.detail }}</span>
+                  <button v-if="a.stage_id" type="button" class="text-blue-600 hover:underline"
+                          @click="selectStage(a.stage_id)">#{{ a.stage_id }}</button>
+                </li>
+              </ul>
+            </div>
+          </section>
+
+          <AuditNodeDrawer v-if="selectedStageId"
+                           :detail="auditDetail"
+                           :loading="detailLoading"
+                           :raw-loading="auditRawLoading"
+                           :tab="auditTab"
+                           @close="closeStage"
+                           @load-raw="loadRaw"
+                           @update:tab="setAuditTab" />
+        </template>
+
+        <p v-else id="monitor-audit-empty"
+           class="rounded border border-dashed bg-white p-6 text-center text-sm text-slate-400">
+          暂无审计数据
+        </p>
+      </template>
+
+      <!-- 旧版时间轴 + 下方详情(flag 关闭时保留) -->
+      <template v-else>
+        <div id="monitor-timeline-filters" class="flex flex-wrap items-center gap-2 text-xs">
+          <label class="text-slate-500">相位
+            <select id="monitor-filter-phase" v-model="phaseFilter"
+                    class="ml-1 rounded border bg-white px-1 py-0.5">
+              <option value="">全部</option>
+              <option value="running">执行中</option>
+              <option value="waiting_human">等待人工</option>
+              <option value="done">完成</option>
+            </select>
+          </label>
+          <label class="text-slate-500">节点
+            <select id="monitor-filter-node" v-model="nodeFilter"
+                    class="ml-1 rounded border bg-white px-1 py-0.5">
+              <option value="">全部</option>
+              <option v-for="n in nodeOptions" :key="n" :value="n">{{ n }}</option>
+            </select>
+          </label>
+          <span class="text-slate-400">显示 {{ timelineNodes.length }} 个节点</span>
+          <span v-if="currentStageId" class="ml-auto text-slate-400">当前节点 stage #{{ currentStageId }}</span>
+        </div>
+
+        <div v-if="timelineLoading" id="monitor-timeline-loading"
+             class="rounded border bg-white p-6 text-center text-sm text-slate-400">
+          加载时间轴…
+        </div>
+        <MonitorTimeline
+          v-else
+          :timeline="timeline"
+          :selected-stage-id="selectedStageId"
+          :phase-filter="phaseFilter"
+          :node-filter="nodeFilter"
+          @select="selectStage"
+        />
+
+        <MinorStateDetail
+          :detail="stageDetail"
+          :loading="detailLoading"
+          :config="config"
+        />
+      </template>
     </section>
   </div>
 </template>
