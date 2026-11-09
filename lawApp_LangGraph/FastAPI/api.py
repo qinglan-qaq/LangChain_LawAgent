@@ -39,6 +39,8 @@ from lawApp_LangGraph.FastAPI.logging import (
     setup_logging,
     system,
 )
+from lawApp_LangGraph.FastAPI.audit_model import AuditNodeDetail, AuditView
+from lawApp_LangGraph.audit_view import build_audit_detail, build_audit_view
 from lawApp_LangGraph.FastAPI.model import (
     AssistantAskRequest,
     AssistantStreamRequest,
@@ -113,22 +115,32 @@ async def lifespan(app: FastAPI):
             "请在 lawApp_LangGraph/.env 配置后重启服务"
         )
 
-    # 后台预热 BGE/CrossEncoder/Pinecone: 不阻塞启动, 首个检索请求不再冷启动
-    warmup_task = None
+    # 后台预热: 不阻塞启动, 首问不付冷启动成本
+    warmup_tasks: list[asyncio.Task] = []
     if settings.rag_warmup_enabled:
         from lawApp_LangGraph.RAG_service.pinecone_retriever import warmup_rag
 
-        warmup_task = asyncio.create_task(warmup_rag(), name="rag-warmup")
-        app.state.rag_warmup_task = warmup_task
+        rag_task = asyncio.create_task(warmup_rag(), name="rag-warmup")
+        app.state.rag_warmup_task = rag_task
+        warmup_tasks.append(rag_task)
         system.info("RAG 后台预热已启动", detail="models + pinecone")
+    if settings.llm_warmup_enabled:
+        from lawApp_LangGraph.LangGraph_lawApp import warmup_llm
+
+        llm_task = asyncio.create_task(warmup_llm(), name="llm-warmup")
+        app.state.llm_warmup_task = llm_task
+        warmup_tasks.append(llm_task)
+        system.info("LLM 后台预热已启动", detail=f"model={settings.deepseek_flash_model}")
 
     yield
     from lawApp_LangGraph import runtime
 
-    if warmup_task is not None and not warmup_task.done():
-        warmup_task.cancel()
+    for task in warmup_tasks:
+        if task.done():
+            continue
+        task.cancel()
         try:
-            await warmup_task
+            await task
         except asyncio.CancelledError:
             pass
     await runtime.teardown_runtime()
@@ -212,30 +224,50 @@ async def _require_pending_interrupt(sid: str) -> dict:
     return interrupt_req
 
 
-async def _validate_parent_run_id(sid: str, parent_run_id: str | None) -> str | None:
-    """resume 的 parent_run_id 校验: 同 session 且 interrupted, 否则降级 NULL。"""
-    if not parent_run_id:
-        return None
+async def _resolve_resume_parent(
+    sid: str, parent_run_id: str | None
+) -> tuple[str | None, str, str]:
+    """解析续跑父 run, 供 trace_runs 关联与 query/mode 继承.
+
+    前端只传 session_id 时不带 parent_run_id; 同会话同时最多一个 pending
+    interrupt, 因此最近一条 interrupted run 就是本次续跑的父 run。显式传入
+    的 parent 必须属于同会话且 interrupted, 否则降级 NULL(沿用原语义)。
+
+    Returns:
+        (parent_run_id, 父 run 的 query, 父 run 的 mode); 无父 run/读取失败
+        返回 (None, "", "")。
+    """
+    explicit = bool(parent_run_id)
     try:
         from lawApp_LangGraph.db import get_pool
 
         pool = await get_pool()
         async with pool.connection() as conn:
-            cur = await conn.execute(
-                "SELECT 1 FROM trace_runs WHERE run_id=%s AND session_id=%s "
-                "AND status='interrupted'",
-                (parent_run_id, sid),
-            )
-            if await cur.fetchone():
-                return parent_run_id
-    except Exception as e:  # 观测旁路: 校验失败不阻塞恢复
-        logger.warning("parent_run_id 校验失败(降级 NULL): %s", e)
-        return None
-    flow.warning(
-        "parent_run_id 无效, 降级 NULL",
-        detail=f"parent={parent_run_id} session={sid}",
-    )
-    return None
+            if explicit:
+                cur = await conn.execute(
+                    "SELECT run_id, query, mode FROM trace_runs "
+                    "WHERE run_id=%s AND session_id=%s AND status='interrupted'",
+                    (parent_run_id, sid),
+                )
+            else:
+                cur = await conn.execute(
+                    "SELECT run_id, query, mode FROM trace_runs "
+                    "WHERE session_id=%s AND status='interrupted' "
+                    "ORDER BY started_at DESC LIMIT 1",
+                    (sid,),
+                )
+            row = await cur.fetchone()
+            if row:
+                return row[0], row[1] or "", row[2] or ""
+    except Exception as e:  # 观测旁路: 关联失败不阻塞恢复
+        logger.warning("续跑父 run 解析失败(降级 NULL): %s", e)
+        return None, "", ""
+    if explicit:
+        flow.warning(
+            "parent_run_id 无效, 降级 NULL",
+            detail=f"parent={parent_run_id} session={sid}",
+        )
+    return None, "", ""
 
 
 async def _normalize_resume_with_degrade(
@@ -476,6 +508,68 @@ async def list_sessions():
     ]
 
 
+def _history_sid(sid: str) -> str:
+    """会话历史类端点(transcript/dialogue/export)的 sid 校验.
+
+    复用 dialogue 规则: 空 → 400; 带 AT-/AS- 前缀但格式非法 → 400;
+    无前缀历史 sid 放行; 不做模式一致性校验.
+    """
+    from lawApp_LangGraph.FastAPI.utils import (
+        _SESSION_ID_NEW_RE,
+        _SESSION_ID_OLD_RE,
+    )
+
+    sid = (sid or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+    if sid.startswith(("AT-", "AS-")) and not (
+        _SESSION_ID_NEW_RE.match(sid) or _SESSION_ID_OLD_RE.match(sid)
+    ):
+        raise HTTPException(status_code=400, detail="invalid_session_id")
+    return sid
+
+
+def _empty_transcript(sid: str) -> dict:
+    """PG/checkpoint 不可用时的转录空态(对齐 /dialogue 降级先例)."""
+    return {
+        "session_id": sid,
+        "turns": [],
+        "final": None,
+        "elements": [],
+        "clarify_history": [],
+        "dialogue": {
+            "session_id": sid,
+            "rounds": [],
+            "field_rounds": [],
+            "confirms": [],
+            "final": None,
+            "docx": None,
+        },
+        "degraded": True,
+    }
+
+
+async def _build_transcript_payload(sid: str) -> dict:
+    """checkpoint messages + dialogue 事件 + trace_runs → 会话转录."""
+    from lawApp_LangGraph import dialogue_log, transcript
+
+    graph = get_graph()
+    snap = await graph.aget_state(graph_config(sid))
+    if not snap or not snap.values:
+        raise HTTPException(status_code=404, detail=f"会话 {sid} 不存在")
+
+    values = dict(snap.values)
+    events = await dialogue_log.fetch_dialogue(sid)
+    runs = await transcript.fetch_session_runs(sid)
+    data = transcript.build_transcript(sid, values, events, runs)
+    response = build_response(values, sid)
+    data["elements"] = response.elements
+    data["clarify_history"] = response.clarify_history
+    data["dialogue"] = await dialogue_log.aggregate_dialogue(sid)
+    data["degraded"] = False
+    return data
+
+
 @app.get("/sessions/{sid}")
 async def get_session(sid: str):
     """单会话详情: 最新快照 + interrupt 状态(等待回复时返回待回答问题)。"""
@@ -517,20 +611,8 @@ async def get_session_dialogue(sid: str):
     200 空结构(对齐 GET /sessions 降级先例, 前端好处理); 非法 sid → 400。
     """
     from lawApp_LangGraph import dialogue_log
-    from lawApp_LangGraph.FastAPI.utils import (
-        _SESSION_ID_NEW_RE,
-        _SESSION_ID_OLD_RE,
-    )
 
-    sid = (sid or "").strip()
-    if not sid:
-        raise HTTPException(status_code=400, detail="invalid_session_id")
-    # sid 校验: 复用 utils 的格式规则(带 AT-/AS- 前缀但格式非法 → 400);
-    # 会话历史不区分模式, 不做前缀与端点模式一致性校验(AS- 会话同样可查)
-    if sid.startswith(("AT-", "AS-")) and not (
-        _SESSION_ID_NEW_RE.match(sid) or _SESSION_ID_OLD_RE.match(sid)
-    ):
-        raise HTTPException(status_code=400, detail="invalid_session_id")
+    sid = _history_sid(sid)
 
     try:
         return await dialogue_log.aggregate_dialogue(sid)
@@ -544,6 +626,46 @@ async def get_session_dialogue(sid: str):
             "final": None,
             "docx": None,
         }
+
+
+@app.get("/sessions/{sid}/transcript")
+async def get_session_transcript(sid: str):
+    """会话全量转录: 每轮问题/补充/全量终答 + 引用 + HITL + 要素.
+
+    契约:
+        {"session_id", "turns": [{"turn","question","supplements","answer",
+        "citations","ts","run_id"}], "final": {"answer","citations","ts"}|None,
+        "elements": [...], "clarify_history": [...], "dialogue": {...},
+        "degraded": false}
+    数据源: checkpoint messages(问答全文) + session_dialogue_events(引用/HITL)
+    + trace_runs(run_id/时间). PG 掉线返回 200 空态, 非法 sid → 400.
+    """
+    sid = _history_sid(sid)
+    try:
+        return await _build_transcript_payload(sid)
+    except HTTPException:
+        raise
+    except Exception as e:  # pragma: no cover — 转录失败不 500, 前端可空态
+        flow.error("会话转录读取降级", detail=str(e)[:200])
+        return _empty_transcript(sid)
+
+
+@app.post("/sessions/{sid}/export")
+async def export_session(sid: str):
+    """把会话全量转录写成本地 JSON(默认脱敏: 不含 prompts_record/final_prompts).
+
+    返回文件相对路径、字节数与 sha256; 目录由 settings.export_dir 控制.
+    """
+    from lawApp_LangGraph import transcript
+
+    sid = _history_sid(sid)
+    data = await _build_transcript_payload(sid)
+    try:
+        info = transcript.write_export(data)
+    except OSError as e:
+        flow.error("会话导出写入失败", detail=str(e)[:200])
+        raise HTTPException(status_code=500, detail="export_write_failed")
+    return {"session_id": sid, **info}
 
 
 @app.post("/ask/resume", response_model=QueryResponse)
@@ -603,13 +725,19 @@ async def ask_resume_stream(request: ResumeRequest):
         or ""
     )
     resume_value = await _normalize_resume_with_degrade(itype, request.answer, request_text)
-    parent_run_id = await _validate_parent_run_id(sid, request.parent_run_id)
+    # 前端只传 session_id: 自动关联最近一条 interrupted run, 并继承其
+    # query/mode, 否则续跑 run 在审计页会显示「无提问 / mode —」且断链
+    parent_run_id, parent_query, parent_mode = await _resolve_resume_parent(
+        sid, request.parent_run_id
+    )
+    if not parent_mode:
+        parent_mode = "assistant" if sid.startswith("AS-") else "attorney"
 
     # H4: 同会话并发流防护 —— 抢锁失败 409, 成功后由 _run_sse finally 释放
     lock = await _acquire_session_lock(sid)
     return _run_sse(
-        sid, Command(resume=resume_value), mode="attorney", session_lock=lock,
-        parent_run_id=parent_run_id,
+        sid, Command(resume=resume_value), mode=parent_mode, session_lock=lock,
+        parent_run_id=parent_run_id, resume_query=parent_query,
     )
 
 
@@ -814,6 +942,7 @@ def _run_sse(
     mode: str = "",
     session_lock: asyncio.Lock | None = None,
     parent_run_id: str | None = None,
+    resume_query: str = "",
 ) -> StreamingResponse:
     """SSE 流式工厂: astream_input(新提问 dict 或 Command(resume=...)) 驱动图。
 
@@ -823,6 +952,7 @@ def _run_sse(
     全链路 trace: event_stream 顶部建 RunContext, run()/pump() 子任务继承
     contextvars → 节点/工具/llm span 自动归集, finally flush_run 落库(观测旁路)。
     session_lock(H4): 调用端抢到的会话流锁, 生成器 finally 释放(断连也释放)。
+    resume_query: 续跑 run 继承父 run 的原始提问, 供审计页展示。
     """
     graph = get_graph()
     config = graph_config(sid)
@@ -841,7 +971,7 @@ def _run_sse(
             run_id=f"{sid}:{datetime.now():%H%M%S%f}",
             session_id=sid, run_type=run_type, mode=mode,
             query=(astream_input.get("query") or "")
-            if isinstance(astream_input, dict) else "",
+            if isinstance(astream_input, dict) else resume_query,
             parent_run_id=parent_run_id,
         ))
         # run 开始即落库(spec §1.3): runs 列表可看到进行中 run
@@ -1243,8 +1373,27 @@ async def _session_doc_path(session_id: str) -> str:
 
 
 def _convert_docx_pdf(docx_path: str, pdf_path: str) -> None:
-    """同步 docx→pdf(Word COM); 模块级便于测试 monkeypatch。"""
+    """同步 docx→pdf(Word COM); 模块级便于测试 monkeypatch。
+
+    asyncio.to_thread 在工作线程执行; Word COM 要求该线程先 CoInitialize,
+    否则偶发 502「尚未调用 CoInitialize」(线程池首次/换线程时触发)。
+    """
+    import sys
+
+    if sys.platform == "win32":
+        import pythoncom
+
+        pythoncom.CoInitialize()
+        try:
+            from docx2pdf import convert
+
+            convert(docx_path, pdf_path)
+        finally:
+            pythoncom.CoUninitialize()
+        return
+
     from docx2pdf import convert
+
     convert(docx_path, pdf_path)
 
 
@@ -1678,14 +1827,16 @@ async def _load_chain(conn, run_id: str, chain: bool):
             cursor = row[0]
     cur = await conn.execute(
         "SELECT run_id, session_id, status, started_at, ended_at, "
-        "parent_run_id, current_node FROM trace_runs WHERE run_id = ANY(%s)",
+        "parent_run_id, current_node, run_type, mode, query, final_answer "
+        "FROM trace_runs WHERE run_id = ANY(%s)",
         (ids,),
     )
     runs = {
         r[0]: {
             "run_id": r[0], "session_id": r[1], "status": r[2],
             "started_at": r[3], "ended_at": r[4], "parent_run_id": r[5],
-            "current_node": r[6],
+            "current_node": r[6], "run_type": r[7], "mode": r[8],
+            "query": r[9], "final_answer": r[10],
         }
         for r in await cur.fetchall()
     }
@@ -1698,6 +1849,71 @@ async def _load_chain(conn, run_id: str, chain: bool):
     )
     rows = await cur.fetchall()
     return ordered, rows
+
+
+async def _load_audit_rows(conn, run_id: str, chain: bool):
+    """审计 builder 的行输入: runs / stages / minors / spans(不在此派生)。"""
+    runs, rows = await _load_chain(conn, run_id, chain)
+    if not runs:
+        raise HTTPException(status_code=404, detail=f"run {run_id} 不存在")
+    stages = []
+    minors = {}
+    for row in rows:
+        stage_id = int(row[0])
+        stages.append(
+            {
+                "stage_id": stage_id,
+                "run_id": row[1],
+                "node_name": row[2],
+                "seq": row[3],
+                "status": row[4],
+                "started_at": row[5],
+                "ended_at": row[6],
+                "latency_ms": row[7],
+            }
+        )
+        if row[8] is not None or row[20] is not None:
+            minors[stage_id] = {
+                "stage_id": stage_id,
+                "attempt": row[8] or 1,
+                "phase": row[9] or "done",
+                "input_text": row[10],
+                "output_text": row[11],
+                "output_json": _json_obj(row[12]),
+                "context_meta": _json_obj(row[13]),
+                "metrics": _json_obj(row[14]),
+                "route": row[15],
+                "route_reason": row[16],
+                "error": row[17],
+                "refs": _json_obj(row[18]),
+                "parent_stage_id": row[19],
+                "content_source": row[20] or "fallback_placeholder",
+            }
+    run_ids = [r["run_id"] for r in runs]
+    cur = await conn.execute(
+        "SELECT id, run_id, span_type, name, status, input, output, state, "
+        "latency_ms, token_usage, started_at FROM trace_spans "
+        "WHERE run_id = ANY(%s) ORDER BY started_at",
+        (run_ids,),
+    )
+    spans = []
+    for row in await cur.fetchall():
+        spans.append(
+            {
+                "span_id": row[0],
+                "run_id": row[1],
+                "span_type": row[2],
+                "name": row[3],
+                "status": row[4],
+                "input": row[5],
+                "output": row[6],
+                "state": row[7],
+                "latency_ms": row[8],
+                "token_usage": row[9],
+                "started_at": row[10],
+            }
+        )
+    return runs, stages, minors, spans
 
 
 def _run_answer(rows: list) -> str:
@@ -1794,6 +2010,82 @@ async def monitor_timeline(run_id: str, chain: int = 0):
         items=items,
         total_composition=_composition(total_wall, total_exec, total_wait),
     )
+
+
+@app.get("/monitor/runs/{run_id}/audit-view", response_model=AuditView)
+async def monitor_audit_view(
+    run_id: str, chain: int = 1, after_stage_id: int = 0
+):
+    """统一审计视图: 结论/时间轴/证据/上下文/性能一份派生模型。"""
+    from lawApp_LangGraph.db import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            runs, stages, minors, spans = await _load_audit_rows(
+                conn, run_id, bool(chain)
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        flow.error("monitor audit-view 降级", detail=str(e))
+        raise HTTPException(status_code=503, detail="监控数据暂不可用")
+    return build_audit_view(
+        run_id,
+        bool(chain),
+        runs,
+        stages,
+        minors,
+        spans,
+        slow_ms=settings.monitor_slow_node_ms,
+        after_stage_id=max(0, after_stage_id),
+    )
+
+
+@app.get(
+    "/monitor/stages/{stage_id}/audit-detail",
+    response_model=AuditNodeDetail,
+)
+async def monitor_audit_detail(stage_id: int, include_raw: int = 0):
+    """节点审计详情; raw(prompt/完整 state)只在 include_raw=1 时返回。"""
+    from lawApp_LangGraph.db import get_pool
+
+    try:
+        pool = await get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT run_id, node_name FROM stage_chain WHERE id = %s",
+                (stage_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                raise HTTPException(
+                    status_code=404, detail=f"stage {stage_id} 不存在"
+                )
+            runs, stages, minors, spans = await _load_audit_rows(
+                conn, row[0], False
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        flow.error("monitor audit-detail 降级", detail=str(e))
+        raise HTTPException(status_code=503, detail="监控数据暂不可用")
+    view = build_audit_view(
+        row[0],
+        False,
+        runs,
+        stages,
+        minors,
+        spans,
+        slow_ms=settings.monitor_slow_node_ms,
+    )
+    try:
+        return build_audit_detail(
+            view, stage_id, stages, minors, spans,
+            include_raw=bool(include_raw),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"stage {stage_id} 不存在")
 
 
 @app.get("/monitor/runs/{run_id}/minor-states", response_model=list[MinorState])
@@ -1895,6 +2187,7 @@ async def monitor_config():
         correct_threshold=settings.correct_threshold,
         incorrect_threshold=settings.incorrect_threshold,
         minor_text_limit=settings.minor_output_text_limit,
+        slow_node_ms=settings.monitor_slow_node_ms,
     )
 
 

@@ -264,6 +264,7 @@ class MonitorConfig(BaseModel):
     correct_threshold: float
     incorrect_threshold: float
     minor_text_limit: int
+    slow_node_ms: int = 30000
 
 
 class MonitorStageDetail(BaseModel):

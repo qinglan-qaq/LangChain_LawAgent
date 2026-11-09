@@ -238,9 +238,10 @@ def test_l5_evaluate_case_relevance_unwraps_rag_documents():
         },
     ]
     res = f(documents={"status": "success", "rag_documents": docs})
-    assert res["evaluation"].total == 2
-    assert res["evaluation"].correct_count == 1
-    assert res["evaluation"].incorrect_count == 1
+    evaluation = res["evaluation"]
+    assert evaluation["total"] == 2
+    assert evaluation["correct_count"] == 1
+    assert evaluation["incorrect_count"] == 1
 
 
 # ── L8: health_check 轻量化 ──

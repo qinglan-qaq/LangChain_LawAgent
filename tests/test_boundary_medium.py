@@ -666,7 +666,7 @@ def test_m10_empty_answer_returns_error(monkeypatch):
     import lawApp_LangGraph.tools.rag_tools as rag
 
     class _EmptyLLM:
-        def astream(self, prompt):
+        def astream(self, prompt, **kwargs):
             async def _gen():
                 yield types.SimpleNamespace(content="")
 
