@@ -240,10 +240,11 @@ async def recall_memory(query: str, top_k: int = 3) -> str:
 
     lines = [f"召回 {len(items)} 条相关记忆:", ""]
     for it in items:
-        item = it.item if isinstance(it.item, dict) else {}
+        value = getattr(it, "value", None)
+        if not isinstance(value, dict):
+            value = getattr(it, "item", None)
+        item = value if isinstance(value, dict) else {}
         content = item.get("content", "") or item.get("summary", "")
-        if not content and not isinstance(it.item, dict):
-            content = str(it.item)
         lines.append(f"[{item.get('memory_type', 'general')}] {content}")
         lines.append("")
     return "\n".join(lines)

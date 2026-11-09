@@ -17,6 +17,11 @@ import time
 from typing import Any, Optional
 
 from lawApp_LangGraph.config import settings
+from lawApp_LangGraph.evidence import (
+    collect_documents,
+    collect_prompts_documents,
+    doc_key,
+)
 
 logger = logging.getLogger("lawApp.minor")
 
@@ -353,6 +358,28 @@ def project_input(
 #  output 投影
 
 
+def _citation_outputs(state: Any) -> list[dict]:
+    """终答引用候选: 只留 label/type/kind/doc_key, tracing 再算 evidence_id。"""
+    out: list[dict] = []
+    for law in _get(state, "law_results") or []:
+        d = _as_dict(law)
+        label = f"{d.get('law_title', '')} {d.get('article_number', '')}".strip()
+        if label:
+            out.append(
+                {"label": label, "type": "law", "kind": "law",
+                 "doc_key": doc_key("law", d)}
+            )
+    for doc in _get(state, "rag_documents") or []:
+        d = _as_dict(doc)
+        label = str(d.get("case_number") or d.get("case_cause") or "")
+        if label:
+            out.append(
+                {"label": label, "type": "case", "kind": "case",
+                 "doc_key": doc_key("case", d)}
+            )
+    return out[:50]
+
+
 def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
     d = _as_dict(ret)
     q = str(_get(state, "query") or "")
@@ -405,6 +432,12 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             ],
             "promote_keys": [],
             "pending_questions": [x.get("question") for x in qs],
+            "decision": {
+                "summary": (
+                    f"待补 {len(qs)} 项" if qs else "要素齐全"
+                ),
+                "reason": str(d.get("question_category") or ""),
+            },
         }
         text = "\n".join(str(x.get("question") or "") for x in qs) or "(无需反问)"
         return text, out
@@ -429,7 +462,16 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
 
     if node_name == "chitchat":
         answer = str(d.get("final_answer") or "")
-        return answer, {"answer_len": len(answer), "history_used": True}
+        out = {
+            "answer_len": len(answer),
+            "history_used": True,
+            "decision": {"summary": f"闲聊回复 {len(answer)} 字",
+                         "reason": "无需检索"},
+        }
+        cites = _citation_outputs(state)
+        if cites:
+            out["_citation_docs"] = cites
+        return answer, out
 
     if node_name == "planner":
         steps = [
@@ -447,6 +489,12 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             "includes_element_fill": any(
                 s.get("tool") == "request_element_fill" for s in steps
             ),
+            "decision": {
+                "summary": f"计划 {len(steps)} 步",
+                "reason": ", ".join(
+                    str(s.get("tool") or "无工具") for s in steps[:5]
+                ),
+            },
         }
         return "\n".join(_plan_lines(d.get("plan") or [])), out
 
@@ -473,6 +521,12 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             "hitl": action if d.get("hitl_event") else None,
             "retry": 0,
             "extracted_fields": list((d.get("doc_fields") or {}).keys()),
+            "decision": {
+                "summary": (
+                    f"调用 {tool}" if action == "tool_call" else "推进步骤"
+                ),
+                "reason": f"步骤 {idx + 1}/{len(plan)}",
+            },
         }
         text = (
             f"调用 {out['tool']}({json.dumps(out['args'], ensure_ascii=False)[:300]})"
@@ -497,11 +551,28 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             "ok": _get(msgs[-1], "status") != "error" if msgs else False,
             "doc_count": len(docs),
             "law_count": len(laws),
+            "memory_count": len(parsed.get("memory_results") or []),
             "web_count": len(web),
             "verdict": ev.get("quality_verdict"),
             "path": parsed.get("pdf_path") or parsed.get("docx_path"),
             "error_code": None,
         }
+        # 证据链: 只存 kind + 稳定文档键, 不带正文; tracing 闭行换算 evidence_id
+        out["_evidence_docs"] = [
+            {"kind": d["kind"], "doc_key": d["doc_key"]}
+            for d in collect_documents(str(out["tool"] or ""), parsed)[:60]
+        ]
+        pr = _as_dict(parsed.get("prompts_record"))
+        if pr:
+            out["_evidence_used_docs"] = [
+                {"kind": d["kind"], "doc_key": d["doc_key"]}
+                for d in collect_prompts_documents(pr)[:60]
+            ]
+        if out["tool"]:
+            out["decision"] = {
+                "summary": f"调用 {out['tool']}",
+                "reason": f"案例 {len(docs)} / 法条 {len(laws)} / 网络 {len(web)}",
+            }
         titles = [
             _as_dict(x).get("case_number") or _as_dict(x).get("title")
             for x in (docs[:3] or laws[:3] or web[:3])
@@ -521,6 +592,10 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             "eval_verdict": _as_dict(
                 d.get("evaluation") or _get(state, "evaluation")
             ).get("quality_verdict"),
+            "decision": {
+                "summary": f"合并 {len(d.get('messages') or [])} 条工具结果",
+                "reason": f"推进第 {(d.get('current_step_index') or 0) + 1} 步",
+            },
         }
         return (
             f"合并结果: 更新 {len(out['updated_keys'])} 键, "
@@ -533,6 +608,10 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             "quality_verdict": _as_dict(_get(state, "evaluation")).get("quality_verdict"),
             "replan_needed": d.get("replan_needed"),
             "insufficient_reason": d.get("insufficient_reason"),
+            "decision": {
+                "summary": "需要重规划" if d.get("replan_needed") else "无需重规划",
+                "reason": str(d.get("insufficient_reason") or ""),
+            },
         }
         return str(d.get("insufficient_reason") or "none"), out
 
@@ -562,6 +641,10 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             ],
             "next_id": (steps[-1].get("step_id") if steps else None),
             "empty": not steps,
+            "decision": {
+                "summary": f"补充 {len(steps)} 步",
+                "reason": "证据不足, 重新规划",
+            },
         }
         return "\n".join(_plan_lines(plan)) or "(无补充计划)", out
 
@@ -575,7 +658,15 @@ def _output_parts(node_name: str, ret: Any, state: Any) -> tuple[str, dict]:
             "laws_count": len(_get(state, "law_results") or []),
             "cases_count": len(_get(state, "rag_documents") or []),
             "context_chars": len(str(d.get("final_prompts") or "")),
+            "decision": {
+                "summary": f"生成回答 {len(answer)} 字",
+                "reason": "复用已有回答" if answer and not d.get("final_prompts")
+                else "按案例/法条生成",
+            },
         }
+        cites = _citation_outputs(state)
+        if cites:
+            out["_citation_docs"] = cites
         return answer, out
 
     clean = _clean_value(d if isinstance(d, dict) else ret)
@@ -619,8 +710,16 @@ def project_output(
         if _BAD_VALUE.search(text):
             text = ""
         clipped, dropped = _clip(text, settings.minor_output_text_limit)
+        # 审计旁路键要保留到 tracing 落 refs 后再 pop; 不走 20 条通用截断
+        audit_lists = {
+            k: out.get(k)
+            for k in ("_evidence_docs", "_evidence_used_docs", "_citation_docs")
+            if isinstance(out, dict) and out.get(k)
+        }
         out = _clean_value(out) or {}
         out, shrunk = _shrink_json(out, settings.minor_json_max_bytes)
+        for key, value in audit_lists.items():
+            out[key] = value[:60]
         if dropped:
             out.setdefault("_truncated_chars", {})["output"] = dropped
         if shrunk:

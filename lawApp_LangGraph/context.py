@@ -310,11 +310,13 @@ def _fit_segment(
         cur[path[-1]] = clipped
         if truncated:
             meta["truncated"] = True
+            meta.setdefault("truncated_segments", []).append(".".join(path))
     elif isinstance(value, list):
         fitted, truncated = _fit_list(value, budget)
         cur[path[-1]] = fitted
         if truncated:
             meta["truncated"] = True
+            meta.setdefault("truncated_segments", []).append(".".join(path))
         if not fitted:
             cur.pop(path[-1], None)
     elif isinstance(value, dict):
@@ -327,6 +329,7 @@ def _fit_segment(
                 size = _chars(v) + len(k) + 4
                 if used + size > budget:
                     meta["truncated"] = True
+                    meta.setdefault("truncated_segments", []).append(".".join(path))
                     break
                 out[k] = v
                 used += size
@@ -410,6 +413,16 @@ def build_context(state: Any, purpose: str = "generic") -> tuple[dict, dict]:
             "chars": len(encoded),
             "hash": hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:12],
         }
+    if "history" in envelope:
+        recent = envelope["history"].get("recent") or []
+        meta["history"]["turns"] = len(recent) // 2
+    # 记忆内容当前并入 history 段; memory 只上报命中数, 不重复计字符
+    meta["memory"] = {
+        "present": False,
+        "hits": len(_get(state, "memory_results") or []),
+    }
+    if meta.get("truncated_segments"):
+        meta["truncated_segments"] = list(dict.fromkeys(meta["truncated_segments"]))
     meta["truncated"] = bool(meta.get("truncated"))
 
     try:

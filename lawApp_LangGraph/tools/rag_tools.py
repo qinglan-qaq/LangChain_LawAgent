@@ -323,10 +323,28 @@ def _resolve_prompts_record(prompts_record: Any) -> PromptsRecord:
     return PromptsRecord()
 
 
-# 拼装 PromptsRecord 中 已知要素+法条+案例+联网 的分析上下文块
+# 拼装 PromptsRecord 中 历史对话+长期记忆+已知要素+法条+案例+联网 的分析上下文块
 def _build_analysis_context(pr: PromptsRecord) -> str:
-    """从 PromptsRecord 的 web/law/case 字段拼装提示词上下文."""
+    """从 PromptsRecord 的 history/memory/web/law/case 字段拼装提示词上下文."""
     parts: list[str] = []
+    # 多轮追问: 上一轮原话结论优先注入, 否则「继续/刚才」类问题会答成新问题
+    if pr.conversation_history:
+        parts.append(f"[对话历史]\n{pr.conversation_history}")
+
+    # 长期记忆召回: search_memory 命中的往期咨询结论
+    if pr.memory_results:
+        lines = []
+        for item in pr.memory_results[:5]:
+            content = item.get("content", "") if isinstance(item, dict) else str(item)
+            memory_type = (
+                item.get("memory_type", "general")
+                if isinstance(item, dict)
+                else "general"
+            )
+            similarity = item.get("similarity", 0) if isinstance(item, dict) else 0
+            lines.append(f"[{memory_type} | 相关度{similarity}] {content}")
+        parts.append("[长期记忆召回]\n" + "\n\n".join(lines))
+
     if pr.known_elements and pr.known_elements != "暂无已知要素":
         parts.append(f"[已知案件要素]\n{pr.known_elements}")
 
@@ -387,10 +405,15 @@ async def analyze_legal_issue(
     case_n = len(pr.evaluate_retrieved_documents)
     web_n = len(pr.web_search_results)
     law_n = len(pr.laws_results)
+    memory_n = len(pr.memory_results)
+    history_len = len(pr.conversation_history)
 
     tool_log.info(
         "→ 调用工具: analyze_legal_issue",
-        detail=f"query={query[:60]} | cases={case_n}条 | web={web_n}条 | law={law_n}条",
+        detail=(
+            f"query={query[:60]} | cases={case_n}条 | web={web_n}条 | law={law_n}条"
+            f" | memory={memory_n}条 | history={history_len}字"
+        ),
     )
 
     context = _build_analysis_context(pr)

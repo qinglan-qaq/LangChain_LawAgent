@@ -38,6 +38,15 @@ MEM_NAMESPACE = ("law_agent", "memories")  # store 命名空间
 MAX_EMBED_LEN = 512  # 嵌入文本上限, 超出自动截断
 
 
+def _search_value(it: Any) -> dict:
+    """SearchItem 取值: langgraph 现行字段是 value; 旧版/自定义 store 用 item。"""
+    value = getattr(it, "value", None)
+    if isinstance(value, dict):
+        return value
+    legacy = getattr(it, "item", None)
+    return legacy if isinstance(legacy, dict) else {}
+
+
 # search_memory — BaseStore 语义搜索长期记忆; 无 store 上下文/异常降级返回空
 @tool
 @traced("tool")
@@ -90,15 +99,19 @@ async def search_memory(query: str, top_k: int = 3) -> dict:
         tool_log.error("← 工具异常: search_memory", detail=str(e)[:120])
         return {"memory_results": [], "status": "error", "count": 0}
 
-    memories = [
-        {
-            "memory_type": (it.item or {}).get("memory_type", "general"),
-            "content": it.item.get("content", "") if isinstance(it.item, dict) else str(it.item),
-            "created_at": str(it.created_at) if getattr(it, "created_at", None) else "",
-            "similarity": round(float(getattr(it, "score", 0) or 0), 4),
-        }
-        for it in items
-    ]
+    memories = []
+    for it in items:
+        value = _search_value(it)
+        memories.append(
+            {
+                "memory_type": value.get("memory_type", "general"),
+                "content": value.get("content", ""),
+                "created_at": str(it.created_at)
+                if getattr(it, "created_at", None)
+                else "",
+                "similarity": round(float(getattr(it, "score", 0) or 0), 4),
+            }
+        )
 
     top_sim = memories[0]["similarity"] if memories else 0
     tool_log.info(

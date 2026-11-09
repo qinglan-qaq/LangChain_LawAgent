@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     deepseek_flash_model: str = "deepseek-chat"
     deepseek_api_key: Optional[str] = None
     deepseek_base_url: str = "https://api.deepseek.com"
+    # 启动后台打一次极短 flash 请求, 预建 TLS/连接; 否则首个 risk_gate
+    # 冷启动可占 20s+(与推理时长无关)
+    llm_warmup_enabled: bool = True
 
     # ============ 检索: 嵌入 / 重排序 / BM25 ============
     # env 名为 MEMORY_EMBED_MODEL(历史命名, 与 db_tools 记忆索引共用)
@@ -80,6 +83,8 @@ class Settings(BaseSettings):
     # ============ 数据文件 ============
     # 法律文档目录(法条 TXT + 案例 MD), env DOCUMENTS_DIR 可覆盖
     documents_dir: str = str(_DATA_DIR / "Documents")
+    # 会话 JSON 导出目录(本地留存, 不入库); env EXPORT_DIR 可覆盖
+    export_dir: str = "./exports"
 
     # ============ 检索: 后端选择 ============
     # pgvector(本地) | pinecone;env RETRIEVER_BACKEND 覆盖
@@ -120,6 +125,8 @@ class Settings(BaseSettings):
     minor_writer_queue_max: int = 1000
     minor_writer_batch: int = 20
     minor_writer_flush_ms: int = 200
+    # 审计慢点阈值(单节点), 由 /monitor/config 下发, 前后端不双份硬编码
+    monitor_slow_node_ms: int = 30000
 
     # ============ 短期记忆 ============
     memory_recent_turns: int = 2

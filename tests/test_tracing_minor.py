@@ -120,3 +120,50 @@ def test_minor_context_meta_from_run():
     meta = tracing._minor_context_meta(run, "planner")
     assert meta["current_query"]["chars"] == 3
     assert tracing._minor_context_meta(run, "merge") == {}
+
+
+def test_finalize_writes_citation_evidence_ids(monkeypatch):
+    closed: list[dict] = []
+    monkeypatch.setattr(
+        minor_state, "enqueue_close",
+        lambda run_id, node_name, seq, **kw: closed.append(kw),
+    )
+    run = _run(mode="attorney")
+    state = AgentState(
+        query="q",
+        mode="attorney",
+        rag_documents=[{"case_number": "(2020)京01民终1号", "content": "x"}],
+    )
+    tracing._close_minor(
+        run, "finalize", 1, "ok", 7,
+        {"final_answer": "答复", "final_prompts": "prompt"}, state,
+    )
+    refs = closed[0]["refs"]
+    assert refs["citation_evidence_ids"], "终答引用要落稳定 evidence_id"
+    cite = closed[0]["output_json"]["citations"][0]
+    assert cite["resolved"] is True
+    assert cite["evidence_ids"] == refs["citation_evidence_ids"]
+
+
+def test_node_metrics_sum_child_spans(monkeypatch):
+    closed: list[dict] = []
+    monkeypatch.setattr(
+        minor_state, "enqueue_close",
+        lambda run_id, node_name, seq, **kw: closed.append(kw),
+    )
+    run = _run()
+    node_span = tracing.Span("node", "tools", started_at=1000.0)
+    child = tracing.Span(
+        "tool", "analyze_legal_issue", latency_ms=12,
+        token_usage={"prompt": 3, "completion": 4}, started_at=1000.02,
+    )
+    run.add(node_span)
+    run.add(child)
+    tracing._close_minor(
+        run, "tools", 1, "ok", 100, {}, AgentState(query="q"), span=node_span
+    )
+    metrics = closed[0]["metrics"]
+    assert metrics["child_spans"] == 1
+    assert metrics["tool_ms"] == 12
+    assert metrics["tokens"] == {"prompt": 3, "completion": 4, "total": 7}
+

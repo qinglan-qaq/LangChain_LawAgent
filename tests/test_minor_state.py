@@ -159,3 +159,31 @@ def test_rag_preview_limited():
     # tools 节点从 ToolMessage 解析, 无消息时计数为 0; planner 投影走 state
     text, _ = project_input("executor", st)
     assert "案例: 10 条" in text
+
+
+def test_analyze_prompts_record_marks_used_documents():
+    """analyze 结果只有 prompts_record, 字段名与工具返回不同。"""
+    from langchain_core.messages import ToolMessage
+
+    from lawApp_LangGraph.evidence import doc_key
+
+    pr = {
+        "evaluate_retrieved_documents": [{"case_number": "C1"}],
+        "laws_results": [{"law_title": "民法典", "article_number": "第1条"}],
+        "memory_results": [{"content": "m1"}],
+        "web_search_results": [{"title": "t1", "link": "l1"}],
+    }
+    msg = ToolMessage(
+        content=json.dumps({"final_answer": "x", "prompts_record": pr}),
+        tool_call_id="t1",
+        name="analyze_legal_issue",
+    )
+    _, out = project_output("tools", {"messages": [msg]}, _state())
+    used = {(d["kind"], d["doc_key"]) for d in out["_evidence_used_docs"]}
+    assert used == {
+        ("case", "C1"),
+        ("law", "民法典|第1条"),
+        ("memory", doc_key("memory", {"content": "m1"})),
+        ("web", "t1|l1"),
+    }
+

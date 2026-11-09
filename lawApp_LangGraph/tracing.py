@@ -193,9 +193,9 @@ def _pack(args: tuple, kwargs: dict) -> Any:
 _CONTEXT_PURPOSE = {
     "element_assess": "element_assess",
     "planner": "planner",
+    "replanner": "generic",
     "executor": "executor",
     "replan_check": "replan_check",
-    "finalize": "finalize",
     "chitchat": "chitchat",
 }
 
@@ -203,10 +203,70 @@ _CONTEXT_PURPOSE = {
 def _minor_context_meta(run: Optional["RunContext"], node_name: str) -> dict:
     if run is None:
         return {}
-    purpose = _CONTEXT_PURPOSE.get(node_name)
+    if node_name == "finalize":
+        # 终答有两个 purpose, 不能按节点名硬映射成不存在的 "finalize"
+        purpose = (
+            "finalize_assistant" if run.mode == "assistant" else "finalize_attorney"
+        )
+    else:
+        purpose = _CONTEXT_PURPOSE.get(node_name)
     if purpose and purpose in run.context_meta:
         return dict(run.context_meta[purpose])
     return {}
+
+
+def _evidence_ids(run_id: str, docs: Any) -> list[str]:
+    """紧凑文档键 → 稳定 evidence_id; 去重保序。"""
+    from lawApp_LangGraph.evidence import evidence_id_for
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in docs or []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        key = str(item.get("doc_key") or "")
+        if not kind or not key:
+            continue
+        eid = evidence_id_for(run_id, kind, key)
+        if eid not in seen:
+            seen.add(eid)
+            out.append(eid)
+    return out
+
+
+def _child_metrics(run: "RunContext", span: Span, latency_ms: Optional[int] = None) -> dict:
+    """节点窗口内的子 span 汇总(tool/llm); 仅观测旁路。"""
+    start = span.started_at or 0.0
+    window_ms = span.latency_ms if latency_ms is None else latency_ms
+    end = start + max(0, window_ms) / 1000.0 + 0.001
+    children = [
+        s
+        for s in run.spans
+        if s is not span
+        and s.started_at is not None
+        and start <= s.started_at <= end
+        and s.span_type in ("tool", "llm")
+    ]
+    if not children:
+        return {}
+    prompt = completion = 0
+    for child in children:
+        usage = child.token_usage or {}
+        prompt += int(usage.get("prompt") or 0)
+        completion += int(usage.get("completion") or 0)
+    metrics = {
+        "child_spans": len(children),
+        "tool_ms": sum(s.latency_ms for s in children if s.span_type == "tool"),
+        "llm_ms": sum(s.latency_ms for s in children if s.span_type == "llm"),
+    }
+    if prompt or completion:
+        metrics["tokens"] = {
+            "prompt": prompt,
+            "completion": completion,
+            "total": prompt + completion,
+        }
+    return metrics
 
 
 def _open_minor(run: "RunContext", node_name: str, seq: int, state: Any) -> None:
@@ -243,6 +303,7 @@ def _close_minor(
     latency_ms: int,
     ret: Any,
     state: Any,
+    span: Optional[Span] = None,
 ) -> None:
     """节点出口: 投影输出 + 入队 close; 异常/中断分支同样落行。"""
     try:
@@ -271,11 +332,55 @@ def _close_minor(
             error = None
 
         refs = {"trace_span": {"node_name": node_name, "seq": seq}}
+        metrics: dict = {}
+        if isinstance(out, dict):
+            evidence_docs = out.pop("_evidence_docs", None)
+            used_docs = out.pop("_evidence_used_docs", None)
+            citation_docs = out.pop("_citation_docs", None)
+            if evidence_docs:
+                refs["evidence_ids"] = _evidence_ids(run.run_id, evidence_docs)
+            if used_docs:
+                refs["evidence_ids_used"] = _evidence_ids(run.run_id, used_docs)
+            if citation_docs:
+                from lawApp_LangGraph.evidence import evidence_id_for
+
+                citations = []
+                cite_ids: list[str] = []
+                for c in citation_docs:
+                    if not isinstance(c, dict):
+                        continue
+                    eid = evidence_id_for(
+                        run.run_id,
+                        str(c.get("kind") or ""),
+                        str(c.get("doc_key") or ""),
+                    )
+                    cite_ids.append(eid)
+                    citations.append(
+                        {
+                            "label": str(c.get("label") or "")[:300],
+                            "type": str(c.get("type") or "case"),
+                            "evidence_ids": [eid],
+                            "resolved": True,
+                        }
+                    )
+                refs["citation_evidence_ids"] = list(dict.fromkeys(cite_ids))
+                out["citations"] = citations[:50]
         truncated = out.pop("_truncated_chars", None) if isinstance(out, dict) else None
         if truncated:
             refs["truncated_chars"] = truncated
         if isinstance(out, dict) and out.pop("_json_truncated", None):
             refs["json_truncated"] = True
+        if span is not None:
+            metrics = _child_metrics(run, span, latency_ms)
+            if span.token_usage:
+                usage = span.token_usage
+                prompt = int(usage.get("prompt") or 0)
+                completion = int(usage.get("completion") or 0)
+                metrics["tokens"] = {
+                    "prompt": prompt,
+                    "completion": completion,
+                    "total": prompt + completion,
+                }
         enqueue_close(
             run.run_id,
             node_name,
@@ -286,7 +391,7 @@ def _close_minor(
             output_text=text,
             output_json=out if isinstance(out, dict) else {"output": str(out)[:500]},
             context_meta=_minor_context_meta(run, node_name),
-            metrics={},
+            metrics=metrics,
             error=error,
             refs=refs,
         )
@@ -358,7 +463,7 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                     if run is not None and stage_seq is not None:
                         _close_minor(run, node_name, stage_seq, span.status,
                                      span.latency_ms, e,
-                                     args[0] if args else None)
+                                     args[0] if args else None, span=span)
                     raise
                 span.output = out
                 span.latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -366,7 +471,7 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                 if run is not None and stage_seq is not None:
                     _close_minor(run, node_name, stage_seq, "ok",
                                  span.latency_ms, out,
-                                 args[0] if args else None)
+                                 args[0] if args else None, span=span)
                 return out
 
             return awrapper
@@ -402,7 +507,7 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
                 if run is not None and stage_seq is not None:
                     _close_minor(run, node_name, stage_seq, span.status,
                                  span.latency_ms, e,
-                                 args[0] if args else None)
+                                 args[0] if args else None, span=span)
                 raise
             span.output = out
             span.latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -410,7 +515,7 @@ def traced(span_type: str, name: Optional[str] = None) -> Callable:
             if run is not None and stage_seq is not None:
                 _close_minor(run, node_name, stage_seq, "ok",
                              span.latency_ms, out,
-                             args[0] if args else None)
+                             args[0] if args else None, span=span)
             return out
 
         return wrapper
