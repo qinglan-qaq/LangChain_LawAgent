@@ -25,6 +25,10 @@ logs/
 pdf_outputs/
 # docx 文书生成运行时产物(同 pdf_outputs, 不入库)
 docx_outputs/
+# 会话 JSON 导出(含个人信息, 本地留存, 不入库)
+exports/
+# 演示录制媒体/音频(体积大, 本地留存; 台本与脚本仍入库)
+docs/demo/output/
 .DS_Store
 
 # ZCode 会话本地数据(plans 等, 不入库; .zcodeignore 忽略配置保留入库)
