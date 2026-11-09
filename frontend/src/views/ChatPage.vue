@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted } from 'vue'
 import { state, resetTurn, setSession, abortController, COLLAPSE_LEN, sessionsTick } from '../store'
+import { restoreSession } from '../sessionRestore'
 import { streamConsult, streamResume } from '../sse'
 import { getSessionDetail } from '../api'
 import ModeSwitch from '../components/ModeSwitch.vue'
@@ -17,8 +18,17 @@ import DocReadyModal from '../components/DocReadyModal.vue'
 import { PatternBackground } from '../components/inspira/pattern-background'
 import TypewriterText from '../components/inspira/TypewriterText.vue'
 
-onMounted(() => {
-  /* HistorySidebar 数据拉取由其自身 onMounted 负责 */
+// 刷新/带参进入时还原会话: URL 优先, 其次 localStorage 里当前模式的 sid
+onMounted(async () => {
+  const params = new URLSearchParams(window.location.search)
+  const target = params.get('session') || params.get('session_id') || state.value.sessionId
+  if (!target) return
+  try {
+    await restoreSession(target)
+    sessionsTick.value++
+  } catch (e) {
+    state.value.error = `恢复会话失败: ${String(e)} (不做兜底, 请检查会话 ID)`
+  }
 })
 
 // 思考过程跟消息走(需求1): 每个流事件后把回合级思考状态快照到当轮

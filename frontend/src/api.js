@@ -16,6 +16,14 @@ export const getSessionDetail = (sid) =>
 export const getDialogue = (sid) =>
   http.get(`/sessions/${sid}/dialogue`).then((r) => r.data)
 
+// 会话全量转录: 每轮问题/补充/终答全文 + 引用(HITL/要素同响应带出)
+export const getTranscript = (sid) =>
+  http.get(`/sessions/${sid}/transcript`).then((r) => r.data)
+
+// 会话 JSON 导出到后端本地 exports/ 目录(返回 file/bytes/sha256)
+export const exportSession = (sid) =>
+  http.post(`/sessions/${sid}/export`).then((r) => r.data)
+
 export const fetchDisclaimer = () =>
   http.get('/disclaimer').then((r) => r.data.disclaimer)
 
@@ -54,3 +62,19 @@ export const getMonitorConfig = () =>
 
 export const getMonitorEvals = () =>
   http.get('/monitor/evals').then((r) => r.data)
+
+// 统一审计视图: 一次请求拿结论/时间轴/证据/上下文/性能
+export const getAuditView = (runId, { chain = true, afterStageId = 0 } = {}) =>
+  http
+    .get(`/monitor/runs/${runId}/audit-view`, {
+      params: { chain: chain ? 1 : 0, after_stage_id: afterStageId },
+    })
+    .then((r) => r.data)
+
+// 节点审计详情: 默认不含 raw(prompt/完整 state), 原始数据 tab 传 includeRaw=true
+export const getAuditDetail = (stageId, includeRaw = false) =>
+  http
+    .get(`/monitor/stages/${stageId}/audit-detail`, {
+      params: { include_raw: includeRaw ? 1 : 0 },
+    })
+    .then((r) => r.data)

@@ -37,9 +37,19 @@ export function loadSession() {
   state.value.sessionId = localStorage.getItem(sidKey()) || ''
 }
 
+// 会话 id 同步到 URL(?session=...), 刷新/分享后可按 id 还原同一会话
+function syncSessionUrl(sid) {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (sid) url.searchParams.set('session', sid)
+  else url.searchParams.delete('session')
+  window.history.replaceState({}, '', url)
+}
+
 export function setSession(sid) {
   state.value.sessionId = sid
   if (sid) localStorage.setItem(sidKey(), sid)
+  syncSessionUrl(sid)
 }
 
 // 新建会话(任务2): 清空当前会话并移除当前模式的 sid 持久化键
@@ -47,6 +57,7 @@ export function setSession(sid) {
 export function newSession() {
   state.value.sessionId = ''
   localStorage.removeItem(sidKey())
+  syncSessionUrl('')
   state.value.messages = []
   resetTurn()
 }

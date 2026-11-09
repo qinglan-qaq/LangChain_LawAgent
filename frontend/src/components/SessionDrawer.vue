@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Motion } from 'motion-v'
 import { X } from 'lucide-vue-next'
 import CitationList from './CitationList.vue'
-import { getDialogue } from '../api'
+import { getDialogue, getTranscript, exportSession } from '../api'
 import MarkdownView from './MarkdownView.vue'
 
 // 任务4: 会话详情右侧抽屉(HistorySidebar 原内联详情块的替代载体)
@@ -52,10 +52,19 @@ onUnmounted(() => window.removeEventListener('keydown', onKey))
 const dialogue = ref(null)
 const finalSection = ref(null) // 「最终答复」details 元素, 供终答落点跳转
 
+// 全量转录: checkpoint messages 聚合的全部轮次(问题/补充/终答全文/引用)
+const transcript = ref(null)
+const exporting = ref(false)
+const exportInfo = ref(null)
+const exportError = ref('')
+
 watch(
   () => [props.open, props.detail?.session_id],
   ([open, sid]) => {
     dialogue.value = null
+    transcript.value = null
+    exportInfo.value = null
+    exportError.value = ''
     if (!open || !sid) return
     getDialogue(sid)
       .then((d) => {
@@ -67,8 +76,37 @@ watch(
       .catch(() => {
         dialogue.value = null
       })
+    getTranscript(sid)
+      .then((d) => {
+        transcript.value = d && d.turns?.length ? d : null
+      })
+      .catch(() => {
+        transcript.value = null
+      })
   },
 )
+
+// 引用可能是字符串, 也可能是对象(旧数据); 统一成可读标签
+function citationLabel(c) {
+  if (typeof c === 'string') return c
+  return String(c?.label || c?.case_number || c?.law_title || c?.title || '')
+}
+
+// 导出到后端本地 exports/ 目录; 失败只提示, 不影响抽屉其他内容
+async function onExport() {
+  const sid = props.detail?.session_id
+  if (!sid || exporting.value) return
+  exporting.value = true
+  exportError.value = ''
+  exportInfo.value = null
+  try {
+    exportInfo.value = await exportSession(sid)
+  } catch (e) {
+    exportError.value = '导出失败: ' + String(e)
+  } finally {
+    exporting.value = false
+  }
+}
 
 // 被选中的选项: selected_type 为 option 且文本一致才高亮(amber 强调色)
 function isChosen(r, opt) {
@@ -97,12 +135,67 @@ function goToFinal() {
       class="session-drawer-panel fixed right-0 top-0 h-full w-[420px] max-w-[90vw] bg-white border-l border-slate-200 shadow-xl z-40 flex flex-col text-xs"
     >
       <div class="px-4 py-3 border-b flex items-center justify-between">
-        <div class="font-mono text-slate-700">{{ detail?.session_id || '' }}</div>
-        <button class="hover:bg-slate-100 rounded p-1" @click="emit('close')">
+        <div class="min-w-0">
+          <div class="font-semibold text-slate-800 text-sm">历史记录</div>
+          <div class="font-mono text-slate-500 truncate">{{ detail?.session_id || '' }}</div>
+        </div>
+        <button class="hover:bg-slate-100 rounded p-1 shrink-0" @click="emit('close')">
           <X class="w-4 h-4" />
         </button>
       </div>
       <div class="flex-1 overflow-y-auto p-4 space-y-3">
+        <!-- 全量问答记录(checkpoint messages 聚合, 每轮含终答全文与引用) -->
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-slate-500">会话内容</span>
+          <button
+            class="px-2.5 py-1 rounded bg-slate-700 text-white hover:bg-slate-800 disabled:opacity-50"
+            :disabled="exporting"
+            @click="onExport"
+          >
+            {{ exporting ? '导出中…' : '导出 JSON' }}
+          </button>
+        </div>
+        <p v-if="exportInfo" class="text-green-700 break-all text-[11px]">
+          已导出: {{ exportInfo.file }}（{{ exportInfo.bytes }} 字节）
+        </p>
+        <p v-if="exportError" class="text-red-500 text-[11px]">{{ exportError }}</p>
+
+        <details
+          v-if="transcript?.turns?.length"
+          id="transcript-turns"
+          open
+          class="border rounded-lg p-2 bg-slate-50 text-xs"
+        >
+          <summary class="cursor-pointer text-slate-500 mb-1">
+            问答记录（{{ transcript.turns.length }} 轮）
+          </summary>
+          <div class="space-y-2">
+            <details
+              v-for="t in transcript.turns"
+              :key="t.turn"
+              class="border-l border-slate-200 pl-2"
+              :open="t.turn === transcript.turns.length"
+            >
+              <summary class="cursor-pointer text-slate-800 leading-5">
+                <span class="font-mono text-slate-500 mr-1">第{{ t.turn }}轮</span>
+                {{ t.question || '（无问题）' }}
+              </summary>
+              <div v-if="t.supplements?.length" class="text-slate-500 mt-1">
+                补充: {{ t.supplements.join('；') }}
+              </div>
+              <div v-if="t.answer" class="mt-1 max-h-72 overflow-y-auto text-slate-700">
+                <MarkdownView :text="t.answer" />
+              </div>
+              <div v-else class="text-slate-400 mt-1">未产出回答</div>
+              <div v-if="t.citations?.length" class="mt-1 text-slate-500">
+                引用 {{ t.citations.length }} 条:
+                {{ t.citations.map(citationLabel).filter(Boolean).join('、') }}
+              </div>
+              <div v-if="t.ts" class="text-slate-300 text-[10px]">{{ t.ts }}</div>
+            </details>
+          </div>
+        </details>
+
         <!-- 0. 对话日志(聚合 API, 回溯主场景, 默认展开) -->
         <details open id="dialogue-log" class="border rounded-lg p-2 bg-slate-50 text-xs">
           <summary class="cursor-pointer text-slate-500 mb-1">对话日志</summary>
