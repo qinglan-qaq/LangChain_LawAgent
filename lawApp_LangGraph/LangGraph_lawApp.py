@@ -51,7 +51,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
@@ -146,6 +146,20 @@ def get_executor_llm():
                     openai_api_base=settings.deepseek_base_url,
                 )
     return _llm_executor
+
+
+async def warmup_llm() -> None:
+    """启动后台预热 flash LLM: 建连 + 走一次极短请求。
+
+    risk_gate 是整条链第一个 LLM 调用, 冷启动时 TLS/连接/客户端初始化会
+    额外占 20s+, 容易被误判成"思考模式太慢"。启动期预热后首问不再支付。
+    """
+    try:
+        llm = get_executor_llm()
+        await llm.ainvoke([HumanMessage(content="只回复 OK")])
+        debug.info("LLM 预热完成", detail=f"model={settings.deepseek_flash_model}")
+    except Exception as e:  # 预热失败不影响主流程, 首问再付冷启动成本
+        debug.warning("LLM 预热失败", detail=str(e)[:120])
 
 
 def _structured(schema):
@@ -972,6 +986,16 @@ async def chitchat_node(state: AgentState, config: RunnableConfig = None) -> dic
         detail=f"answer_len={len(answer)}",
         result=f"elapsed={time.time() - t0:.2f}s",
     )
+    # 闲聊不经 finalize, 但同样要进会话事件流, 否则历史记录/导出缺这一轮终答
+    dialogue_log.log_event(
+        _dialogue_sid(config),
+        "final_answer",
+        {
+            "answer": answer,
+            "citations": _final_citations(state),
+            "clarify_rounds": state.clarify_rounds,
+        },
+    )
     # L13: 闲聊回应同样入对话历史(chitchat 直接 END, 不经 finalize)
     out = {"final_answer": answer}
     out.update(_assistant_message_update(state, answer))
@@ -1055,10 +1079,18 @@ def _recent_history(state: AgentState) -> str:
     msgs = getattr(state, "messages", None) or []
     lines: list[tuple[str, str]] = []
     for m in msgs:
+        # 只收敛 human/ai 对话: ToolMessage 的工具 JSON / SystemMessage
+        # 若混入会被当「用户」原话, 挤占历史预算并误导 planner 追问
+        mtype = getattr(m, "type", None)
+        if mtype == "human":
+            speaker = "用户"
+        elif mtype == "ai":
+            speaker = "助手"
+        else:
+            continue
         content = getattr(m, "content", "") or ""
         if not content:
             continue
-        speaker = "助手" if type(m).__name__ == "AIMessage" else "用户"
         lines.append((speaker, content))
     while lines and lines[-1][0] == "用户" and lines[-1][1] == (state.query or ""):
         lines.pop()
@@ -1524,7 +1556,9 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
         return {"plan": done, "current_step_index": idx + 1}
 
     # 伪工具 request_element_fill: 不调 LLM/工具, 只把缺口交给 element_fill 节点。
-    # 步骤不前进: 由 element_fill 在 resume/无缺口/达上限后统一推进。
+    # 有缺口: 步骤不前进, 由 element_fill 在 resume/达上限后推进。
+    # 无缺口: 本步目的已达成, 必须当场标记 done 并推进; 否则 pending 为空会被
+    # 路由回同一 executor 步, 直至 recursion_limit。
     if step.tool_name == _ELEMENT_FILL_TOOL:
         raw = (step.args or {}).get("keys") or []
         if isinstance(raw, str):
@@ -1533,9 +1567,24 @@ async def executor_node(state: AgentState, config: RunnableConfig = None) -> dic
         keys = [str(k) for k in raw if str(k) in valid]
         if not keys:
             keys = [e.key for e in state.case_elements.critical_missing()]
+        if not keys:
+            done = [
+                s.model_copy(update={"status": "done"}) if i == idx else s
+                for i, s in enumerate(plan)
+            ]
+            debug.info(
+                "← Executor 请求要素补全: 无缺口, 步骤完成",
+                detail=f"step={idx + 1}/{total_steps}",
+                result="→ 推进下一步",
+            )
+            return {
+                "plan": done,
+                "current_step_index": idx + 1,
+                "pending_fill_keys": [],
+            }
         debug.info(
             "← Executor 请求要素补全",
-            detail=f"keys={keys or '无'}",
+            detail=f"keys={keys}",
             result="→ element_fill",
         )
         return {"pending_fill_keys": keys}
@@ -1887,6 +1936,26 @@ def _field(item, key: str, default: str = ""):
     return getattr(item, key, default)
 
 
+def _item_key(item: Any) -> str:
+    """内容指纹: Pydantic 模型与 dict 统一为稳定 JSON 串."""
+    if hasattr(item, "model_dump"):
+        item = item.model_dump(mode="json")
+    return json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _extend_unique(old: list, new: list) -> list:
+    """累积追加并按内容去重(重规划重复检索时不膨胀分析上下文)."""
+    out = list(old or [])
+    seen = {_item_key(x) for x in out}
+    for item in new or []:
+        key = _item_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
 async def merge_node(state: AgentState, config: RunnableConfig = None) -> dict:
     """解析 ToolMessage(dict 经 json.dumps 序列化)→ 合并到 state 字段,
     记录 ToolCallRecord,推进 current_step_index。"""
@@ -1974,10 +2043,18 @@ async def merge_node(state: AgentState, config: RunnableConfig = None) -> dict:
         ]
 
     # 重建 PromptsRecord(累积态完整写入,供 analyze_legal_issue 使用)
-    merged_web = output.get("web_search_results") if isinstance(output, dict) else None
-    merged_web = merged_web or []
-    merged_law = output.get("law_results") if isinstance(output, dict) else None
-    merged_law = merged_law or []
+    # 每步 merge 只拿到当前工具增量, 必须与上一步累积态合并;
+    # 否则后一步(如 analyze)只能看到本步 output, 法条/案例/记忆全丢.
+    new_web: list = []
+    new_law: list = []
+    new_memory: list = []
+    if isinstance(output, dict):
+        new_web = output.get("web_search_results") or []
+        new_law = output.get("law_results") or []
+        new_memory = output.get("memory_results") or []
+    merged_web = _extend_unique(state.prompts_record.web_search_results, new_web)
+    merged_law = _extend_unique(state.prompts_record.laws_results, new_law)
+    merged_memory = _extend_unique(state.prompts_record.memory_results, new_memory)
     merged_eval = (
         output.get("evaluation", state.evaluation)
         if isinstance(output, dict)
@@ -1998,6 +2075,8 @@ async def merge_node(state: AgentState, config: RunnableConfig = None) -> dict:
         laws_results=merged_law,
         evaluate_retrieved_documents=eval_docs,
         known_elements=state.case_elements.digest(),
+        memory_results=merged_memory,
+        conversation_history=_recent_history(state),
     )
 
     new_plan = [
@@ -2369,11 +2448,26 @@ async def _persist_turn_memory(
         debug.warning("长期记忆写入失败(旁路)", detail=str(e)[:160])
 
 # 方案c: final_answer 事件的引用来源列表(law_results 法条 + rag_documents
-# 案例的标题/编号名称, 空则 [])
+# 案例); 每条含标注与正文, 供历史回看与本地 JSON 导出
 def _final_citations(state: AgentState) -> list:
-    cites = [f"{l.law_title} {l.article_number}".strip() for l in (state.law_results or [])]
-    cites += [(d.case_number or d.case_cause or "") for d in (state.rag_documents or [])]
-    return [c for c in cites if c]
+    cites = []
+    for law in state.law_results or []:
+        label = f"{law.law_title} {law.article_number}".strip()
+        if label:
+            cites.append(
+                {"label": label, "type": "law", "content": (law.content or "").strip()}
+            )
+    for doc in state.rag_documents or []:
+        label = (doc.case_number or doc.case_cause or "").strip()
+        if label:
+            cites.append(
+                {
+                    "label": label,
+                    "type": "case",
+                    "content": (doc.chunk_text or "").strip(),
+                }
+            )
+    return cites
 
 
 async def finalize_node(state: AgentState, config: RunnableConfig = None) -> dict:

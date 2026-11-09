@@ -94,6 +94,42 @@ def test_executor_element_fill_falls_back_to_critical_missing():
     }
 
 
+def test_executor_element_fill_no_gap_advances_step():
+    """无关键缺口时伪工具步必须完成并推进, 否则会原地路由直至 recursion_limit。"""
+    import lawApp_LangGraph.LangGraph_lawApp as app
+    from lawApp_LangGraph.state import PlanStep
+
+    state0 = _state()
+    ce = state0.case_elements.model_copy(deep=True)
+    for elem in ce.elements:
+        if elem.critical:
+            elem.status = "known"
+            elem.value = "已填写"
+    state = _state(
+        plan=[
+            PlanStep(
+                step_id=1,
+                description="补充要素",
+                tool_name="request_element_fill",
+                args={},
+            ),
+            PlanStep(step_id=2, description="分析", tool_name="analyze_legal_issue"),
+        ],
+        current_step_index=0,
+        case_elements=ce,
+    )
+    out = asyncio.run(
+        app.executor_node(state, {"configurable": {"thread_id": "T-EF3"}})
+    )
+    assert out["pending_fill_keys"] == []
+    assert out["current_step_index"] == 1, "无缺口不得停留在同一步"
+    assert out["plan"][0].status == "done"
+
+    merged = state.model_copy(update=out)
+    assert merged.current_step_index != state.current_step_index
+    assert app.route_after_executor(merged) == "executor"
+
+
 def test_route_after_executor_to_element_fill():
     import lawApp_LangGraph.LangGraph_lawApp as app
 

@@ -125,6 +125,10 @@ class PromptsRecord(BaseModel):
     laws_results: List[LawsResult] = Field(default_factory=list)
     # 已知案件要素 digest(由 merge 节点填充, 分析上下文注入)
     known_elements: str = ""
+    # 长期记忆召回结果(search_memory 输出, merge 累积, 分析上下文注入)
+    memory_results: List[Dict[str, Any]] = Field(default_factory=list)
+    # 近期对话历史快照(merge 时从 state.messages 生成, 分析上下文注入)
+    conversation_history: str = ""
 
 
 #  案件要素清单 — 子项目A 澄清循环的数据基础
