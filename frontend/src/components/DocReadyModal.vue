@@ -15,11 +15,9 @@ function close() { state.value.showDocReady = false }
       <div class="text-[10px] text-slate-400 mb-4">内容由 AI 生成, 需执业律师复核后使用</div>
       <div class="flex gap-2">
         <a id="btn-download-docx-modal" :href="fileUrl('docx')" download
-           class="btn flex-1 rounded-lg bg-amber-600 text-white py-1.5 text-center"
-           @click="close">下载 Word</a>
+           class="btn flex-1 rounded-lg bg-amber-600 text-white py-1.5 text-center">下载 Word</a>
         <a id="btn-download-pdf-modal" :href="fileUrl('pdf')" download
-           class="btn flex-1 rounded-lg bg-slate-700 text-white py-1.5 text-center"
-           @click="close">下载 PDF</a>
+           class="btn flex-1 rounded-lg bg-slate-700 text-white py-1.5 text-center">下载 PDF</a>
       </div>
       <button id="btn-doc-ready-close"
               class="mt-3 w-full text-xs text-slate-400 underline"

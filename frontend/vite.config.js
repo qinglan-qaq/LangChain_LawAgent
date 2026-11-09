@@ -10,6 +10,9 @@ export default defineConfig({
   plugins: [vue(), tailwindcss()],
   server: {
     port: 5173,
+    // 仅本机访问: 只绑 IPv4 回环, 不暴露到局域网(案情含隐私).
+    // 固定用 http://127.0.0.1:5173 访问; localhost 可能解析到 ::1 而连不上.
+    host: '127.0.0.1',
     proxy: {
       '/api': {
         target: `http://127.0.0.1:${backendPort}`,

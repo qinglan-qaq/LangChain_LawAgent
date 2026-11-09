@@ -20,11 +20,15 @@ const isBranch = computed(
 const isArray = computed(() => Array.isArray(props.node))
 const open = ref(props.depth < props.defaultOpen)
 
-// data 引用变化时(切阶段/切 run)按层级重置展开态
-watch(
-  () => props.node,
-  () => { open.value = props.depth < props.defaultOpen }
-)
+// 2s 轮询会用同结构的新对象替换 node; 按引用监听会误判为用户切换,
+// 把刚展开的节点又折回去。只监听结构(数组长度/对象键), 值更新不动展开态。
+const shape = computed(() => {
+  if (!isBranch.value) return ''
+  return isArray.value
+    ? `a:${props.node.length}`
+    : `o:${Object.keys(props.node).join('\u0000')}`
+})
+watch(shape, () => { open.value = props.depth < props.defaultOpen })
 
 const entries = computed(() =>
   isArray.value
