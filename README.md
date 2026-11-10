@@ -4,7 +4,7 @@
 
 <div align="center">
 
-基于 **LangGraph Plan & Execute** 架构的婚姻家庭法 AI 咨询系统，集成混合检索增强生成 (CRAG)、人机协同审批 (HITL)、长期记忆、Word 法律文书生成、对话日志审计与 Vue3 流式前端。
+基于 **LangGraph Plan & Execute** 架构的婚姻家庭法 AI 咨询系统，集成混合检索增强生成 (CRAG)、人机协同审批 (HITL)、长期记忆、Word 法律文书生成、统一审计监控、会话恢复与 Vue3 流式前端。
 
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat&logo=python)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -15,10 +15,24 @@
 
 </div>
 
+<p align="center">
+  <a href="https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65">
+    <img src="docs/demo/cover/variants/v4-paper-serif-1440x1080.png" alt="从提问到起诉状 — lawApp_LangGraph 全功能演示" width="760">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65">
+    <img src="https://img.shields.io/badge/Bilibili-观看演示视频-00A1D6?logo=bilibili&logoColor=white" alt="Bilibili 演示视频">
+  </a>
+</p>
+
 ---
 
 ## 目录
 
+- [演示视频](#演示视频)
+- [最近更新](#最近更新)
 - [架构概览](#架构概览)
 - [核心亮点](#核心亮点)
 - [Agent 工作流](#agent-工作流)
@@ -34,6 +48,33 @@
 - [快速开始](#快速开始)
 - [项目结构](#项目结构)
 - [技术栈](#技术栈)
+
+---
+
+## 演示视频
+
+[![Bilibili 演示视频](https://img.shields.io/badge/Bilibili-观看演示视频-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65)
+
+**▶ [在 B 站观看项目演示](https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65)**（真实后端、无 mock 数据）
+
+项目当前覆盖的核心流程：
+
+1. **代理律师多轮**：一句「我想离婚」触发要素澄清；补充结婚、房产、孩子、证据后从断点续跑，产出可执行的诉讼策略；
+2. **律师助理文书**：起诉状 74 字段、答辩状 41 字段预览，律师确认后生成 Word，并下载 PDF；
+3. **监控统一审计**：四张结论卡（流程 / 证据链 / 上下文 / 性能）、父子 run 时间轴、证据板、上下文矩阵、节点抽屉与深链；
+4. **历史记录**：会话列表、详情抽屉、问答记录、JSON 导出；
+5. **会话恢复**：手动输入会话 ID 或打开 `?session=` 链接，原样回放问答与要素。
+
+---
+
+## 最近更新
+
+**2026-11**
+
+- **监控统一审计**：以父子 run 为单位汇总流程、证据链、上下文与性能四类结论；时间轴、证据缺口与慢点可下钻到节点详情
+- **会话恢复**：通过会话 ID 或 `?session=` 链接恢复问答与案件要素，历史记录支持问答回看与导出
+- **文书交付**：起诉状 / 答辩状字段预览与律师确认，生成 Word 并下载 PDF
+- **多轮澄清**：要素缺失先问后答，补充后从断点继续，不重跑已完成的检索与分析
 
 ---
 
@@ -74,7 +115,8 @@
 | 亮点 | 说明 |
 |------|------|
 | **Plan & Execute 柔性管线** | Agent 根据问题复杂度自主决策——闲聊跳过执行直接回答，法律问题走完整 CRAG 管线 |
-| **人机协同 (HITL) 审批** | 7 类中断-恢复交互（问诊补全/中途澄清/高风险/降级/预算超限/PDF 报告/Word 文书确认），律师决策后基于 PostgreSQL checkpoint 无损续流 |
+| **人机协同 (HITL) 审批** | 8 类中断-恢复交互（问诊补全/中途澄清/关键字段补全/高风险/降级/预算超限/PDF 报告/Word 文书确认），律师决策后基于 PostgreSQL checkpoint 无损续流 |
+| **统一审计监控** | 以父子 run 为单位的四结论卡（流程/证据链/上下文/性能）+ 时间轴、证据板、上下文矩阵、节点抽屉；慢点、重试、截断、证据缺口显式标注，不做「看起来成功」 |
 | **三级优雅降级** | JSON 解析失败 → 默认计划兜底；LLM 调用失败 → 参数映射兜底；语义判断失败 → 规则兜底；扩展：MCP 掉线降级、文书模板缺失整链回退纯咨询 |
 | **质量闭环** | 检索 → 评估(三档) → 不足则联网补充 → 重规划 → 再执行，形成自纠正反馈环 |
 | **双模式 + 律师助理** | 代理律师咨询模式（留案例+法条双检索）与律师助理模式（留法条、去类案、末步文书生成）共用一套图 |
@@ -99,7 +141,7 @@
 | **SSE 流式推送** | 实时推送推理 token、计划进度、工具调用、interrupt、文书生成事件，前端零刷新全流程可视 |
 | **对话日志审计** | 全流程事件流落库（问答/澄清/确认决策/终答/文书），聚合 API 按轮次时间线还原，支持服务端中断后前端无损恢复 |
 | **LLM 追踪** | `traced` 装饰器包裹全节点/工具/LLM 调用，trace run/span 落 PostgreSQL，兼容 LangSmith 观测 |
-| **测试背书** | 34 个测试文件、311 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界 + RRF 融合/检索/标定 + 监控 v2），回归全绿 |
+| **测试背书** | 37 个测试文件、338 条用例（真实 PostgreSQL 端到端 + 图内流程 + 安全边界 + RRF 融合/检索/标定 + 监控 v2），回归全绿 |
 | **并发安全** | 基于 LangGraph PostgreSQL 检查点实现会话级隔离与中断恢复 |
 
 ---
@@ -335,7 +377,12 @@ python scripts/run_eval.py --suite calibration --label <标签>                 
 | `/sessions` | GET | 最近 50 条会话列表（session_id / meta / last_active_at） |
 | `/sessions/{session_id}` | GET | 会话详情（图状态快照 + 当前 interrupt） |
 | `/sessions/{session_id}/dialogue` | GET | 对话日志聚合：按轮次时间线还原问答/澄清/确认决策/终答/文书 |
+| `/sessions/{session_id}/transcript` | GET | 全量转录：checkpoint messages 聚合每轮问题/补充/终答全文与结构化引用 |
+| `/sessions/{session_id}/export` | POST | 导出会话 JSON 到本地 `exports/`（返回 file/bytes/sha256，含 PII、已 gitignore） |
 | `/sessions/{session_id}/docx/latest` | GET | 下载本轮最新生成的 Word 文书（路径白名单，404 三态） |
+| `/sessions/{session_id}/doc/{format}` | GET | 下载 Word / PDF 文书（format=docx\|pdf；PDF 需本机 Microsoft Word） |
+| `/monitor/runs/{run_id}/audit-view` | GET | 统一审计：四结论卡 + 时间轴分组 + 证据板 + 上下文矩阵 + 性能/异常（chain=1 聚合父子 run） |
+| `/monitor/stages/{stage_id}/audit-detail` | GET | 节点审计详情；`include_raw=1` 才加载原始 prompt/state |
 | `/disclaimer` | GET | 免责声明文本 |
 | `/ask/resume` | POST | HITL 恢复：interrupt 回复经 `normalize_resume` 归一后续跑图 |
 | `/ask/resume/stream` | POST | HITL 恢复（SSE 流式版），interrupt 回复后续流推送 |
@@ -427,9 +474,10 @@ AgentState         # 会话标识 · 请求上下文 · 计划执行 · 输出 �
 - **1:1 内容扩展**：`stage_chain`(SCD2 生命周期) 每行配一条 `minor_states`，记录输入/输出投影、`output_json`、上下文信封 meta、route、error 与 refs；缺失行由 API 合成占位，时间轴不留空行
 - **单事务写入**：`MonitorWriter` 单队列 / 单消费者 / 单事务批量落库，满队列丢弃，观测旁路不阻断主流程
 - **投影安全**：白名单 + 黑名单清洗，文本 2000 字 / JSON 64KB 上限，原始 detail 通过 `refs` 指回 `trace_spans`
-- **链式时间轴**：`GET /monitor/runs/{run_id}/timeline?chain=1` 沿 `parent_run_id` 最多回溯 3 层，HITL 续跑之间插入“用户回答”分隔条；返回执行/等待人工/开销三段时长构成
-- **增量与详情**：`GET /monitor/runs/{run_id}/minor-states?after_stage_id=` 供前端 2s 轮询；`GET /monitor/stages/{stage_id}/detail` 返回阶段内容 + span 原文 + 完整终答；`GET /monitor/config` 下发标定阈值与文本上限
-- **前端**：垂直时间轴 + 耗时占比条 + 时间轴下方详情面板（`MonitorTimeline` / `MinorStateCard` / `MinorStateDetail` / `ContextMetaPanel`），支持 `#run=<id>&stage=<id>` 深链
+- **统一审计**：`GET /monitor/runs/{run_id}/audit-view?chain=1` 一次返回四结论卡（流程/证据链/上下文/性能）、时间轴分组、证据板、上下文矩阵、性能与异常；`GET /monitor/stages/{stage_id}/audit-detail` 返回节点决策/证据/上下文/调用，原始 prompt 与完整 state 仅在 `include_raw=1` 时加载
+- **证据链闭环**：检索文档、实际进入分析的文档、终答引用统一生成稳定 `evidence_id`；「检索到但未注入分析」进入缺口列表，点击可定位到对应阶段
+- **链式时间轴**：沿 `parent_run_id` 最多回溯 3 层，HITL 续跑之间标注人工等待时长；执行 / 等待人工 / 框架开销分开计量
+- **前端**：统一审计页 = 运行头部与父子链 + 四结论卡 + 五段式（时间轴/证据/上下文/性能/异常）+ 六 tab 节点抽屉；支持 `#run=<id>&stage=<id>&tab=<tab>` 深链，2s 增量刷新；`VITE_MONITOR_AUDIT=0` 可回退旧版时间轴
 
 ---
 
@@ -440,7 +488,7 @@ AgentState         # 会话标识 · 请求上下文 · 计划执行 · 输出 �
 | 依赖 | 版本/说明 | 用途 |
 |------|-----------|------|
 | Python | 3.11+ | 后端运行时（依赖版本锁定见 `requirements.lock` / conda 导出 `environment.lock`） |
-| Node.js | 18+ | 前端构建（Vue 3 + Vite 7 + Tailwind v4） |
+| Node.js | 20.19+ / 22.12+ | 前端构建（Vue 3 + Vite 8 + Tailwind v4） |
 | PostgreSQL 15 + pgvector | 推荐 docker 部署 | 会话 checkpoint / 对话日志 / LLM 追踪 / 长期记忆 / 法条检索 / 评测记录 |
 | Pinecone | Serverless 账号 | 案例混合检索（稠密+稀疏双向量索引） |
 | DeepSeek API Key | — | LLM 规划（Pro）与执行（Flash） |
@@ -556,7 +604,7 @@ law-search 工具经 MCP 挂载（http / stdio 双传输），server 掉线时�
 ### 测试与评测
 
 ```bash
-python -m pytest tests/ -q                  # 全量回归(311 用例, 需 PG 在线)
+python -m pytest tests/ -q                  # 全量回归(338 用例, 需 PG 在线)
 python scripts/run_eval.py --suite retrieval --label <标签> [--baseline <旧标签>]  # 检索指标
 python scripts/run_eval.py --suite calibration --label <标签>                      # 三档阈值标定
 ```
@@ -583,14 +631,19 @@ LangChain_LawAgent-main/
 │   ├── dialogue_log.py          # 对话日志事件流 (session_dialogue_events 落库 + 聚合)
 │   ├── doc_templates.py         # docx 模板配置层 (YAML 加载 / 路径 / 双向对账 / 可用性)
 │   ├── tracing.py               # LLM 追踪 (traced 装饰器, run/span 落库)
+│   ├── minor_state.py           # 节点级内容投影 (minor_states 写入模型)
+│   ├── audit_view.py            # 统一审计只读 builder (四结论卡/时间轴/证据/上下文/性能)
+│   ├── evidence.py              # evidence_id 稳定生成与文档收集
+│   ├── transcript.py            # 会话全量转录聚合 + 本地 JSON 导出
 │   ├── mcp/                     # MCP 子包（law-search server + 客户端挂载）
 │   │   ├── mcp_client.py        # MCP 客户端挂载，连接失败时优雅降级
 │   │   └── mcp_server.py        # MCP server（http / stdio 两种传输）
 │   ├── .env.example             # 环境变量模板
 │   │
 │   ├── FastAPI/                 # Web 服务层
-│   │   ├── api.py               # FastAPI 应用 (v3.0.0)，18 端点 + CORS + 生命周期
+│   │   ├── api.py               # FastAPI 应用 (v3.1.0)，32 端点 + 生命周期
 │   │   ├── model.py             # 请求 / 响应模型
+│   │   ├── audit_model.py       # 统一审计响应模型 (AuditView / AuditNodeDetail)
 │   │   ├── utils.py             # 会话管理、interrupt 归一化、响应构建、SSE 事件队列
 │   │   ├── loop.py              # Windows 事件循环工厂 (Selector)
 │   │   └── logging.py           # 5类日志 + contextvars 会话透传
@@ -627,7 +680,7 @@ LangChain_LawAgent-main/
 │   ├── prompts_test.ipynb       # 提示词
 │   └── tools_test.ipynb         # 工具集
 │
-├── tests/                       # pytest（311 用例，根目录执行 python -m pytest tests/ -q）
+├── tests/                       # pytest（338 用例，根目录执行 python -m pytest tests/ -q）
 │   ├── test_engineering.py      # 配置 / 导入 / 工程约束
 │   ├── test_smoke.py            # 冒烟（含图拓扑 / 工具注册表断言）
 │   ├── test_plan_parse.py       # planner JSON 解析 / 模型畸形修复 / 失败必须 raise
@@ -654,12 +707,14 @@ LangChain_LawAgent-main/
 ├── frontend/                    # Vue 3 + Vite + Tailwind v4 单界面（双模式聊天）
 │   ├── src/
 │   │   ├── App.vue              # 单界面组装（模式切换 / SSE 分发 / HITL / docx 弹窗接线）
-│   │   ├── api.js               # axios REST 封装
+│   │   ├── api.js               # axios REST 封装（含 transcript / export / audit）
 │   │   ├── sse.js               # fetch 流式 SSE 帧解析
-│   │   ├── store.js             # reactive 全局状态 + 打字机 composable
-│   │   └── components/          # 18 业务组件（ChatView / InterruptPanel / SessionDrawer
-│   │                            #   / MarkdownView / DocxGenModal / DocxDoneToast 等）
-│   └── vite.config.js           # /api proxy → 127.0.0.1:8000
+│   │   ├── store.js             # reactive 全局状态 + URL 会话同步
+│   │   ├── sessionRestore.js    # 会话 ID 恢复：模式切换 / 问答回放 / 要素与中断
+│   │   └── components/          # 业务组件 + audit/（四结论卡 / 时间轴 / 证据板 / 节点抽屉）
+│   │                            #   ChatView / InterruptPanel / SessionDrawer / MarkdownView
+│   │                            #   DocxGenModal / DocReadyModal / MonitorView 等
+│   └── vite.config.js           # 仅绑 127.0.0.1；/api proxy → 127.0.0.1:8000
 │
 └── docs/
     ├── PROJECT_OVERVIEW.md      # 设计文档 (§1-§15)

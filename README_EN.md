@@ -4,7 +4,7 @@
 
 <div align="center">
 
-A marriage & family law AI consultation system built on the **LangGraph Plan & Execute** architecture, integrating hybrid retrieval-augmented generation with CRAG (Corrective RAG), human-in-the-loop (HITL) approval, long-term memory, Word legal document generation, dialogue-log auditing, and a Vue3 streaming frontend.
+A marriage & family law AI consultation system built on the **LangGraph Plan & Execute** architecture, integrating hybrid retrieval-augmented generation with CRAG (Corrective RAG), human-in-the-loop (HITL) approval, long-term memory, Word legal document generation, unified audit monitoring, session restore, and a Vue3 streaming frontend.
 
 [![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat&logo=python)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -15,10 +15,24 @@ A marriage & family law AI consultation system built on the **LangGraph Plan & E
 
 </div>
 
+<p align="center">
+  <a href="https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65">
+    <img src="docs/demo/cover/variants/v4-paper-serif-1440x1080.png" alt="From Question to Complaint — lawApp_LangGraph full demo" width="760">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65">
+    <img src="https://img.shields.io/badge/Bilibili-Watch%20Demo-00A1D6?logo=bilibili&logoColor=white" alt="Bilibili demo video">
+  </a>
+</p>
+
 ---
 
 ## Table of Contents
 
+- [Demo Video](#demo-video)
+- [What's New](#whats-new)
 - [Architecture Overview](#architecture-overview)
 - [Highlights](#highlights)
 - [Agent Workflow](#agent-workflow)
@@ -34,6 +48,33 @@ A marriage & family law AI consultation system built on the **LangGraph Plan & E
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Tech Stack](#tech-stack)
+
+---
+
+## Demo Video
+
+[![Bilibili demo video](https://img.shields.io/badge/Bilibili-Watch%20Demo-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65)
+
+**▶ [Watch the project demo on Bilibili](https://www.bilibili.com/video/BV1esWt6AE5f?vd_source=e04af1edae23838ae7525efc347e8f65)** (real backend, no mock data)
+
+The project currently covers these core flows:
+
+1. **Attorney mode, multi-turn**: a sparse "I want a divorce" triggers element clarification; after the facts are supplied, the graph resumes from the checkpoint and produces an actionable litigation strategy.
+2. **Paralegal documents**: 74-field complaint and 41-field defense previews, lawyer confirmation, then Word generation and PDF download.
+3. **Unified audit monitor**: four verdict cards (flow / evidence / context / performance), parent-child run timeline, evidence board, context matrix, node drawer, and deep links.
+4. **History**: session list, detail drawer, Q&A records, and JSON export.
+5. **Session restore**: restore by session ID or by opening a `?session=` URL, replaying the dialogue and case elements.
+
+---
+
+## What's New
+
+**November 2026**
+
+- **Unified audit monitor**: aggregates flow, evidence, context, and performance verdicts per parent-child run chain; timeline, evidence gaps, and slow nodes drill down to node details
+- **Session restore**: restore dialogue and case elements via session ID or a `?session=` link; history supports review and export
+- **Document delivery**: complaint / defense field previews and lawyer confirmation, then Word generation and PDF download
+- **Multi-turn clarification**: ask before answering when facts are missing, then resume from the checkpoint without re-running completed retrieval and analysis
 
 ---
 
@@ -74,7 +115,8 @@ User request → FastAPI → LangGraph StateGraph
 | Highlight | Description |
 |------|------|
 | **Flexible Plan & Execute pipeline** | The agent decides autonomously by question complexity — chitchat skips execution and answers directly; legal questions run the full CRAG pipeline |
-| **HITL approval** | 7 interrupt-resume interactions (intake completion / mid-run clarification / high-risk / degradation / budget overrun / PDF report / Word document confirmation); after the lawyer's decision the stream resumes losslessly from PostgreSQL checkpoints |
+| **HITL approval** | 8 interrupt-resume interactions (intake completion / mid-run clarification / key-field completion / high-risk / degradation / budget overrun / PDF report / Word document confirmation); after the lawyer's decision the stream resumes losslessly from PostgreSQL checkpoints |
+| **Unified audit monitor** | Four verdict cards per run chain (flow / evidence / context / performance) plus timeline, evidence board, context matrix, and node drawer; slow nodes, retries, truncation, and evidence gaps are surfaced explicitly instead of being painted as success |
 | **Three-level graceful degradation** | JSON parse failure → default plan fallback; LLM call failure → parameter-mapping fallback; semantic judgment failure → rule fallback; plus MCP-offline degradation and whole-chain document-template fallback to pure consultation |
 | **Quality loop** | Retrieve → evaluate (three tiers) → supplement with web search if insufficient → replan → re-execute: a self-correcting feedback loop |
 | **Dual mode + paralegal** | Attorney-consultation mode (case + statute dual retrieval) and paralegal mode (statutes only, no similar-case lookup, final step generates a document) share one graph |
@@ -99,7 +141,7 @@ User request → FastAPI → LangGraph StateGraph
 | **SSE streaming** | Real-time push of reasoning tokens, plan progress, tool calls, interrupts, document events — zero-refresh full-process visibility in the frontend |
 | **Dialogue-log audit** | Full event stream persisted (Q&A / clarification / confirmation decisions / final answer / documents), aggregate API restores per-round timelines; frontend recovers losslessly after server interruption |
 | **LLM tracing** | `traced` decorator wraps all nodes/tools/LLM calls; trace runs/spans stored in PostgreSQL, LangSmith-compatible |
-| **Test-backed** | 34 test files, 311 cases (real PostgreSQL end-to-end + in-graph flows + security boundaries + RRF fusion/retrieval/calibration), all green |
+| **Test-backed** | 37 test files, 338 cases (real PostgreSQL end-to-end + in-graph flows + security boundaries + RRF fusion/retrieval/calibration), all green |
 | **Concurrency safety** | Session-level isolation and interrupt recovery built on LangGraph PostgreSQL checkpoints |
 
 ---
@@ -335,7 +377,12 @@ The system provides **9 local tools** (plus a law-search tool mounted from an MC
 | `/sessions` | GET | Last 50 sessions (session_id / meta / last_active_at) |
 | `/sessions/{session_id}` | GET | Session detail (graph state snapshot + current interrupt) |
 | `/sessions/{session_id}/dialogue` | GET | Dialogue-log aggregation: per-round timeline of Q&A / clarifications / decisions / answers / documents |
+| `/sessions/{session_id}/transcript` | GET | Full transcript: checkpoint messages aggregated into per-round question / supplements / full answer / structured citations |
+| `/sessions/{session_id}/export` | POST | Export session JSON to local `exports/` (file/bytes/sha256; contains PII, gitignored) |
 | `/sessions/{session_id}/docx/latest` | GET | Download the latest generated Word document (path whitelist, 404 states) |
+| `/sessions/{session_id}/doc/{format}` | GET | Download Word / PDF document (format=docx\|pdf; PDF requires local Microsoft Word) |
+| `/monitor/runs/{run_id}/audit-view` | GET | Unified audit: four verdict cards + timeline groups + evidence board + context matrix + performance/anomalies (chain=1 aggregates parent-child runs) |
+| `/monitor/stages/{stage_id}/audit-detail` | GET | Node audit detail; raw prompt/state loaded only with `include_raw=1` |
 | `/disclaimer` | GET | Disclaimer text |
 | `/ask/resume` | POST | HITL resume: interrupt reply normalized by `normalize_resume`, graph continues |
 | `/ask/resume/stream` | POST | HITL resume (SSE streaming variant) |
@@ -428,9 +475,10 @@ Console format (ANSI colored):
 - **1:1 content extension**: every `stage_chain` row (SCD2 lifecycle) has one `minor_states` row with input/output projections, `output_json`, context-envelope meta, route, error and refs; missing rows are synthesized as placeholders so the timeline never shows empty rows
 - **Single-transaction writer**: `MonitorWriter` uses one queue / one consumer / one transaction per batch; a full queue drops observations and never blocks the main flow
 - **Projection safety**: whitelist + blacklist sanitization, 2000-char text / 64KB JSON caps; raw detail is referenced back to `trace_spans`
-- **Chained timeline**: `GET /monitor/runs/{run_id}/timeline?chain=1` follows `parent_run_id` up to 3 layers and inserts a "user answer" divider between HITL resumes; returns execution / wait-human / overhead composition
-- **Incremental + detail**: `GET /monitor/runs/{run_id}/minor-states?after_stage_id=` for 2s frontend polling; `GET /monitor/stages/{stage_id}/detail` returns content + raw span + full final answer; `GET /monitor/config` ships calibrated thresholds and text limits
-- **Frontend**: vertical timeline + duration composition bars + detail panel below the timeline (`MonitorTimeline` / `MinorStateCard` / `MinorStateDetail` / `ContextMetaPanel`), with `#run=<id>&stage=<id>` deep links
+- **Unified audit**: `GET /monitor/runs/{run_id}/audit-view?chain=1` returns four verdict cards (flow / evidence / context / performance), timeline groups, evidence board, context matrix, performance and anomalies in one response; `GET /monitor/stages/{stage_id}/audit-detail` returns node decision / evidence / context / calls, loading raw prompts and full state only when `include_raw=1`
+- **Evidence-chain closure**: retrieved documents, documents actually used in analysis, and final citations share stable `evidence_id`s; "retrieved but not injected into analysis" entries go into the gap list and can jump to the corresponding stage
+- **Chained timeline**: follows `parent_run_id` up to 3 layers and labels human wait time between HITL resumes; execution / human wait / framework overhead are measured separately
+- **Frontend**: unified audit page = run header and parent chain + four verdict cards + five sections (timeline / evidence / context / performance / anomalies) + six-tab node drawer; deep links `#run=<id>&stage=<id>&tab=<tab>`, 2s incremental refresh; `VITE_MONITOR_AUDIT=0` falls back to the legacy timeline
 
 ---
 
@@ -441,7 +489,7 @@ Console format (ANSI colored):
 | Dependency | Version / Notes | Used for |
 |------|------|------|
 | Python | 3.11+ | Backend runtime (pinned versions in `requirements.lock` / conda export `environment.lock`) |
-| Node.js | 18+ | Frontend build (Vue 3 + Vite 7 + Tailwind v4) |
+| Node.js | 20.19+ / 22.12+ | Frontend build (Vue 3 + Vite 8 + Tailwind v4) |
 | PostgreSQL 15 + pgvector | docker recommended | Session checkpoints / dialogue logs / LLM tracing / long-term memory / statute search / eval records |
 | Pinecone | Serverless account | Case hybrid retrieval (dense+sparse dual-vector index) |
 | DeepSeek API key | — | LLM planning (Pro) and execution (Flash) |
@@ -557,7 +605,7 @@ The law-search tool is mounted via MCP (http / stdio transports); if the server 
 ### Tests & Evaluation
 
 ```bash
-python -m pytest tests/ -q                  # full regression (311 cases, requires PG online)
+python -m pytest tests/ -q                  # full regression (338 cases, requires PG online)
 python scripts/run_eval.py --suite retrieval --label <label> [--baseline <old-label>]  # retrieval metrics
 python scripts/run_eval.py --suite calibration --label <label>                          # tier-threshold calibration
 ```
@@ -584,6 +632,10 @@ LangChain_LawAgent-main/
 │   ├── dialogue_log.py          # dialogue-log event stream (session_dialogue_events + aggregation)
 │   ├── doc_templates.py         # docx template config (YAML loading / paths / reconciliation)
 │   ├── tracing.py               # LLM tracing (traced decorator, runs/spans persisted)
+│   ├── minor_state.py           # node-level content projection (minor_states writer model)
+│   ├── audit_view.py            # unified-audit read-only builder (verdicts/timeline/evidence/context/performance)
+│   ├── evidence.py              # stable evidence_id generation and document collection
+│   ├── transcript.py            # full session transcript aggregation + local JSON export
 │   ├── eval_metrics.py          # retrieval metrics (hit_rate/MRR/P/R/F1 + threshold calibration helpers)
 │   ├── mcp/                     # MCP subpackage (law-search server + client mount)
 │   │   ├── mcp_client.py        # MCP client mount, graceful degradation on connect failure
@@ -591,8 +643,9 @@ LangChain_LawAgent-main/
 │   ├── .env / .env.example      # env files / template
 │   │
 │   ├── FastAPI/                 # web service layer
-│   │   ├── api.py               # FastAPI app (v3.0.0), 18 endpoints + CORS + lifecycle
+│   │   ├── api.py               # FastAPI app (v3.1.0), 32 endpoints + lifecycle
 │   │   ├── model.py             # request / response models
+│   │   ├── audit_model.py       # unified-audit response models (AuditView / AuditNodeDetail)
 │   │   ├── utils.py             # session mgmt, interrupt normalization, response building, SSE queues
 │   │   ├── loop.py              # Windows event-loop factory (Selector)
 │   │   └── logging.py           # 5 loggers + contextvars session propagation
@@ -623,7 +676,7 @@ LangChain_LawAgent-main/
 │
 ├── notebooks/                   # experiment & debug notebooks
 │
-├── tests/                       # pytest (311 cases; run from root: python -m pytest tests/ -q)
+├── tests/                       # pytest (338 cases; run from root: python -m pytest tests/ -q)
 │   ├── test_engineering.py      # config / imports / engineering constraints
 │   ├── test_smoke.py            # smoke (graph topology / tool registry assertions)
 │   ├── test_plan_parse.py       # planner JSON parsing / malformed-output repair / fail-loud
@@ -650,12 +703,14 @@ LangChain_LawAgent-main/
 ├── frontend/                    # Vue 3 + Vite + Tailwind v4 single-page app (dual-mode chat)
 │   ├── src/
 │   │   ├── App.vue              # single-page assembly (mode switching / SSE dispatch / HITL / docx modals)
-│   │   ├── api.js               # axios REST wrapper
+│   │   ├── api.js               # axios REST wrapper (incl. transcript / export / audit)
 │   │   ├── sse.js               # fetch-based SSE frame parser
-│   │   ├── store.js             # reactive global state + typewriter composable
-│   │   └── components/          # 18 business components (ChatView / InterruptPanel / SessionDrawer
-│   │                            #   / MarkdownView / DocxGenModal / DocxDoneToast etc.)
-│   └── vite.config.js           # /api proxy → 127.0.0.1:8000
+│   │   ├── store.js             # reactive global state + URL session sync
+│   │   ├── sessionRestore.js    # session-ID restore: mode switch / Q&A replay / elements & interrupts
+│   │   └── components/          # business components + audit/ (verdict cards / timeline / evidence / node drawer)
+│   │                            #   ChatView / InterruptPanel / SessionDrawer / MarkdownView
+│   │                            #   DocxGenModal / DocReadyModal / MonitorView etc.
+│   └── vite.config.js           # binds 127.0.0.1 only; /api proxy → 127.0.0.1:8000
 │
 └── docs/
     ├── PROJECT_OVERVIEW.md      # design doc (§1-§15)
